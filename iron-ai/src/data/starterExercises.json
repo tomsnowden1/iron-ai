@@ -1,0 +1,50 @@
+[
+  { "name": "Barbell Back Squat", "muscle_group": "Legs", "default_sets": 3, "default_reps": 5, "video_url": "https://youtu.be/gcNh17Ckjgg" },
+  { "name": "Front Squat", "muscle_group": "Legs", "default_sets": 3, "default_reps": 5, "video_url": "https://youtu.be/tlfgu7yM5rQ" },
+  { "name": "Goblet Squat", "muscle_group": "Legs", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/6xwGFn-J_QA" },
+  { "name": "Romanian Deadlift", "muscle_group": "Back", "default_sets": 3, "default_reps": 8, "video_url": "https://youtu.be/2SHsk9AzdjA" },
+  { "name": "Conventional Deadlift", "muscle_group": "Back", "default_sets": 3, "default_reps": 5, "video_url": "https://youtu.be/-4qRntuXBSc" },
+  { "name": "Trap Bar Deadlift", "muscle_group": "Back", "default_sets": 3, "default_reps": 5, "video_url": "https://youtu.be/1jYH1dZ3YpI" },
+  { "name": "Hip Thrust", "muscle_group": "Glutes", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/SEdqd1n0cvg" },
+  { "name": "Bulgarian Split Squat", "muscle_group": "Legs", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/2C-uNgKwPLE" },
+  { "name": "Walking Lunges", "muscle_group": "Legs", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/QOVaHwm-Q6U" },
+  { "name": "Leg Press", "muscle_group": "Legs", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/IZxyjW7MPJQ" },
+  { "name": "Leg Extension", "muscle_group": "Legs", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/YyvSfVjQeL0" },
+  { "name": "Leg Curl", "muscle_group": "Legs", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/1Tq3QdYUuHs" },
+  { "name": "Standing Calf Raise", "muscle_group": "Calves", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/-M4-G8p8fmc" },
+
+  { "name": "Bench Press", "muscle_group": "Chest", "default_sets": 3, "default_reps": 8, "video_url": "https://youtu.be/rT7DgCr-3pg" },
+  { "name": "Incline Dumbbell Press", "muscle_group": "Chest", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/8iPEnn-ltC8" },
+  { "name": "Dumbbell Bench Press", "muscle_group": "Chest", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/VmB1G1K7v94" },
+  { "name": "Push Up", "muscle_group": "Chest", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/IODxDxX7oi4" },
+  { "name": "Chest Fly (Dumbbell)", "muscle_group": "Chest", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/eozdVDA78K0" },
+  { "name": "Cable Fly", "muscle_group": "Chest", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/taI4XduLpTk" },
+
+  { "name": "Overhead Press", "muscle_group": "Shoulders", "default_sets": 3, "default_reps": 8, "video_url": "https://youtu.be/2yjwXTZQDDI" },
+  { "name": "Dumbbell Shoulder Press", "muscle_group": "Shoulders", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/qEwKCR5JCog" },
+  { "name": "Lateral Raise", "muscle_group": "Shoulders", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/3VcKaXpzqRo" },
+  { "name": "Rear Delt Fly", "muscle_group": "Shoulders", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/EA7u4Q_8HQ0" },
+  { "name": "Face Pull", "muscle_group": "Shoulders", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/rep-qVOkqgk" },
+
+  { "name": "Pull Up", "muscle_group": "Back", "default_sets": 3, "default_reps": 6, "video_url": "https://youtu.be/eGo4IYlbE5g" },
+  { "name": "Lat Pulldown", "muscle_group": "Back", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/CAwf7n6Luuc" },
+  { "name": "Barbell Row", "muscle_group": "Back", "default_sets": 3, "default_reps": 8, "video_url": "https://youtu.be/vT2GjY_Umpw" },
+  { "name": "Seated Cable Row", "muscle_group": "Back", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/GZbfZ033f74" },
+  { "name": "Single Arm Dumbbell Row", "muscle_group": "Back", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/pYcpY20QaE8" },
+
+  { "name": "Bicep Curl (Dumbbell)", "muscle_group": "Arms", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/ykJmrZ5v0Oo" },
+  { "name": "Hammer Curl", "muscle_group": "Arms", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/zC3nLlEvin4" },
+  { "name": "EZ Bar Curl", "muscle_group": "Arms", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/kwG2ipFRgfo" },
+  { "name": "Tricep Pushdown", "muscle_group": "Arms", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/2-LAMcpzODU" },
+  { "name": "Overhead Tricep Extension", "muscle_group": "Arms", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/YbX7Wd8jQ-Q" },
+  { "name": "Dips", "muscle_group": "Arms", "default_sets": 3, "default_reps": 8, "video_url": "https://youtu.be/2z8JmcrW-As" },
+
+  { "name": "Plank", "muscle_group": "Core", "default_sets": 3, "default_reps": 45, "video_url": "https://youtu.be/pSHjTRCQxIw" },
+  { "name": "Hanging Knee Raise", "muscle_group": "Core", "default_sets": 3, "default_reps": 10, "video_url": "https://youtu.be/3YvfRx31xDE" },
+  { "name": "Cable Crunch", "muscle_group": "Core", "default_sets": 3, "default_reps": 12, "video_url": "https://youtu.be/AV5PmZJIrrw" },
+
+  { "name": "Running", "muscle_group": "Cardio", "default_sets": 1, "default_reps": 20, "video_url": "" },
+  { "name": "Cycling", "muscle_group": "Cardio", "default_sets": 1, "default_reps": 30, "video_url": "" },
+  { "name": "Rowing Machine", "muscle_group": "Cardio", "default_sets": 1, "default_reps": 10, "video_url": "" }
+]
+

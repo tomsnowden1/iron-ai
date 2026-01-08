@@ -1,0 +1,302 @@
+import { DEFAULT_COACH_MODEL, streamChatCompletion } from "../services/openai";
+import {
+  executeTool,
+  getOpenAITools,
+  getToolRegistry,
+  summarizeToolCall,
+  validateToolInput,
+} from "./tools";
+import { getCoachContextSnapshot } from "./context";
+import { summarizeCoachMemory } from "./memory";
+
+const MAX_TOOL_LOOPS = 2;
+
+const SYSTEM_PROMPT = [
+  "You are a supportive AI fitness coach.",
+  "Be concise, practical, and friendly.",
+  "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
+  "If a write action is requested, ask for user confirmation before changes are made.",
+  "Avoid medical advice; recommend a professional for injuries or health concerns.",
+].join(" ");
+
+const READ_TOOL_SCOPES = {
+  sessions: ["get_recent_sessions", "get_session_detail", "get_training_summary"],
+  templates: ["get_templates", "get_template_detail"],
+  exerciseHistory: ["search_exercises", "get_exercise_history", "get_personal_records"],
+};
+
+const WRITE_TOOLS = ["create_template", "add_planned_workout", "update_user_goal"];
+
+function buildSystemMessages({ contextSnapshot, memorySummary }) {
+  const messages = [{ role: "system", content: SYSTEM_PROMPT }];
+  if (memorySummary) {
+    messages.push({
+      role: "system",
+      content: `Coach memory summary (JSON):\n${JSON.stringify(memorySummary)}`,
+    });
+  }
+  if (contextSnapshot) {
+    messages.push({
+      role: "system",
+      content: `Context snapshot (JSON, may be truncated):\n${JSON.stringify(
+        contextSnapshot
+      )}`,
+    });
+  }
+  return messages;
+}
+
+function safeParseJSON(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function buildToolResultMessage(toolCallId, result) {
+  return {
+    role: "tool",
+    tool_call_id: toolCallId,
+    content: JSON.stringify(result),
+  };
+}
+
+function buildAssistantToolCallMessage(toolCalls) {
+  return {
+    role: "assistant",
+    tool_calls: toolCalls.map((call) => ({
+      id: call.id,
+      type: call.type ?? "function",
+      function: {
+        name: call.function?.name ?? call.name,
+        arguments: call.function?.arguments ?? call.arguments ?? "",
+      },
+    })),
+  };
+}
+
+export async function runCoachTurn({
+  apiKey,
+  chatHistory,
+  userMessage,
+  contextConfig,
+  memoryEnabled,
+  memorySummary,
+  onStreamStart,
+  onStreamDelta,
+  onStreamEnd,
+}) {
+  const allowReadTools = Boolean(contextConfig?.enabled);
+  const allowedTools = new Set(WRITE_TOOLS);
+  if (allowReadTools) {
+    const scopes = contextConfig?.scopes ?? {};
+    Object.entries(READ_TOOL_SCOPES).forEach(([scopeKey, toolNames]) => {
+      if (!scopes[scopeKey]) return;
+      toolNames.forEach((toolName) => allowedTools.add(toolName));
+    });
+  }
+  const tools = getOpenAITools({
+    allowRead: allowReadTools,
+    allowWrite: true,
+    allowedTools,
+  });
+  const registry = getToolRegistry();
+  const toolEvents = [];
+  const proposals = [];
+  const debug = {
+    model: DEFAULT_COACH_MODEL,
+    toolCalls: [],
+    contextMeta: null,
+    allowedTools: Array.from(allowedTools),
+  };
+
+  const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
+
+  let contextSnapshot = null;
+  if (contextConfig?.enabled) {
+    // TODO: Extend context snapshot sources (planner, long-term stats) as needed.
+    const { snapshot, meta } = await getCoachContextSnapshot({
+      scopes: contextConfig.scopes,
+      sessionLimit: contextConfig.sessionLimit,
+      templateLimit: contextConfig.templateLimit,
+      memorySummary: memoryEnabled ? memorySummary : null,
+    });
+    contextSnapshot = snapshot;
+    debug.contextMeta = meta;
+  }
+
+  let loop = 0;
+  let history = [...chatHistory, { role: "user", content: userMessage }];
+  let conversation = [
+    ...buildSystemMessages({ contextSnapshot, memorySummary: memorySummaryData }),
+    ...history,
+  ];
+  debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
+
+  let finalAssistant = null;
+  let pendingToolMessages = [];
+
+  while (loop < MAX_TOOL_LOOPS) {
+    loop += 1;
+    const streamResult = await streamChatCompletion({
+      apiKey,
+      model: DEFAULT_COACH_MODEL,
+      messages: conversation,
+      tools,
+      onDelta: onStreamDelta,
+      onStart: onStreamStart,
+      onEnd: onStreamEnd,
+    });
+
+    debug.toolCalls = streamResult.toolCalls ?? [];
+
+    if (!streamResult.toolCalls?.length) {
+      finalAssistant = streamResult.content ?? "";
+      if (finalAssistant) {
+        history = [...history, { role: "assistant", content: finalAssistant }];
+      }
+      break;
+    }
+
+    const assistantToolCallMessage = buildAssistantToolCallMessage(streamResult.toolCalls);
+    history = [...history, assistantToolCallMessage];
+    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+
+    pendingToolMessages = [];
+    for (const toolCall of streamResult.toolCalls) {
+      const name = toolCall.function?.name ?? toolCall.name;
+      const argsText = toolCall.function?.arguments ?? toolCall.arguments ?? "{}";
+      const parsedArgs = safeParseJSON(argsText) ?? {};
+      const tool = registry.get(name);
+
+      if (!allowedTools.has(name)) {
+        toolEvents.push({
+          name,
+          status: "error",
+          summary: "Tool blocked by context settings.",
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "error",
+            error: "Tool blocked by context settings.",
+          })
+        );
+        continue;
+      }
+
+      if (!tool) {
+        toolEvents.push({
+          name,
+          status: "error",
+          summary: "Tool not found.",
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "error",
+            error: "Tool not found.",
+          })
+        );
+        continue;
+      }
+
+      const validation = validateToolInput(tool, parsedArgs);
+      if (!validation.valid) {
+        toolEvents.push({
+          name,
+          status: "error",
+          summary: "Invalid tool input.",
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "error",
+            error: validation.errors.join("; "),
+          })
+        );
+        continue;
+      }
+
+      if (tool.isWriteTool) {
+        const summary = summarizeToolCall(name, parsedArgs);
+        proposals.push({
+          id: toolCall.id,
+          name,
+          input: parsedArgs,
+          summary,
+          status: "pending",
+        });
+        toolEvents.push({
+          name,
+          status: "pending",
+          summary,
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "pending_confirmation",
+            summary,
+          })
+        );
+        continue;
+      }
+
+      try {
+        const result = await executeTool(name, parsedArgs, {
+          scopes: contextConfig?.scopes ?? {},
+        });
+        toolEvents.push({
+          name,
+          status: "success",
+          summary: summarizeToolCall(name, parsedArgs),
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "success",
+            result,
+          })
+        );
+      } catch (err) {
+        toolEvents.push({
+          name,
+          status: "error",
+          summary: summarizeToolCall(name, parsedArgs),
+        });
+        pendingToolMessages.push(
+          buildToolResultMessage(toolCall.id, {
+            status: "error",
+            error: err?.message ?? "Tool failed.",
+          })
+        );
+      }
+    }
+
+    history = [...history, ...pendingToolMessages];
+    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+  }
+
+  if (!finalAssistant) {
+    finalAssistant = "I ran into an issue while preparing your response.";
+    history = [...history, { role: "assistant", content: finalAssistant }];
+  }
+
+  return {
+    assistant: finalAssistant,
+    conversation: history,
+    toolEvents,
+    proposals,
+    pendingToolMessages,
+    debug,
+  };
+}
+
+export async function executeWriteToolCall({ proposal, onResult }) {
+  if (!proposal) return null;
+  try {
+    const result = await executeTool(proposal.name, proposal.input);
+    onResult?.({ status: "success", result });
+    return { status: "success", result };
+  } catch (err) {
+    const error = err?.message ?? "Tool failed.";
+    onResult?.({ status: "error", error });
+    return { status: "error", error };
+  }
+}
