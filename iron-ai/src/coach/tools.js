@@ -5,10 +5,18 @@ import {
   getWorkoutWithDetails,
   listRecentWorkoutSessions,
   listTemplates,
+  listEquipment,
+  listWorkoutSpaces,
+  createWorkoutSpace,
+  updateWorkoutSpace,
+  setActiveWorkoutSpace,
+  getWorkoutSpaceById,
   db,
 } from "../db";
 import { normalizeCoachMemory, upsertGoal } from "./memory";
 import { validateSchema } from "./schema";
+import { resolveActiveSpace } from "../workoutSpaces/logic";
+import { getExerciseSubstitutions } from "../equipment/engine";
 
 const MAX_LIST_LIMIT = 50;
 const MAX_SESSION_LIMIT = 20;
@@ -109,10 +117,24 @@ function getToolSummary(name, input) {
       return `Search exercises (${input?.query ?? ""})`;
     case "get_exercise_history":
       return `Fetch exercise history (${input?.exerciseIdOrName ?? "unknown"})`;
+    case "get_exercise_substitutions":
+      return `Fetch substitutions (${input?.exerciseId ?? "unknown"})`;
     case "get_personal_records":
       return "Fetch personal records";
     case "get_training_summary":
       return `Fetch training summary (${input?.rangeDays ?? "default"} days)`;
+    case "get_workout_spaces":
+      return "Fetch workout spaces";
+    case "get_active_space":
+      return "Fetch active space";
+    case "get_equipment_for_space":
+      return `Fetch equipment for space (${input?.spaceId ?? "active"})`;
+    case "create_workout_space":
+      return `Create workout space: ${input?.name ?? "Untitled"}`;
+    case "update_workout_space":
+      return `Update workout space: ${input?.spaceId ?? "unknown"}`;
+    case "set_active_space":
+      return `Set active space: ${input?.spaceId ?? "unknown"}`;
     default:
       return name;
   }
@@ -261,6 +283,12 @@ export const toolDefinitions = [
           id: exercise.id,
           name: exercise.name ?? "Unknown",
           muscleGroup: exercise.muscle_group ?? "Unknown",
+          requiredEquipmentIds: Array.isArray(exercise.requiredEquipmentIds)
+            ? exercise.requiredEquipmentIds
+            : [],
+          optionalEquipmentIds: Array.isArray(exercise.optionalEquipmentIds)
+            ? exercise.optionalEquipmentIds
+            : [],
         })),
       };
     },
@@ -307,6 +335,24 @@ export const toolDefinitions = [
         },
         history: sorted.slice(0, safeLimit),
       };
+    },
+  },
+  {
+    name: "get_exercise_substitutions",
+    description: "Suggest available substitutions for an exercise in a workout space.",
+    inputSchema: {
+      type: "object",
+      required: ["exerciseId"],
+      properties: {
+        exerciseId: { type: "integer" },
+        spaceId: { type: "integer" },
+      },
+    },
+    outputSchema: { type: "object" },
+    isWriteTool: false,
+    handler: async ({ exerciseId, spaceId }) => {
+      const substitutions = await getExerciseSubstitutions(exerciseId, spaceId);
+      return { substitutions };
     },
   },
   {
@@ -433,6 +479,94 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "get_workout_spaces",
+    description: "List available workout spaces and equipment counts.",
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object" },
+    isWriteTool: false,
+    handler: async () => {
+      const spaces = await listWorkoutSpaces();
+      const sorted = [...spaces].sort((a, b) =>
+        String(a.name ?? "").localeCompare(String(b.name ?? ""))
+      );
+      return {
+        spaces: sorted.map((space) => ({
+          id: space.id ?? null,
+          name: space.name ?? "Untitled",
+          description: space.description ?? "",
+          equipmentCount: Array.isArray(space.equipmentIds)
+            ? space.equipmentIds.length
+            : 0,
+          isDefault: Boolean(space.isDefault),
+          isTemporary: Boolean(space.isTemporary),
+          expiresAt: space.expiresAt ?? null,
+        })),
+      };
+    },
+  },
+  {
+    name: "get_active_space",
+    description: "Get the active workout space.",
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object" },
+    isWriteTool: false,
+    handler: async () => {
+      const spaces = await listWorkoutSpaces();
+      const settings = await db.settings.get(1);
+      const active = resolveActiveSpace(spaces, settings?.active_space_id ?? null);
+      if (!active) return { activeSpace: null };
+      return {
+        activeSpace: {
+          id: active.id ?? null,
+          name: active.name ?? "Untitled",
+          equipmentCount: Array.isArray(active.equipmentIds)
+            ? active.equipmentIds.length
+            : 0,
+          isTemporary: Boolean(active.isTemporary),
+          expiresAt: active.expiresAt ?? null,
+        },
+      };
+    },
+  },
+  {
+    name: "get_equipment_for_space",
+    description: "Get equipment available for a workout space.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spaceId: { type: "integer" },
+      },
+    },
+    outputSchema: { type: "object" },
+    isWriteTool: false,
+    handler: async ({ spaceId }) => {
+      const spaces = await listWorkoutSpaces();
+      const settings = await db.settings.get(1);
+      const active = resolveActiveSpace(spaces, settings?.active_space_id ?? null);
+      const target = spaceId ? await getWorkoutSpaceById(spaceId) : active;
+      if (!target) return { error: "Space not found." };
+      const equipment = await listEquipment();
+      const byId = new Map(equipment.map((item) => [item.id, item]));
+      const ids = Array.isArray(target.equipmentIds) ? target.equipmentIds : [];
+      return {
+        space: {
+          id: target.id ?? null,
+          name: target.name ?? "Untitled",
+          isTemporary: Boolean(target.isTemporary),
+          expiresAt: target.expiresAt ?? null,
+        },
+        equipment: ids
+          .map((id) => byId.get(id))
+          .filter(Boolean)
+          .map((item) => ({
+            id: item.id,
+            name: item.name ?? "Unknown",
+            category: item.category ?? "unknown",
+          })),
+      };
+    },
+  },
+  {
     name: "create_template",
     description: "Create a workout template with exercises and targets.",
     inputSchema: {
@@ -440,6 +574,7 @@ export const toolDefinitions = [
       required: ["name", "exercises"],
       properties: {
         name: { type: "string", minLength: 1, maxLength: 80 },
+        spaceId: { type: "integer" },
         exercises: {
           type: "array",
           minItems: 1,
@@ -459,7 +594,7 @@ export const toolDefinitions = [
     },
     outputSchema: { type: "object" },
     isWriteTool: true,
-    handler: async ({ name, exercises }) => {
+    handler: async ({ name, exercises, spaceId }) => {
       const existingExercises = await getAllExercises();
       const validIds = new Set(existingExercises.map((exercise) => exercise.id));
       exercises.forEach((ex) => {
@@ -467,6 +602,10 @@ export const toolDefinitions = [
           throw new Error(`Exercise ${ex.exerciseId} not found.`);
         }
       });
+      if (spaceId != null) {
+        const space = await getWorkoutSpaceById(spaceId);
+        if (!space) throw new Error("Workout space not found.");
+      }
 
       const now = Date.now();
       const safeName = String(name ?? "").trim() || "Untitled Template";
@@ -477,6 +616,7 @@ export const toolDefinitions = [
         async () => {
           const templateId = await db.table("templates").add({
             name: safeName,
+            spaceId: spaceId ?? null,
             createdAt: now,
             updatedAt: now,
           });
@@ -572,6 +712,111 @@ export const toolDefinitions = [
         coach_memory: nextMemory,
       });
       return { updated: true };
+    },
+  },
+  {
+    name: "create_workout_space",
+    description: "Create a workout space with an equipment list.",
+    inputSchema: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 80 },
+        description: { type: "string", maxLength: 200 },
+        equipmentIds: {
+          type: "array",
+          items: { type: "string" },
+        },
+        isDefault: { type: "boolean" },
+        isTemporary: { type: "boolean" },
+        expiresAt: { type: "string", maxLength: 32 },
+      },
+    },
+    outputSchema: { type: "object" },
+    isWriteTool: true,
+    handler: async ({ name, description, equipmentIds, isDefault, isTemporary, expiresAt }) => {
+      const equipment = await listEquipment();
+      const validIds = new Set(equipment.map((item) => item.id));
+      const safeEquipment = Array.isArray(equipmentIds)
+        ? equipmentIds.filter((id) => validIds.has(id))
+        : [];
+      const id = await createWorkoutSpace({
+        name,
+        description,
+        equipmentIds: safeEquipment,
+        isDefault: Boolean(isDefault),
+        isTemporary: Boolean(isTemporary),
+        expiresAt: expiresAt ?? null,
+      });
+      return { spaceId: id };
+    },
+  },
+  {
+    name: "update_workout_space",
+    description: "Update an existing workout space.",
+    inputSchema: {
+      type: "object",
+      required: ["spaceId"],
+      properties: {
+        spaceId: { type: "integer" },
+        name: { type: "string", minLength: 1, maxLength: 80 },
+        description: { type: "string", maxLength: 200 },
+        equipmentIds: {
+          type: "array",
+          items: { type: "string" },
+        },
+        isDefault: { type: "boolean" },
+        isTemporary: { type: "boolean" },
+        expiresAt: { type: "string", maxLength: 32 },
+      },
+    },
+    outputSchema: { type: "object" },
+    isWriteTool: true,
+    handler: async ({
+      spaceId,
+      name,
+      description,
+      equipmentIds,
+      isDefault,
+      isTemporary,
+      expiresAt,
+    }) => {
+      const existing = await getWorkoutSpaceById(spaceId);
+      if (!existing) throw new Error("Workout space not found.");
+      const equipment = await listEquipment();
+      const validIds = new Set(equipment.map((item) => item.id));
+      const safeEquipment = Array.isArray(equipmentIds)
+        ? equipmentIds.filter((id) => validIds.has(id))
+        : undefined;
+      const patch = {
+        ...(name != null ? { name } : {}),
+        ...(description != null ? { description } : {}),
+        ...(safeEquipment !== undefined ? { equipmentIds: safeEquipment } : {}),
+        ...(isDefault != null ? { isDefault } : {}),
+        ...(isTemporary != null ? { isTemporary } : {}),
+        ...(expiresAt !== undefined ? { expiresAt: expiresAt ?? null } : {}),
+      };
+      await updateWorkoutSpace(spaceId, patch);
+      return { updated: true };
+    },
+  },
+  {
+    name: "set_active_space",
+    description: "Set the active workout space used for new workouts.",
+    inputSchema: {
+      type: "object",
+      required: ["spaceId"],
+      properties: {
+        spaceId: { type: "integer" },
+      },
+    },
+    outputSchema: { type: "object" },
+    isWriteTool: true,
+    handler: async ({ spaceId }) => {
+      const existing = await getWorkoutSpaceById(spaceId);
+      if (!existing) throw new Error("Workout space not found.");
+      await setActiveWorkoutSpace(spaceId);
+      return { activeSpaceId: spaceId };
     },
   },
 ];

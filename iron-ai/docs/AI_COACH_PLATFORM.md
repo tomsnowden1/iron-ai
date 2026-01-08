@@ -27,6 +27,7 @@ user confirmation.
 - Context snapshots are size-bounded and marked when truncated.
 - Coach Memory is only included when enabled in Settings.
 - Read tools are enabled only for the scopes the user selects.
+- Equipment-aware coaching relies on workout space context and never recommends unavailable gear.
 
 ## Extensibility
 Add new tools or context sources by extending:

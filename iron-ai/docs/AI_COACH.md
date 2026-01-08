@@ -16,6 +16,7 @@ questions. It does not yet include advanced training logic or personalized progr
 - Tool list and schemas: `docs/AI_COACH_TOOLS.md`
 - Coach Memory: `docs/AI_COACH_MEMORY.md`
 - Security notes: `docs/AI_COACH_SECURITY.md`
+- Equipment integration: `docs/AI_COACH_EQUIPMENT.md`
 
 ## Known Limitations
 - Chat history is in-memory only and not persisted.

@@ -12,13 +12,20 @@ Read tools are only exposed when their data scope is enabled in the Context pane
 - `get_template_detail({ templateId })`
 - `search_exercises({ query, limit, muscleGroup })`
 - `get_exercise_history({ exerciseIdOrName, limit })`
+- `get_exercise_substitutions({ exerciseId, spaceId? })`
 - `get_personal_records({ exerciseIdOrName })`
 - `get_training_summary({ rangeDays })`
+- `get_workout_spaces()`
+- `get_active_space()`
+- `get_equipment_for_space({ spaceId? })`
 
 ## Write Tools (confirmation required)
-- `create_template({ name, exercises:[{ exerciseId, sets, reps, warmupSets? }] })`
+- `create_template({ name, spaceId?, exercises:[{ exerciseId, sets, reps, warmupSets? }] })`
 - `add_planned_workout({ date, templateId?, exercises? })`
 - `update_user_goal({ goalType, value, notes? })`
+- `create_workout_space({ name, description?, equipmentIds?, isDefault?, isTemporary?, expiresAt? })`
+- `update_workout_space({ spaceId, name?, description?, equipmentIds?, isDefault?, isTemporary?, expiresAt? })`
+- `set_active_space({ spaceId })`
 
 ## Example Inputs
 ```json
@@ -37,6 +44,10 @@ Read tools are only exposed when their data scope is enabled in the Context pane
     { "exerciseId": 2, "sets": 3, "reps": 10 }
   ]
 }
+```
+
+```json
+{ "name": "Hotel Gym", "equipmentIds": ["dumbbell", "treadmill"], "isTemporary": true }
 ```
 
 ## Validation

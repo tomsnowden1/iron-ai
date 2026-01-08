@@ -1,5 +1,7 @@
 import Dexie from "dexie";
 import starterExercises from "./data/starterExercises.json";
+import { EQUIPMENT_CATALOG } from "./equipment/catalog";
+import { inferExerciseEquipment } from "./equipment/inference";
 
 export const db = new Dexie("ironAI");
 
@@ -116,13 +118,99 @@ db.version(5).stores({
   plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
 });
 
+/**
+ * v6 (NEW): workoutSpaces + equipment catalog
+ */
+db.version(6)
+  .stores({
+    exercises:
+      "++id, name, default_sets, default_reps, muscle_group, video_url, is_custom",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+  })
+  .upgrade(async (tx) => {
+    const now = Date.now();
+
+    const equipmentTable = tx.table("equipment");
+    const existingEquipment = await equipmentTable.toArray();
+    if (!existingEquipment.length) {
+      await equipmentTable.bulkPut(EQUIPMENT_CATALOG);
+    } else {
+      const existingIds = new Set(existingEquipment.map((item) => item.id));
+      const missingEquipment = EQUIPMENT_CATALOG.filter((item) => !existingIds.has(item.id));
+      if (missingEquipment.length) {
+        await equipmentTable.bulkPut(missingEquipment);
+      }
+    }
+
+    const spacesTable = tx.table("workoutSpaces");
+    const spaces = await spacesTable.toArray();
+    if (!spaces.length) {
+      await spacesTable.add({
+        name: "Default Gym",
+        description: "All equipment available.",
+        equipmentIds: EQUIPMENT_CATALOG.map((item) => item.id),
+        isDefault: true,
+        isTemporary: false,
+        expiresAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await tx.table("exercises").toCollection().modify((exercise) => {
+      const required = Array.isArray(exercise.requiredEquipmentIds)
+        ? exercise.requiredEquipmentIds
+        : [];
+      const optional = Array.isArray(exercise.optionalEquipmentIds)
+        ? exercise.optionalEquipmentIds
+        : null;
+      if (required.length && optional !== null) return;
+      const inferred = inferExerciseEquipment(exercise);
+      if (!required.length) {
+        exercise.requiredEquipmentIds = inferred.requiredEquipmentIds;
+      }
+      if (optional === null) {
+        exercise.optionalEquipmentIds = inferred.optionalEquipmentIds;
+      }
+    });
+  });
+
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
+  await db.table("equipment").bulkPut(EQUIPMENT_CATALOG);
+  await db.table("workoutSpaces").add({
+    name: "Default Gym",
+    description: "All equipment available.",
+    equipmentIds: EQUIPMENT_CATALOG.map((item) => item.id),
+    isDefault: true,
+    isTemporary: false,
+    expiresAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
   await db.table("exercises").bulkAdd(
     starterExercises.map((ex) => ({
       ...ex,
       is_custom: false,
+      ...inferExerciseEquipment(ex),
       createdAt: now,
       updatedAt: now,
     }))
@@ -133,10 +221,16 @@ db.on("populate", async () => {
 // Templates API helpers
 // --------------------
 
-export async function createTemplate({ name }) {
+export async function createTemplate({ name, spaceId = null }) {
   const now = Date.now();
   const safeName = String(name ?? "").trim() || "Untitled Template";
-  return db.table("templates").add({ name: safeName, createdAt: now, updatedAt: now });
+  const parsedSpaceId = spaceId == null ? null : Number(spaceId);
+  return db.table("templates").add({
+    name: safeName,
+    spaceId: Number.isNaN(parsedSpaceId) ? null : parsedSpaceId,
+    createdAt: now,
+    updatedAt: now,
+  });
 }
 
 /**
@@ -186,6 +280,10 @@ export async function updateTemplate(templateId, patch) {
 
   if ("name" in safePatch) {
     safePatch.name = String(safePatch.name ?? "").trim() || "Untitled Template";
+  }
+  if ("spaceId" in safePatch) {
+    const parsed = safePatch.spaceId == null ? null : Number(safePatch.spaceId);
+    safePatch.spaceId = Number.isNaN(parsed) ? null : parsed;
   }
 
   await db.table("templates").update(templateId, safePatch);
@@ -268,6 +366,141 @@ export async function getAllExercises() {
   return db.table("exercises").orderBy("name").toArray();
 }
 
+// --------------------
+// Equipment + Spaces
+// --------------------
+
+export async function listEquipment() {
+  return db.table("equipment").orderBy("name").toArray();
+}
+
+export async function getEquipmentByIds(ids) {
+  const list = Array.isArray(ids) ? ids : [];
+  return list.length ? db.table("equipment").bulkGet(list) : [];
+}
+
+export async function listWorkoutSpaces() {
+  return db.table("workoutSpaces").orderBy("name").toArray();
+}
+
+export async function getWorkoutSpaceById(id) {
+  return db.table("workoutSpaces").get(id);
+}
+
+export async function createWorkoutSpace({
+  name,
+  description = "",
+  equipmentIds = [],
+  isDefault = false,
+  isTemporary = false,
+  expiresAt = null,
+}) {
+  const now = Date.now();
+  const safeName = String(name ?? "").trim() || "New Space";
+  const safeDescription = String(description ?? "").trim();
+  const safeEquipment = Array.isArray(equipmentIds) ? equipmentIds : [];
+  const withBodyweight = safeEquipment.includes("bodyweight")
+    ? safeEquipment
+    : [...safeEquipment, "bodyweight"];
+  const normalizedEquipment = Array.from(new Set(withBodyweight));
+  const space = {
+    name: safeName,
+    description: safeDescription,
+    equipmentIds: normalizedEquipment,
+    isDefault: Boolean(isDefault),
+    isTemporary: Boolean(isTemporary),
+    expiresAt: expiresAt || null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return db.transaction("rw", db.table("workoutSpaces"), async () => {
+    const id = await db.table("workoutSpaces").add(space);
+    if (space.isDefault) {
+      await db
+        .table("workoutSpaces")
+        .where("id")
+        .notEqual(id)
+        .modify({ isDefault: false, updatedAt: now });
+    }
+    return id;
+  });
+}
+
+export async function updateWorkoutSpace(spaceId, patch) {
+  const now = Date.now();
+  const safePatch = { ...(patch ?? {}), updatedAt: now };
+  if ("name" in safePatch) {
+    safePatch.name = String(safePatch.name ?? "").trim() || "New Space";
+  }
+  if ("description" in safePatch) {
+    safePatch.description = String(safePatch.description ?? "").trim();
+  }
+  if ("equipmentIds" in safePatch) {
+    const next = Array.isArray(safePatch.equipmentIds) ? safePatch.equipmentIds : [];
+    const withBodyweight = next.includes("bodyweight") ? next : [...next, "bodyweight"];
+    safePatch.equipmentIds = Array.from(new Set(withBodyweight));
+  }
+
+  return db.transaction("rw", db.table("workoutSpaces"), async () => {
+    await db.table("workoutSpaces").update(spaceId, safePatch);
+    if (safePatch.isDefault) {
+      await db
+        .table("workoutSpaces")
+        .where("id")
+        .notEqual(spaceId)
+        .modify({ isDefault: false, updatedAt: now });
+    }
+  });
+}
+
+export async function deleteWorkoutSpace(spaceId) {
+  return db.transaction("rw", db.table("workoutSpaces"), db.table("settings"), async () => {
+    await db.table("workoutSpaces").delete(spaceId);
+    const settings = await db.table("settings").get(1);
+    if (settings?.active_space_id === spaceId) {
+      await db.table("settings").put({ ...(settings ?? { id: 1 }), active_space_id: null });
+    }
+  });
+}
+
+export async function duplicateWorkoutSpace(spaceId) {
+  const space = await db.table("workoutSpaces").get(spaceId);
+  if (!space) throw new Error("Workout space not found.");
+  const now = Date.now();
+  const name = String(space.name ?? "Space").trim() || "Space";
+  const newId = await db.table("workoutSpaces").add({
+    ...space,
+    name: `${name} Copy`,
+    isDefault: false,
+    isTemporary: false,
+    expiresAt: null,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return newId;
+}
+
+export async function setDefaultWorkoutSpace(spaceId) {
+  const now = Date.now();
+  return db.transaction("rw", db.table("workoutSpaces"), async () => {
+    await db.table("workoutSpaces").update(spaceId, { isDefault: true, updatedAt: now });
+    await db
+      .table("workoutSpaces")
+      .where("id")
+      .notEqual(spaceId)
+      .modify({ isDefault: false, updatedAt: now });
+  });
+}
+
+export async function setActiveWorkoutSpace(spaceId) {
+  const settings = await db.table("settings").get(1);
+  await db.table("settings").put({
+    ...(settings ?? { id: 1 }),
+    active_space_id: spaceId ?? null,
+  });
+}
+
 function parseRestSeconds(value, fallback = 60) {
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return fallback;
@@ -298,7 +531,11 @@ async function listWorkoutSessionsByStartedAt() {
   return db.table("workouts").orderBy("startedAt").reverse().toArray();
 }
 
-export async function createEmptyWorkout() {
+export async function createEmptyWorkout(options = {}) {
+  const spaceId =
+    options && typeof options === "object" && "spaceId" in options
+      ? options.spaceId
+      : null;
   const nowIso = new Date().toISOString();
   return db.transaction(
     "rw",
@@ -309,6 +546,7 @@ export async function createEmptyWorkout() {
         startedAt: nowIso,
         finishedAt: null,
         templateId: null,
+        spaceId: spaceId ?? null,
         sessionNote: "",
         exerciseNotes: {},
       });
@@ -317,6 +555,7 @@ export async function createEmptyWorkout() {
         startedAt: nowIso,
         finishedAt: null,
         templateId: null,
+        spaceId: spaceId ?? null,
         sessionNote: "",
         exerciseNotes: {},
       });
@@ -325,7 +564,11 @@ export async function createEmptyWorkout() {
   );
 }
 
-export async function startWorkoutFromTemplate(templateId) {
+export async function startWorkoutFromTemplate(templateId, options = {}) {
+  const spaceId =
+    options && typeof options === "object" && "spaceId" in options
+      ? options.spaceId
+      : null;
   const tpl = await getTemplateWithItems(templateId);
   if (!tpl) throw new Error("Template not found.");
   const items = (tpl.items ?? []).slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
@@ -347,6 +590,7 @@ export async function startWorkoutFromTemplate(templateId) {
         startedAt: nowIso,
         finishedAt: null,
         templateId,
+        spaceId: spaceId ?? null,
         sessionNote: "",
         exerciseNotes: {},
       });
@@ -355,6 +599,7 @@ export async function startWorkoutFromTemplate(templateId) {
         startedAt: nowIso,
         finishedAt: null,
         templateId,
+        spaceId: spaceId ?? null,
         sessionNote: "",
         exerciseNotes: {},
       });
@@ -614,6 +859,7 @@ export async function getWorkoutWithDetails(workoutId) {
   const workout = workoutRecord
     ? {
         ...workoutRecord,
+        spaceId: workoutRecord.spaceId ?? null,
         sessionNote:
           typeof workoutRecord.sessionNote === "string" ? workoutRecord.sessionNote : "",
         exerciseNotes:
@@ -662,6 +908,22 @@ export async function listFinishedWorkouts() {
 
   done.sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt)));
   return done;
+}
+
+export async function getExerciseUsageCounts() {
+  const finished = await listFinishedWorkouts();
+  if (!finished.length) return [];
+  const workoutIds = finished.map((workout) => workout.id).filter((id) => id != null);
+  if (!workoutIds.length) return [];
+
+  const items = await db.table("workoutItems").where("workoutId").anyOf(workoutIds).toArray();
+  const counts = new Map();
+  items.forEach((item) => {
+    if (item?.exerciseId == null) return;
+    counts.set(item.exerciseId, (counts.get(item.exerciseId) ?? 0) + 1);
+  });
+
+  return Array.from(counts, ([exerciseId, count]) => ({ exerciseId, count }));
 }
 
 // --------------------

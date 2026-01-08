@@ -15,6 +15,8 @@ const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
   "Be concise, practical, and friendly.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
+  "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
+  "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If a write action is requested, ask for user confirmation before changes are made.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
 ].join(" ");
@@ -23,9 +25,22 @@ const READ_TOOL_SCOPES = {
   sessions: ["get_recent_sessions", "get_session_detail", "get_training_summary"],
   templates: ["get_templates", "get_template_detail"],
   exerciseHistory: ["search_exercises", "get_exercise_history", "get_personal_records"],
+  spaces: [
+    "get_workout_spaces",
+    "get_active_space",
+    "get_equipment_for_space",
+    "get_exercise_substitutions",
+  ],
 };
 
-const WRITE_TOOLS = ["create_template", "add_planned_workout", "update_user_goal"];
+const WRITE_TOOLS = [
+  "create_template",
+  "add_planned_workout",
+  "update_user_goal",
+  "create_workout_space",
+  "update_workout_space",
+  "set_active_space",
+];
 
 function buildSystemMessages({ contextSnapshot, memorySummary }) {
   const messages = [{ role: "system", content: SYSTEM_PROMPT }];

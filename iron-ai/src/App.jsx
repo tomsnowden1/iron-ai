@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import CoachView from "./features/coach/CoachView";
+import WorkoutSpacesManager from "./features/spaces/WorkoutSpacesManager";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
@@ -25,6 +26,9 @@ import {
   ToastHost,
 } from "./components/ui";
 import { formatCoachMemory, getDefaultCoachMemory, normalizeCoachMemory } from "./coach/memory";
+import { getEquipmentMap } from "./equipment/catalog";
+import { getMissingEquipmentForExercise } from "./equipment/engine";
+import { resolveActiveSpace } from "./workoutSpaces/logic";
 
 import {
   db,
@@ -35,11 +39,15 @@ import {
   finishWorkout,
   replaceWorkoutExercise,
   getAllExercises,
+  getExerciseUsageCounts,
   getMostRecentActiveWorkoutId,
   getWorkoutWithDetails,
+  listEquipment,
   listFinishedWorkouts,
+  listWorkoutSpaces,
   removeWorkoutItem,
   removeWorkoutSet,
+  setActiveWorkoutSpace,
   startWorkoutFromTemplate,
   updateWorkoutItem,
   updateWorkoutSession,
@@ -84,14 +92,28 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     () => (workoutId ? getWorkoutWithDetails(workoutId) : null),
     [workoutId]
   );
-  const restSettings = useLiveQuery(() => db.settings.get(1), []);
+  const settings = useLiveQuery(() => db.settings.get(1), []);
+  const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
+  const equipmentList = useLiveQuery(() => listEquipment(), []);
 
   const viewRef = useRef(null);
   const addExerciseId = useId();
+  const exerciseSearchId = useId();
   const replaceSelectId = useId();
   const restFieldId = useId();
   const allExercises = useLiveQuery(() => getAllExercises(), []);
+  const exerciseUsageCounts = useLiveQuery(() => getExerciseUsageCounts(), []);
   const [newExerciseId, setNewExerciseId] = useState("");
+  const exerciseSearchRef = useRef(null);
+  const [exerciseSearch, setExerciseSearch] = useState("");
+  const [filterByActiveGym, setFilterByActiveGym] = useState(
+    settings?.exercise_picker_filter_active_gym ?? true
+  );
+  const [showMostUsedFirst, setShowMostUsedFirst] = useState(
+    settings?.exercise_picker_most_used_first ?? true
+  );
+  const [pickerTouched, setPickerTouched] = useState(false);
+  const autoFocusAppliedRef = useRef(false);
 
   // Replace Exercise UI state (Step C/D)
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -127,6 +149,48 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     () => items.reduce((sum, it) => sum + (it.sets?.length ?? 0), 0),
     [items]
   );
+  const settingsActiveSpaceId = settings?.active_space_id ?? null;
+  const activeSpace = useMemo(
+    () => resolveActiveSpace(workoutSpaces ?? [], settingsActiveSpaceId),
+    [settingsActiveSpaceId, workoutSpaces]
+  );
+  const workoutSpace = useMemo(() => {
+    if (!workout) return activeSpace;
+    if (workout.spaceId != null) {
+      return (workoutSpaces ?? []).find((space) => space.id === workout.spaceId) ?? null;
+    }
+    return activeSpace;
+  }, [activeSpace, workout, workoutSpaces]);
+  const pickerSpace = workoutSpace ?? activeSpace;
+  const hasActiveGym = Boolean(pickerSpace);
+  const pickerAutoFocus = settings?.exercise_picker_auto_focus ?? true;
+  const pickerFilterDefault = settings?.exercise_picker_filter_active_gym ?? true;
+  const pickerMostUsedDefault = settings?.exercise_picker_most_used_first ?? true;
+  const startSpaceId = activeSpace?.id ?? null;
+  const activeSpaceSelectValue =
+    settingsActiveSpaceId != null && settingsActiveSpaceId === activeSpace?.id
+      ? String(settingsActiveSpaceId)
+      : "";
+  const equipmentMap = useMemo(
+    () => getEquipmentMap(equipmentList ?? []),
+    [equipmentList]
+  );
+  const missingEquipmentByItem = useMemo(() => {
+    if (!workoutSpace || !items.length) return new Map();
+    const map = new Map();
+    items.forEach((item) => {
+      if (!item.exercise) return;
+      const missing = getMissingEquipmentForExercise(
+        item.exercise,
+        workoutSpace.equipmentIds ?? [],
+        equipmentMap
+      );
+      if (missing.length) {
+        map.set(item.id, missing);
+      }
+    });
+    return map;
+  }, [equipmentMap, items, workoutSpace]);
 
   const existingExerciseIds = useMemo(() => {
     return new Set(items.map((i) => i.exerciseId));
@@ -143,6 +207,107 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     );
   }, [allExercises, existingExerciseIds, replaceCurrentExerciseId]);
 
+  const exerciseUsageMap = useMemo(() => {
+    const entries = Array.isArray(exerciseUsageCounts) ? exerciseUsageCounts : [];
+    return new Map(entries.map(({ exerciseId, count }) => [exerciseId, count]));
+  }, [exerciseUsageCounts]);
+  const hasUsageHistory = exerciseUsageMap.size > 0;
+  const exerciseSearchQuery = exerciseSearch.trim().toLowerCase();
+  const filteredExercises = useMemo(() => {
+    let filtered = availableExercises;
+    if (filterByActiveGym && hasActiveGym) {
+      const equipmentIds = pickerSpace?.equipmentIds ?? [];
+      filtered = filtered.filter((exercise) => {
+        const missing = getMissingEquipmentForExercise(exercise, equipmentIds, equipmentMap);
+        return missing.length === 0;
+      });
+    }
+    if (exerciseSearchQuery) {
+      filtered = filtered.filter((exercise) => {
+        const name = String(exercise.name ?? "").toLowerCase();
+        const group = String(exercise.muscle_group ?? "").toLowerCase();
+        return name.includes(exerciseSearchQuery) || group.includes(exerciseSearchQuery);
+      });
+    }
+    return filtered;
+  }, [
+    availableExercises,
+    equipmentMap,
+    exerciseSearchQuery,
+    filterByActiveGym,
+    hasActiveGym,
+    pickerSpace,
+  ]);
+
+  const mostUsedExercises = useMemo(() => {
+    if (!showMostUsedFirst || !hasUsageHistory) return [];
+    const filtered = filteredExercises.filter(
+      (exercise) => (exerciseUsageMap.get(exercise.id) ?? 0) > 0
+    );
+    if (!filtered.length) return [];
+    const sorted = [...filtered].sort((a, b) => {
+      const countDiff =
+        (exerciseUsageMap.get(b.id) ?? 0) - (exerciseUsageMap.get(a.id) ?? 0);
+      if (countDiff !== 0) return countDiff;
+      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
+    });
+    return sorted.slice(0, 6);
+  }, [exerciseUsageMap, filteredExercises, hasUsageHistory, showMostUsedFirst]);
+
+  const remainingExercises = useMemo(() => {
+    if (!mostUsedExercises.length) return filteredExercises;
+    const mostUsedIds = new Set(mostUsedExercises.map((exercise) => exercise.id));
+    return filteredExercises.filter((exercise) => !mostUsedIds.has(exercise.id));
+  }, [filteredExercises, mostUsedExercises]);
+
+  const showMostUsedSection = showMostUsedFirst && mostUsedExercises.length > 0;
+  const hasFilteredExercises = filteredExercises.length > 0;
+  const emptyExerciseLabel = availableExercises.length
+    ? "No exercises match filters"
+    : "No exercises available";
+
+  useEffect(() => {
+    if (pickerTouched) return;
+    setFilterByActiveGym(pickerFilterDefault && hasActiveGym);
+    setShowMostUsedFirst(pickerMostUsedDefault);
+    if (
+      pickerAutoFocus &&
+      !autoFocusAppliedRef.current &&
+      exerciseSearchRef.current
+    ) {
+      exerciseSearchRef.current.focus();
+      autoFocusAppliedRef.current = true;
+    }
+  }, [
+    hasActiveGym,
+    pickerAutoFocus,
+    pickerFilterDefault,
+    pickerMostUsedDefault,
+    pickerTouched,
+  ]);
+
+  useEffect(() => {
+    if (hasActiveGym) return;
+    setFilterByActiveGym(false);
+  }, [hasActiveGym]);
+
+  useEffect(() => {
+    if (!newExerciseId) return;
+    const stillAvailable = filteredExercises.some(
+      (exercise) => String(exercise.id) === String(newExerciseId)
+    );
+    if (!stillAvailable) {
+      setNewExerciseId("");
+    }
+  }, [filteredExercises, newExerciseId]);
+
+  useEffect(() => {
+    setExerciseSearch("");
+    setNewExerciseId("");
+    setPickerTouched(false);
+    autoFocusAppliedRef.current = false;
+  }, [workoutId]);
+
   useEffect(() => {
     if (!workout || sessionNoteFocused) return;
     setSessionNote(typeof workout.sessionNote === "string" ? workout.sessionNote : "");
@@ -155,11 +320,11 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
   }, [focusedExerciseNoteId, workout]);
 
   useEffect(() => {
-    const enabled = restSettings?.rest_enabled;
-    const defaultSeconds = parseRestInput(restSettings?.rest_default_seconds) ?? 60;
+    const enabled = settings?.rest_enabled;
+    const defaultSeconds = parseRestInput(settings?.rest_default_seconds) ?? 60;
     setRestEnabled(enabled ?? true);
     setRestDefaultSeconds(defaultSeconds);
-  }, [restSettings]);
+  }, [settings]);
 
   useEffect(() => {
     setRestDefaultInput(String(restDefaultSeconds));
@@ -468,6 +633,36 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
             <div className="empty-state">
               No active workout yet. Create an empty workout to get started.
             </div>
+            {workoutSpaces && workoutSpaces.length ? (
+              <div className="ui-stack">
+                <Label htmlFor="active-space-select">Active workout space</Label>
+                <Select
+                  id="active-space-select"
+                  value={activeSpaceSelectValue}
+                  onChange={(e) => {
+                    const nextValue = e.target.value;
+                    const nextId = nextValue ? Number(nextValue) : null;
+                    void setActiveWorkoutSpace(Number.isNaN(nextId) ? null : nextId);
+                  }}
+                >
+                  <option value="">
+                    Use default space{activeSpace?.name ? ` (${activeSpace.name})` : ""}
+                  </option>
+                  {workoutSpaces.map((space) => (
+                    <option key={space.id} value={String(space.id)}>
+                      {space.name ?? "Untitled Space"}
+                    </option>
+                  ))}
+                </Select>
+                <div className="template-meta">
+                  Active space is saved and used for equipment-aware planning.
+                </div>
+              </div>
+            ) : (
+              <div className="template-meta">
+                Add workout spaces in Settings to tailor equipment availability.
+              </div>
+            )}
           </CardBody>
           <CardFooter>
             <Button
@@ -475,7 +670,7 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
               size="lg"
               className="w-full"
               onClick={async () => {
-                const id = await createEmptyWorkout();
+                const id = await createEmptyWorkout({ spaceId: startSpaceId });
                 setWorkoutId(id);
               }}
             >
@@ -502,6 +697,7 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     ? new Date(workout.startedAt).toLocaleString()
     : "—";
   const templateLabel = workout.templateId ? `#${workout.templateId}` : "Custom";
+  const spaceLabel = workoutSpace?.name ?? "Default";
 
   const workoutSubtitle = (
     <span>
@@ -525,6 +721,7 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
       <Card>
         <CardHeader>
           <div className="ui-section-title">Workout stats</div>
+          {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
         </CardHeader>
         <CardBody>
           <div className="stats-grid">
@@ -539,6 +736,10 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
             <div className="stat-card">
               <div className="stat-label">Template</div>
               <div className="stat-value">{templateLabel}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Space</div>
+              <div className="stat-value">{spaceLabel}</div>
             </div>
           </div>
         </CardBody>
@@ -593,12 +794,14 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
         </Card>
       ) : (
         <div className="ui-stack">
-          {items.map((it, index) => (
-            <Card
-              key={it.id}
-              data-workout-item-id={it.id}
-              onFocusCapture={() => setActiveExerciseIndex(index)}
-            >
+          {items.map((it, index) => {
+            const missingEquipment = missingEquipmentByItem.get(it.id) ?? [];
+            return (
+              <Card
+                key={it.id}
+                data-workout-item-id={it.id}
+                onFocusCapture={() => setActiveExerciseIndex(index)}
+              >
               <CardHeader>
                 <div className="ui-stack">
                   <div className="ui-strong">{it.exercise?.name ?? "Unknown Exercise"}</div>
@@ -626,6 +829,12 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
               </CardHeader>
 
               <CardBody className="ui-stack">
+                {missingEquipment.length ? (
+                  <div className="equipment-warning">
+                    Missing equipment:{" "}
+                    {missingEquipment.map((item) => item?.name ?? "Unknown").join(", ")}
+                  </div>
+                ) : null}
                 <div className="ui-row ui-row--between">
                   <div className="ui-section-title">Sets</div>
                   <div className="ui-row">
@@ -769,7 +978,8 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
                 </div>
               </CardBody>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -779,21 +989,107 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
         </CardHeader>
         <CardBody className="ui-stack">
           <div>
+            <Label htmlFor={exerciseSearchId}>Search exercises</Label>
+            <Input
+              id={exerciseSearchId}
+              type="search"
+              placeholder="Search by name or muscle group"
+              value={exerciseSearch}
+              onChange={(e) => {
+                setPickerTouched(true);
+                setExerciseSearch(e.target.value);
+              }}
+              ref={exerciseSearchRef}
+            />
+          </div>
+
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <div>
+              <div className="ui-strong">Available at active gym</div>
+              <div className="template-meta">
+                Only show exercises available at the active gym.
+              </div>
+              {!hasActiveGym ? (
+                <div className="template-meta">Set an active gym to filter by equipment.</div>
+              ) : null}
+            </div>
+            <Button
+              variant={filterByActiveGym ? "primary" : "secondary"}
+              size="sm"
+              type="button"
+              onClick={() => {
+                if (!hasActiveGym) return;
+                setPickerTouched(true);
+                setFilterByActiveGym((prev) => !prev);
+              }}
+              disabled={!hasActiveGym}
+              aria-pressed={filterByActiveGym}
+            >
+              {filterByActiveGym ? "On" : "Off"}
+            </Button>
+          </div>
+
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <div>
+              <div className="ui-strong">Most used first</div>
+              <div className="template-meta">
+                Prioritize frequently used exercises when opening the picker.
+              </div>
+            </div>
+            <Button
+              variant={showMostUsedFirst ? "primary" : "secondary"}
+              size="sm"
+              type="button"
+              onClick={() => {
+                setPickerTouched(true);
+                setShowMostUsedFirst((prev) => !prev);
+              }}
+              aria-pressed={showMostUsedFirst}
+            >
+              {showMostUsedFirst ? "On" : "Off"}
+            </Button>
+          </div>
+
+          <div>
             <Label htmlFor={addExerciseId}>Exercise</Label>
             <Select
               id={addExerciseId}
               value={newExerciseId}
-              onChange={(e) => setNewExerciseId(e.target.value)}
-              disabled={availableExercises.length === 0}
+              onChange={(e) => {
+                setPickerTouched(true);
+                setNewExerciseId(e.target.value);
+              }}
+              disabled={!hasFilteredExercises}
             >
               <option value="">
-                {availableExercises.length ? "Select an exercise" : "No exercises available"}
+                {hasFilteredExercises ? "Select an exercise" : emptyExerciseLabel}
               </option>
-              {availableExercises.map((ex) => (
-                <option key={ex.id} value={String(ex.id)}>
-                  {ex.name} ({ex.muscle_group})
-                </option>
-              ))}
+              {showMostUsedSection ? (
+                <optgroup label="Most Used">
+                  {mostUsedExercises.map((ex) => (
+                    <option key={ex.id} value={String(ex.id)}>
+                      {ex.name} ({ex.muscle_group})
+                    </option>
+                  ))}
+                </optgroup>
+              ) : null}
+              {showMostUsedSection ? (
+                remainingExercises.length ? (
+                  <optgroup label="All Exercises">
+                    {remainingExercises.map((ex) => (
+                      <option key={ex.id} value={String(ex.id)}>
+                        {ex.name} ({ex.muscle_group})
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null
+              ) : (
+                filteredExercises.map((ex) => (
+                  <option key={ex.id} value={String(ex.id)}>
+                    {ex.name} ({ex.muscle_group})
+                  </option>
+                ))
+              )}
             </Select>
           </div>
           <Button
@@ -1025,10 +1321,15 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
 function HistoryView() {
   const workouts = useLiveQuery(() => listFinishedWorkouts(), []);
   const [openId, setOpenId] = useState(null);
+  const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
 
   const openDetails = useLiveQuery(() => (openId ? getWorkoutWithDetails(openId) : null), [openId]);
   const sessionNote = openDetails?.workout?.sessionNote?.trim() ?? "";
   const exerciseNotes = openDetails?.workout?.exerciseNotes ?? {};
+  const spaceMap = useMemo(
+    () => new Map((workoutSpaces ?? []).map((space) => [space.id, space])),
+    [workoutSpaces]
+  );
 
   if (!workouts) {
     return (
@@ -1057,6 +1358,7 @@ function HistoryView() {
         <div className="ui-stack">
           {workouts.map((w) => {
             const isOpen = openId === w.id;
+            const spaceLabel = w.spaceId ? spaceMap.get(w.spaceId)?.name : null;
             return (
               <Card key={w.id}>
                 <CardHeader>
@@ -1071,6 +1373,7 @@ function HistoryView() {
                     <div className="template-meta">
                       Started: {new Date(w.startedAt).toLocaleString()}
                       {w.templateId ? ` · Template #${w.templateId}` : ""}
+                      {spaceLabel ? ` · Space: ${spaceLabel}` : ""}
                     </div>
                   </button>
 
@@ -1150,6 +1453,15 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [coachMemory, setCoachMemory] = useState(() =>
     normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory())
   );
+  const [exercisePickerAutoFocus, setExercisePickerAutoFocus] = useState(
+    settings?.exercise_picker_auto_focus ?? true
+  );
+  const [exercisePickerFilterActiveGym, setExercisePickerFilterActiveGym] = useState(
+    settings?.exercise_picker_filter_active_gym ?? true
+  );
+  const [exercisePickerMostUsedFirst, setExercisePickerMostUsedFirst] = useState(
+    settings?.exercise_picker_most_used_first ?? true
+  );
   const [memoryViewOpen, setMemoryViewOpen] = useState(false);
   const [memoryEditOpen, setMemoryEditOpen] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -1179,6 +1491,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
       openai_api_key: trimmedOpenAiKey,
       coach_memory_enabled: coachMemoryEnabled,
       coach_memory: coachMemory,
+      exercise_picker_auto_focus: exercisePickerAutoFocus,
+      exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
+      exercise_picker_most_used_first: exercisePickerMostUsedFirst,
     });
     onNotify?.("Saved locally ✅", { tone: "success" });
   };
@@ -1319,11 +1634,11 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             <pre className="coach-preview">{formatCoachMemory(coachMemory)}</pre>
           ) : null}
 
-          {memoryEditOpen ? (
-            <div>
-              <Label htmlFor={memoryId}>Coach memory JSON</Label>
-              <textarea
-                id={memoryId}
+        {memoryEditOpen ? (
+          <div>
+            <Label htmlFor={memoryId}>Coach memory JSON</Label>
+            <textarea
+              id={memoryId}
                 className="ui-input ui-textarea"
                 rows={6}
                 value={memoryDraft}
@@ -1353,6 +1668,70 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
           ) : null}
         </div>
 
+        <hr className="ui-divider" />
+
+        <div className="ui-section-title">Exercise Picker Preferences</div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-strong">Auto-focus search on open</div>
+            <div className="template-meta">
+              Automatically focus the search bar and open the keyboard when adding an
+              exercise.
+            </div>
+          </div>
+          <Button
+            variant={exercisePickerAutoFocus ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setExercisePickerAutoFocus((prev) => !prev)}
+            aria-pressed={exercisePickerAutoFocus}
+          >
+            {exercisePickerAutoFocus ? "On" : "Off"}
+          </Button>
+        </div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-strong">Filter by active gym equipment</div>
+            <div className="template-meta">
+              Only show exercises available at the active gym by default.
+            </div>
+          </div>
+          <Button
+            variant={exercisePickerFilterActiveGym ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setExercisePickerFilterActiveGym((prev) => !prev)}
+            aria-pressed={exercisePickerFilterActiveGym}
+          >
+            {exercisePickerFilterActiveGym ? "On" : "Off"}
+          </Button>
+        </div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-strong">Show most-used exercises first</div>
+            <div className="template-meta">
+              Prioritize frequently used exercises when opening the picker.
+            </div>
+          </div>
+          <Button
+            variant={exercisePickerMostUsedFirst ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setExercisePickerMostUsedFirst((prev) => !prev)}
+            aria-pressed={exercisePickerMostUsedFirst}
+          >
+            {exercisePickerMostUsedFirst ? "On" : "Off"}
+          </Button>
+        </div>
+
+        <hr className="ui-divider" />
+
+        <div className="ui-section-title">Workout Spaces</div>
+        <WorkoutSpacesManager onNotify={onNotify} />
+
         <Button variant="primary" size="md" onClick={saveSettings} className="w-full">
           Save Settings
         </Button>
@@ -1366,7 +1745,11 @@ function SettingsView({ onNotify, themeMode, resolvedTheme, setThemeMode }) {
   const settingsKey = settings
     ? `${settings.api_key ?? ""}::${settings.coach_persona ?? ""}::${
         settings.openai_api_key ?? ""
-      }::${settings.coach_memory_enabled ?? ""}`
+      }::${settings.coach_memory_enabled ?? ""}::${
+        settings.exercise_picker_auto_focus ?? ""
+      }::${settings.exercise_picker_filter_active_gym ?? ""}::${
+        settings.exercise_picker_most_used_first ?? ""
+      }`
     : "loading";
 
   return (
@@ -1389,11 +1772,19 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
     () => (summary?.workoutId ? getWorkoutWithDetails(summary.workoutId) : null),
     [summary?.workoutId]
   );
+  const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
   const sessionNote = details?.workout?.sessionNote?.trim() ?? "";
   const exerciseNotes = details?.workout?.exerciseNotes ?? {};
   const exerciseNotesList = details?.items?.filter((it) =>
     Boolean(exerciseNotes?.[it.exerciseId]?.trim())
   );
+  const spaceMap = useMemo(
+    () => new Map((workoutSpaces ?? []).map((space) => [space.id, space])),
+    [workoutSpaces]
+  );
+  const spaceLabel = details?.workout?.spaceId
+    ? spaceMap.get(details.workout.spaceId)?.name
+    : null;
 
   if (!summary) {
     return (
@@ -1430,6 +1821,12 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
               {summary.estimatedMinutes != null ? `${summary.estimatedMinutes} min` : "Unknown"}
             </span>
           </div>
+          {spaceLabel ? (
+            <div className="ui-row ui-row--between">
+              <span className="ui-muted">Space</span>
+              <span className="ui-strong">{spaceLabel}</span>
+            </div>
+          ) : null}
         </CardBody>
         <CardFooter className="ui-row ui-row--wrap">
           <Button variant="secondary" size="md" onClick={onBackToWorkout} className="flex-1">
@@ -1541,8 +1938,8 @@ export default function App() {
     window.localStorage.setItem("ironai.activeWorkoutId", String(workoutId));
   }, [workoutId]);
 
-  const handleStartWorkoutFromTemplate = async (templateId) => {
-    const id = await startWorkoutFromTemplate(templateId);
+  const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
+    const id = await startWorkoutFromTemplate(templateId, options);
     setWorkoutId(id);
     setTab("workout");
   };

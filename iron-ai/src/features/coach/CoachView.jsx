@@ -70,6 +70,7 @@ export default function CoachView() {
     exerciseHistory: true,
     notes: true,
     settings: true,
+    spaces: true,
   });
   const [messages, setMessages] = useState([]);
   const [chatHistory, setChatHistory] = useState([]);
@@ -134,6 +135,7 @@ export default function CoachView() {
     exerciseHistory: "Exercise history",
     notes: "Notes",
     settings: "Settings",
+    spaces: "Workout spaces",
   };
 
   const handleSend = async () => {

@@ -5,7 +5,12 @@ import {
   getWorkoutWithDetails,
   listRecentWorkoutSessions,
   listTemplates,
+  listEquipment,
+  listWorkoutSpaces,
 } from "../db";
+import { getEquipmentMap } from "../equipment/catalog";
+import { getMissingEquipmentForExercise } from "../equipment/engine";
+import { resolveActiveSpace } from "../workoutSpaces/logic";
 import { summarizeCoachMemory } from "./memory";
 
 const DEFAULT_SESSION_LIMIT = 5;
@@ -13,6 +18,7 @@ const MAX_SESSION_LIMIT = 20;
 const DEFAULT_TEMPLATE_LIMIT = 10;
 const MAX_TEMPLATE_LIMIT = 50;
 const DEFAULT_MAX_BYTES = 60000;
+const MAX_MISSING_EXERCISES = 20;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -187,6 +193,15 @@ function truncateSnapshot(snapshot, maxBytes) {
     exerciseLibrary: { ...current.exerciseLibrary, lastUsed: [] },
   }));
 
+  maybeTruncate("equipment", (current) => ({
+    ...current,
+    activeSpace: current.activeSpace
+      ? { ...current.activeSpace, equipmentIds: [] }
+      : current.activeSpace,
+    availableEquipment: [],
+    missingEquipment: [],
+  }));
+
   maybeTruncate("settings", (current) => ({ ...current, settings: null }));
   maybeTruncate("memory", (current) => ({ ...current, memorySummary: null }));
 
@@ -218,6 +233,7 @@ export async function getCoachContextSnapshot(options = {}) {
   const includeExercises = Boolean(scopes.exerciseHistory);
   const includeNotes = Boolean(scopes.notes);
   const includeSettings = Boolean(scopes.settings);
+  const includeSpaces = Boolean(scopes.spaces);
 
   const sessions = [];
   if (includeSessions || includeExercises) {
@@ -250,9 +266,64 @@ export async function getCoachContextSnapshot(options = {}) {
     ? summarizeExerciseLibrary(allExercises, sessions)
     : null;
 
-  const settingsRow = includeSettings ? await db.settings.get(1) : null;
+  const settingsRow = includeSettings || includeSpaces ? await db.settings.get(1) : null;
   const settings = includeSettings ? buildSettingsSummary(settingsRow) : null;
   const memorySummaryData = memorySummary ? summarizeCoachMemory(memorySummary) : null;
+
+  let activeSpace = null;
+  let availableEquipment = [];
+  let missingEquipment = [];
+
+  if (includeSpaces) {
+    const spaces = await listWorkoutSpaces();
+    activeSpace = resolveActiveSpace(spaces, settingsRow?.active_space_id ?? null);
+
+    if (activeSpace) {
+      const equipmentList = await listEquipment();
+      const equipmentMap = getEquipmentMap(equipmentList);
+      const equipmentIds = Array.isArray(activeSpace.equipmentIds)
+        ? activeSpace.equipmentIds
+        : [];
+      availableEquipment = equipmentIds
+        .map((id) => equipmentMap.get(id))
+        .filter(Boolean)
+        .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+
+      const exerciseMap = new Map(allExercises.map((ex) => [ex.id, ex]));
+      const candidateIds = new Set();
+      if (includeSessions) {
+        sessions.forEach((session) =>
+          session.exercises.forEach((exercise) => candidateIds.add(exercise.exerciseId))
+        );
+      }
+      if (includeTemplates) {
+        templates.forEach((template) =>
+          template.exercises.forEach((exercise) => candidateIds.add(exercise.exerciseId))
+        );
+      }
+
+      const missingList = [];
+      candidateIds.forEach((exerciseId) => {
+        const ex = exerciseMap.get(exerciseId);
+        if (!ex) return;
+        const missing = getMissingEquipmentForExercise(
+          ex,
+          activeSpace.equipmentIds ?? [],
+          equipmentMap
+        );
+        if (!missing.length) return;
+        missingList.push({
+          exerciseId,
+          name: ex.name ?? "Unknown Exercise",
+          missingEquipment: missing.map((item) => item?.name ?? "Unknown"),
+        });
+      });
+
+      missingEquipment = missingList
+        .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")))
+        .slice(0, MAX_MISSING_EXERCISES);
+    }
+  }
 
   const snapshot = {
     generatedAt: new Date().toISOString(),
@@ -262,6 +333,7 @@ export async function getCoachContextSnapshot(options = {}) {
       exerciseHistory: includeExercises,
       notes: includeNotes,
       settings: includeSettings,
+      spaces: includeSpaces,
     },
     sessions: includeSessions
       ? sessions.map((session) => ({
@@ -276,6 +348,21 @@ export async function getCoachContextSnapshot(options = {}) {
     templates: includeTemplates ? templates : [],
     exerciseLibrary: exerciseLibrary,
     settings,
+    activeSpace: includeSpaces
+      ? activeSpace
+        ? {
+            id: activeSpace.id ?? null,
+            name: activeSpace.name ?? "Unknown",
+            isTemporary: activeSpace.isTemporary ?? false,
+            expiresAt: activeSpace.expiresAt ?? null,
+            equipmentIds: Array.isArray(activeSpace.equipmentIds)
+              ? activeSpace.equipmentIds
+              : [],
+          }
+        : null
+      : null,
+    availableEquipment: includeSpaces ? availableEquipment : [],
+    missingEquipment: includeSpaces ? missingEquipment : [],
     memorySummary: memorySummaryData,
   };
 
