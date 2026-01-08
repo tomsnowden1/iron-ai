@@ -45,7 +45,7 @@ function summarizeProposalResult(result) {
   return "Proposal updated.";
 }
 
-export default function CoachView() {
+export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   const settings = useLiveQuery(() => db.settings.get(1), []);
   const apiKey = String(settings?.openai_api_key ?? "").trim();
   const memoryEnabled = Boolean(settings?.coach_memory_enabled);
@@ -64,6 +64,7 @@ export default function CoachView() {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextMeta, setContextMeta] = useState(null);
   const [contextLoading, setContextLoading] = useState(false);
+  const [pendingLaunchContext, setPendingLaunchContext] = useState(null);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -80,6 +81,13 @@ export default function CoachView() {
   const streamingIdRef = useRef(null);
 
   const canSend = Boolean(apiKey) && input.trim().length > 0 && !sending;
+
+  useEffect(() => {
+    if (!launchContext) return;
+    setPendingLaunchContext(launchContext);
+    setContextEnabled(true);
+    setContextScopes((prev) => ({ ...prev, spaces: true }));
+  }, [launchContext]);
 
   useEffect(() => {
     chatHistoryRef.current = chatHistory;
@@ -162,6 +170,7 @@ export default function CoachView() {
         contextConfig: {
           enabled: contextEnabled,
           scopes: contextScopes,
+          launchContext: pendingLaunchContext,
         },
         memoryEnabled,
         memorySummary: memory,
@@ -200,6 +209,10 @@ export default function CoachView() {
             msg.id === streamedId ? { ...msg, content: result.assistant } : msg
           )
         );
+      }
+      if (pendingLaunchContext) {
+        setPendingLaunchContext(null);
+        onLaunchContextConsumed?.();
       }
     } catch (err) {
       setError(resolveErrorMessage(err, Boolean(apiKey)));

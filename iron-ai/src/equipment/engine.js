@@ -144,6 +144,66 @@ export function getExerciseSubstitutionsForExercise(
   return substitutions;
 }
 
+export function getTemplateCompatibility({
+  items,
+  spaceEquipmentIds,
+  allExercises,
+  equipmentMap,
+}) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const exercises = Array.isArray(allExercises) ? allExercises : [];
+  const resolvedEquipmentMap =
+    equipmentMap instanceof Map ? equipmentMap : getEquipmentMap(equipmentMap ?? []);
+  const missingByExercise = [];
+  let hasBlockingMissing = false;
+
+  safeItems.forEach((item) => {
+    const exercise = item?.exercise ?? null;
+    if (!exercise) return;
+    const missing = getMissingEquipmentForExercise(
+      exercise,
+      spaceEquipmentIds ?? [],
+      resolvedEquipmentMap
+    );
+    if (!missing.length) return;
+
+    const substitutions =
+      exercises.length > 0
+        ? getExerciseSubstitutionsForExercise(
+            exercise,
+            exercises,
+            spaceEquipmentIds ?? [],
+            resolvedEquipmentMap
+          )
+        : [];
+    if (!substitutions.length) {
+      hasBlockingMissing = true;
+    }
+
+    missingByExercise.push({
+      exerciseId: exercise.id ?? null,
+      name: exercise.name ?? "Unknown Exercise",
+      missingEquipment: missing.map((item) => item?.name ?? "Unknown"),
+      hasSubstitution: substitutions.length > 0,
+    });
+  });
+
+  const missingEquipment = Array.from(
+    new Set(missingByExercise.flatMap((entry) => entry.missingEquipment))
+  );
+
+  let status = "full";
+  if (missingByExercise.length > 0) {
+    status = hasBlockingMissing ? "not_compatible" : "needs_substitutions";
+  }
+
+  return {
+    status,
+    missingEquipment,
+    missingByExercise,
+  };
+}
+
 async function resolveSpace(spaceId) {
   if (spaceId != null) return getWorkoutSpaceById(spaceId);
   const spaces = await listWorkoutSpaces();

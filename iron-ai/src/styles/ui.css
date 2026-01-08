@@ -329,6 +329,11 @@
     color: var(--color-pill-muted-text);
   }
 
+  .pill--danger {
+    background: rgba(239, 68, 68, 0.16);
+    color: var(--color-destructive);
+  }
+
   .stats-grid {
     display: grid;
     gap: var(--space-3);
@@ -671,6 +676,69 @@
     border: 1px dashed var(--color-border-subtle);
     padding: var(--space-2);
     border-radius: var(--radius-md);
+  }
+
+  .gym-header {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: var(--space-3);
+    align-items: center;
+  }
+
+  .gym-header__icon {
+    width: 52px;
+    height: 52px;
+    border-radius: var(--radius-md);
+    background: var(--color-surface-muted);
+    border: 1px solid var(--color-border-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-text-muted);
+  }
+
+  .gym-header__content {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .equipment-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .equipment-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: var(--color-surface-muted);
+    border: 1px solid var(--color-border-subtle);
+    font-size: var(--text-xs);
+  }
+
+  .compat-item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+  }
+
+  .compat-item__main {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .compat-item__actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .equipment-warning {

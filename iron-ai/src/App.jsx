@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import CoachView from "./features/coach/CoachView";
+import GymsView from "./features/gyms/GymsView";
 import WorkoutSpacesManager from "./features/spaces/WorkoutSpacesManager";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
@@ -1872,10 +1873,12 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
 
 export default function App() {
   const [tab, setTab] = useState("workout");
+  const [settingsSection, setSettingsSection] = useState("settings");
   const [activeTemplateId, setActiveTemplateId] = useState(null);
   const [workoutId, setWorkoutId] = useState(null);
   const [lastSummary, setLastSummary] = useState(null);
   const [toasts, setToasts] = useState([]);
+  const [coachLaunchContext, setCoachLaunchContext] = useState(null);
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -1973,7 +1976,12 @@ export default function App() {
             onNotify={notify}
           />
         )}
-        {tab === "coach" && <CoachView />}
+        {tab === "coach" && (
+          <CoachView
+            launchContext={coachLaunchContext}
+            onLaunchContextConsumed={() => setCoachLaunchContext(null)}
+          />
+        )}
         {tab === "history" && <HistoryView />}
         {tab === "summary" && (
           <SummaryView
@@ -2005,6 +2013,12 @@ export default function App() {
             themeMode={themeMode}
             resolvedTheme={resolvedTheme}
             setThemeMode={setThemeMode}
+            section={settingsSection}
+            onChangeSection={setSettingsSection}
+            onLaunchCoach={(context) => {
+              setCoachLaunchContext(context);
+              setTab("coach");
+            }}
           />
         )}
       </main>

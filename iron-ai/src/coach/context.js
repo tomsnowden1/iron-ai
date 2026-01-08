@@ -215,6 +215,7 @@ export async function getCoachContextSnapshot(options = {}) {
     templateLimit = DEFAULT_TEMPLATE_LIMIT,
     maxBytes = DEFAULT_MAX_BYTES,
     memorySummary = null,
+    launchContext = null,
   } = options;
 
   const resolvedSessionLimit = clamp(
@@ -364,6 +365,13 @@ export async function getCoachContextSnapshot(options = {}) {
     availableEquipment: includeSpaces ? availableEquipment : [],
     missingEquipment: includeSpaces ? missingEquipment : [],
     memorySummary: memorySummaryData,
+    launchContext: launchContext
+      ? {
+          source: launchContext.source ?? null,
+          gymId: launchContext.gymId ?? null,
+          gymName: launchContext.gymName ?? null,
+        }
+      : null,
   };
 
   const size = sizeOfSnapshot(snapshot);
