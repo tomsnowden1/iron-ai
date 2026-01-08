@@ -432,7 +432,7 @@ function TemplateEditorForm({
           </div>
           {!workoutSpaces?.length ? (
             <div className="template-meta">
-              No workout spaces yet. Create one in Settings.
+              No workout spaces yet. Create one in Library.
             </div>
           ) : null}
           {showMismatchWarning ? (

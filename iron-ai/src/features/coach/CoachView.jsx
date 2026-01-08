@@ -64,7 +64,9 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextMeta, setContextMeta] = useState(null);
   const [contextLoading, setContextLoading] = useState(false);
-  const [pendingLaunchContext, setPendingLaunchContext] = useState(null);
+  const [pendingLaunchContext, setPendingLaunchContext] = useState(
+    () => launchContext ?? null
+  );
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -161,6 +163,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
     const userId = (messageIdRef.current += 1);
     setMessages((prev) => [...prev, createMessage(userId, "user", trimmed)]);
 
+    const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
     let streamedId = null;
     try {
       const result = await runCoachTurn({
@@ -168,7 +171,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
         chatHistory: chatHistoryRef.current,
         userMessage: trimmed,
         contextConfig: {
-          enabled: contextEnabled,
+          enabled: effectiveContextEnabled,
           scopes: contextScopes,
           launchContext: pendingLaunchContext,
         },

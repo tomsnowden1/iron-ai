@@ -19,7 +19,7 @@ Each space stores:
 - Existing workouts/templates without `spaceId` continue to load normally.
 
 ## UI Behavior
-- Settings > Workout Spaces lets you create, edit, duplicate, delete spaces.
+- Library > Gyms lets you create, edit, duplicate, delete spaces.
 - Equipment is chosen via a searchable checklist.
 - If a space has no equipment selected, a warning is shown (non-blocking).
 - Temporary spaces can set an expiry date; expired spaces are ignored when resolving active space.

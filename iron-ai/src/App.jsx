@@ -659,9 +659,9 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
                 </div>
               </div>
             ) : (
-              <div className="template-meta">
-                Add workout spaces in Settings to tailor equipment availability.
-              </div>
+                <div className="template-meta">
+                  Add gyms in Library to tailor equipment availability.
+                </div>
             )}
           </CardBody>
           <CardFooter>
@@ -2002,6 +2002,12 @@ export default function App() {
       setSettingsSection("settings");
     }
   }, [settingsSection, tab]);
+
+  useEffect(() => {
+    if (tab !== "coach" && coachLaunchContext) {
+      setCoachLaunchContext(null);
+    }
+  }, [coachLaunchContext, tab]);
 
   const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
     const id = await startWorkoutFromTemplate(templateId, options);
