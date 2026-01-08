@@ -167,16 +167,16 @@ export function getTemplateCompatibility({
     );
     if (!missing.length) return;
 
-    const substitutions =
-      exercises.length > 0
-        ? getExerciseSubstitutionsForExercise(
-            exercise,
-            exercises,
-            spaceEquipmentIds ?? [],
-            resolvedEquipmentMap
-          )
-        : [];
-    if (!substitutions.length) {
+    const canCheckSubstitutions = exercises.length > 0;
+    const substitutions = canCheckSubstitutions
+      ? getExerciseSubstitutionsForExercise(
+          exercise,
+          exercises,
+          spaceEquipmentIds ?? [],
+          resolvedEquipmentMap
+        )
+      : [];
+    if (canCheckSubstitutions && !substitutions.length) {
       hasBlockingMissing = true;
     }
 

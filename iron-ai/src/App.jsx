@@ -10,7 +10,6 @@ import {
 
 import CoachView from "./features/coach/CoachView";
 import GymsView from "./features/gyms/GymsView";
-import WorkoutSpacesManager from "./features/spaces/WorkoutSpacesManager";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
@@ -1728,11 +1727,6 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
           </Button>
         </div>
 
-        <hr className="ui-divider" />
-
-        <div className="ui-section-title">Workout Spaces</div>
-        <WorkoutSpacesManager onNotify={onNotify} />
-
         <Button variant="primary" size="md" onClick={saveSettings} className="w-full">
           Save Settings
         </Button>
@@ -1741,7 +1735,42 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   );
 }
 
-function SettingsView({ onNotify, themeMode, resolvedTheme, setThemeMode }) {
+function LibraryView({ onBack, onOpenGyms }) {
+  return (
+    <div className="page">
+      <PageHeader
+        title="Library"
+        subtitle="Quick access to your saved resources."
+        actions={
+          <Button variant="ghost" size="sm" onClick={onBack}>
+            Back to Settings
+          </Button>
+        }
+      />
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-strong">Gyms</div>
+          <div className="template-meta">
+            Create and manage workout spaces, equipment, and template compatibility.
+          </div>
+          <Button variant="primary" size="sm" onClick={onOpenGyms}>
+            Open Gyms
+          </Button>
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+function SettingsView({
+  onNotify,
+  themeMode,
+  resolvedTheme,
+  setThemeMode,
+  section,
+  onChangeSection,
+  onLaunchCoach,
+}) {
   const settings = useLiveQuery(() => db.settings.get(1), []);
   const settingsKey = settings
     ? `${settings.api_key ?? ""}::${settings.coach_persona ?? ""}::${
@@ -1753,9 +1782,36 @@ function SettingsView({ onNotify, themeMode, resolvedTheme, setThemeMode }) {
       }`
     : "loading";
 
+  if (section === "library") {
+    return (
+      <LibraryView
+        onBack={() => onChangeSection?.("settings")}
+        onOpenGyms={() => onChangeSection?.("gyms")}
+      />
+    );
+  }
+
+  if (section === "gyms") {
+    return (
+      <GymsView
+        onBack={() => onChangeSection?.("library")}
+        onLaunchCoach={onLaunchCoach}
+        onNotify={onNotify}
+      />
+    );
+  }
+
   return (
     <div className="page">
-      <PageHeader title="Settings" subtitle="Manage your local preferences." />
+      <PageHeader
+        title="Settings"
+        subtitle="Manage your local preferences."
+        actions={
+          <Button variant="secondary" size="sm" onClick={() => onChangeSection?.("library")}>
+            Library
+          </Button>
+        }
+      />
       <SettingsForm
         key={settingsKey}
         settings={settings}
@@ -1941,6 +1997,12 @@ export default function App() {
     window.localStorage.setItem("ironai.activeWorkoutId", String(workoutId));
   }, [workoutId]);
 
+  useEffect(() => {
+    if (tab !== "settings" && settingsSection !== "settings") {
+      setSettingsSection("settings");
+    }
+  }, [settingsSection, tab]);
+
   const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
     const id = await startWorkoutFromTemplate(templateId, options);
     setWorkoutId(id);
@@ -2058,7 +2120,10 @@ export default function App() {
             icon={SettingsIcon}
             label="Settings"
             active={tab === "settings"}
-            onClick={() => setTab("settings")}
+            onClick={() => {
+              setTab("settings");
+              setSettingsSection("settings");
+            }}
           />
         </div>
       </nav>
