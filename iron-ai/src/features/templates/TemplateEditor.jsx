@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import {
@@ -32,6 +32,7 @@ import {
   getMissingEquipmentForExercise,
 } from "../../equipment/engine";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
+import ExercisePickerView from "../exercises/ExercisePickerView";
 
 export default function TemplateEditor({ templateId, onBack, onStartWorkout, onNotify }) {
   const templateBundle = useLiveQuery(
@@ -115,20 +116,8 @@ function TemplateEditorForm({
   onNotify,
 }) {
   const [name, setName] = useState(templateBundle?.template?.name ?? "");
-  const [newExerciseId, setNewExerciseId] = useState("");
-  const [exerciseSearch, setExerciseSearch] = useState("");
-  const [filterByActiveGym, setFilterByActiveGym] = useState(
-    settings?.exercise_picker_filter_active_gym ?? true
-  );
-  const [showMostUsedFirst, setShowMostUsedFirst] = useState(
-    settings?.exercise_picker_most_used_first ?? true
-  );
-  const [pickerTouched, setPickerTouched] = useState(false);
-  const exerciseSearchRef = useRef(null);
-  const autoFocusAppliedRef = useRef(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const nameId = useId();
-  const addExerciseId = useId();
-  const exerciseSearchId = useId();
   const templateSpaceId = useId();
   const activeSpaceId = useId();
 
@@ -142,11 +131,6 @@ function TemplateEditorForm({
     () => resolveActiveSpace(workoutSpaces ?? [], settingsActiveSpaceId),
     [settingsActiveSpaceId, workoutSpaces]
   );
-  const pickerSpace = activeSpace;
-  const hasActiveGym = Boolean(pickerSpace);
-  const pickerAutoFocus = settings?.exercise_picker_auto_focus ?? true;
-  const pickerFilterDefault = settings?.exercise_picker_filter_active_gym ?? true;
-  const pickerMostUsedDefault = settings?.exercise_picker_most_used_first ?? true;
   const templateSpace = useMemo(() => {
     if (!template?.spaceId) return null;
     return (workoutSpaces ?? []).find((space) => space.id === template.spaceId) ?? null;
@@ -210,105 +194,6 @@ function TemplateEditorForm({
     [items]
   );
 
-  const availableExercises = useMemo(() => {
-    const list = allExercises ?? [];
-    return list.filter((ex) => !existingExerciseIds.has(ex.id));
-  }, [allExercises, existingExerciseIds]);
-
-  const exerciseUsageMap = useMemo(() => {
-    const entries = Array.isArray(exerciseUsageCounts) ? exerciseUsageCounts : [];
-    return new Map(entries.map(({ exerciseId, count }) => [exerciseId, count]));
-  }, [exerciseUsageCounts]);
-  const hasUsageHistory = exerciseUsageMap.size > 0;
-  const exerciseSearchQuery = exerciseSearch.trim().toLowerCase();
-  const filteredExercises = useMemo(() => {
-    let filtered = availableExercises;
-    if (filterByActiveGym && hasActiveGym) {
-      const equipmentIds = pickerSpace?.equipmentIds ?? [];
-      filtered = filtered.filter((exercise) => {
-        const missing = getMissingEquipmentForExercise(exercise, equipmentIds, equipmentMap);
-        return missing.length === 0;
-      });
-    }
-    if (exerciseSearchQuery) {
-      filtered = filtered.filter((exercise) => {
-        const name = String(exercise.name ?? "").toLowerCase();
-        const group = String(exercise.muscle_group ?? "").toLowerCase();
-        return name.includes(exerciseSearchQuery) || group.includes(exerciseSearchQuery);
-      });
-    }
-    return filtered;
-  }, [
-    availableExercises,
-    equipmentMap,
-    exerciseSearchQuery,
-    filterByActiveGym,
-    hasActiveGym,
-    pickerSpace,
-  ]);
-
-  const mostUsedExercises = useMemo(() => {
-    if (!showMostUsedFirst || !hasUsageHistory) return [];
-    const filtered = filteredExercises.filter(
-      (exercise) => (exerciseUsageMap.get(exercise.id) ?? 0) > 0
-    );
-    if (!filtered.length) return [];
-    const sorted = [...filtered].sort((a, b) => {
-      const countDiff =
-        (exerciseUsageMap.get(b.id) ?? 0) - (exerciseUsageMap.get(a.id) ?? 0);
-      if (countDiff !== 0) return countDiff;
-      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
-    });
-    return sorted.slice(0, 6);
-  }, [exerciseUsageMap, filteredExercises, hasUsageHistory, showMostUsedFirst]);
-
-  const remainingExercises = useMemo(() => {
-    if (!mostUsedExercises.length) return filteredExercises;
-    const mostUsedIds = new Set(mostUsedExercises.map((exercise) => exercise.id));
-    return filteredExercises.filter((exercise) => !mostUsedIds.has(exercise.id));
-  }, [filteredExercises, mostUsedExercises]);
-
-  const showMostUsedSection = showMostUsedFirst && mostUsedExercises.length > 0;
-  const hasFilteredExercises = filteredExercises.length > 0;
-  const emptyExerciseLabel = availableExercises.length
-    ? "No exercises match filters"
-    : "No exercises available";
-
-  useEffect(() => {
-    if (pickerTouched) return;
-    setFilterByActiveGym(pickerFilterDefault && hasActiveGym);
-    setShowMostUsedFirst(pickerMostUsedDefault);
-    if (
-      pickerAutoFocus &&
-      !autoFocusAppliedRef.current &&
-      exerciseSearchRef.current
-    ) {
-      exerciseSearchRef.current.focus();
-      autoFocusAppliedRef.current = true;
-    }
-  }, [
-    hasActiveGym,
-    pickerAutoFocus,
-    pickerFilterDefault,
-    pickerMostUsedDefault,
-    pickerTouched,
-  ]);
-
-  useEffect(() => {
-    if (hasActiveGym) return;
-    setFilterByActiveGym(false);
-  }, [hasActiveGym]);
-
-  useEffect(() => {
-    if (!newExerciseId) return;
-    const stillAvailable = filteredExercises.some(
-      (exercise) => String(exercise.id) === String(newExerciseId)
-    );
-    if (!stillAvailable) {
-      setNewExerciseId("");
-    }
-  }, [filteredExercises, newExerciseId]);
-
   const handleSaveName = async () => {
     if (!template) return;
     await updateTemplate(template.id, { name: name.trim() || "Untitled Template" });
@@ -322,12 +207,16 @@ function TemplateEditorForm({
     onBack?.();
   };
 
-  const handleAddExercise = async () => {
-    if (!newExerciseId || !template) return;
-    const exId = parseInt(newExerciseId, 10);
-    if (Number.isNaN(exId)) return;
-    await addExerciseToTemplate(template.id, exId);
-    setNewExerciseId("");
+  const handleSelectExercise = async (exerciseId) => {
+    if (!template || !exerciseId) return false;
+    try {
+      await addExerciseToTemplate(template.id, exerciseId);
+      setPickerOpen(false);
+      return true;
+    } catch (err) {
+      onNotify?.(err?.message ?? "Unable to add exercise.", { tone: "error" });
+      return false;
+    }
   };
 
   const handleRemoveItem = async (templateItemId) => {
@@ -346,6 +235,23 @@ function TemplateEditorForm({
     await startWorkoutFromTemplate(template.id, { spaceId: startSpaceId });
     onNotify?.("Workout started ✅", { tone: "success" });
   };
+
+  if (pickerOpen) {
+    return (
+      <ExercisePickerView
+        title="Add exercise"
+        subtitle="Pick an exercise to add to this template."
+        exercises={allExercises}
+        equipmentList={equipmentList}
+        usageStats={exerciseUsageCounts}
+        activeSpace={activeSpace}
+        settings={settings}
+        excludeExerciseIds={existingExerciseIds}
+        onSelectExercise={handleSelectExercise}
+        onClose={() => setPickerOpen(false)}
+      />
+    );
+  }
 
   return (
     <div className="page">
@@ -500,117 +406,16 @@ function TemplateEditorForm({
           <div className="ui-section-title">Add exercise</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          <div>
-            <Label htmlFor={exerciseSearchId}>Search exercises</Label>
-            <Input
-              id={exerciseSearchId}
-              type="search"
-              placeholder="Search by name or muscle group"
-              value={exerciseSearch}
-              onChange={(e) => {
-                setPickerTouched(true);
-                setExerciseSearch(e.target.value);
-              }}
-              ref={exerciseSearchRef}
-            />
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Available at active gym</div>
-              <div className="template-meta">
-                Only show exercises available at the active gym.
-              </div>
-              {!hasActiveGym ? (
-                <div className="template-meta">Set an active gym to filter by equipment.</div>
-              ) : null}
-            </div>
-            <Button
-              variant={filterByActiveGym ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                if (!hasActiveGym) return;
-                setPickerTouched(true);
-                setFilterByActiveGym((prev) => !prev);
-              }}
-              disabled={!hasActiveGym}
-              aria-pressed={filterByActiveGym}
-            >
-              {filterByActiveGym ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Most used first</div>
-              <div className="template-meta">
-                Prioritize frequently used exercises when opening the picker.
-              </div>
-            </div>
-            <Button
-              variant={showMostUsedFirst ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                setPickerTouched(true);
-                setShowMostUsedFirst((prev) => !prev);
-              }}
-              aria-pressed={showMostUsedFirst}
-            >
-              {showMostUsedFirst ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div>
-            <Label htmlFor={addExerciseId}>Choose exercise</Label>
-            <Select
-              id={addExerciseId}
-              value={newExerciseId}
-              onChange={(e) => {
-                setPickerTouched(true);
-                setNewExerciseId(e.target.value);
-              }}
-              disabled={!hasFilteredExercises}
-            >
-              <option value="">
-                {hasFilteredExercises ? "Select an exercise" : emptyExerciseLabel}
-              </option>
-              {showMostUsedSection ? (
-                <optgroup label="Most Used">
-                  {mostUsedExercises.map((ex) => (
-                    <option key={ex.id} value={String(ex.id)}>
-                      {ex.name} ({ex.muscle_group})
-                    </option>
-                  ))}
-                </optgroup>
-              ) : null}
-              {showMostUsedSection ? (
-                remainingExercises.length ? (
-                  <optgroup label="All Exercises">
-                    {remainingExercises.map((ex) => (
-                      <option key={ex.id} value={String(ex.id)}>
-                        {ex.name} ({ex.muscle_group})
-                      </option>
-                    ))}
-                  </optgroup>
-                ) : null
-              ) : (
-                filteredExercises.map((ex) => (
-                  <option key={ex.id} value={String(ex.id)}>
-                    {ex.name} ({ex.muscle_group})
-                  </option>
-                ))
-              )}
-            </Select>
+          <div className="template-meta">
+            Open the full-page picker to search, filter, and add exercises quickly.
           </div>
           <Button
             variant="secondary"
-            onClick={handleAddExercise}
-            disabled={!newExerciseId}
+            size="md"
+            onClick={() => setPickerOpen(true)}
             className="w-full"
           >
-            Add exercise
+            Open Exercise Picker
           </Button>
         </CardBody>
         <CardFooter className="ui-row ui-row--wrap">

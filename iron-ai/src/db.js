@@ -192,6 +192,87 @@ db.version(6)
     });
   });
 
+/**
+ * v7 (NEW): extended exercise metadata
+ */
+db.version(7)
+  .stores({
+    exercises:
+      "++id, name, default_sets, default_reps, muscle_group, video_url, is_custom",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+  })
+  .upgrade(async (tx) => {
+    await tx.table("exercises").toCollection().modify((exercise) => {
+      const primary =
+        Array.isArray(exercise.primaryMuscles) && exercise.primaryMuscles.length
+          ? exercise.primaryMuscles
+          : [];
+      if (!primary.length) {
+        const legacy = String(exercise.muscle_group ?? "").trim();
+        exercise.primaryMuscles = legacy ? [legacy] : [];
+      }
+      if (!Array.isArray(exercise.secondaryMuscles)) {
+        exercise.secondaryMuscles = [];
+      }
+      if (!Array.isArray(exercise.instructions)) {
+        exercise.instructions = [];
+      }
+      if (!Array.isArray(exercise.commonMistakes)) {
+        exercise.commonMistakes = [];
+      }
+      if (!Array.isArray(exercise.progressions)) {
+        exercise.progressions = [];
+      }
+      if (!Array.isArray(exercise.regressions)) {
+        exercise.regressions = [];
+      }
+      if (!Array.isArray(exercise.aliases)) {
+        exercise.aliases = [];
+      }
+
+      const hasRequired =
+        Array.isArray(exercise.requiredEquipmentIds) &&
+        exercise.requiredEquipmentIds.length > 0;
+      const hasOptional = Array.isArray(exercise.optionalEquipmentIds);
+      if (!hasRequired || !hasOptional) {
+        const inferred = inferExerciseEquipment(exercise);
+        if (!hasRequired) {
+          exercise.requiredEquipmentIds = inferred.requiredEquipmentIds;
+        }
+        if (!hasOptional) {
+          exercise.optionalEquipmentIds = inferred.optionalEquipmentIds;
+        }
+      }
+
+      if (!exercise.media || typeof exercise.media !== "object") {
+        exercise.media = {};
+      }
+      if (exercise.video_url && !exercise.media.videoUrl) {
+        exercise.media.videoUrl = exercise.video_url;
+      }
+      if (exercise.videoUrl && !exercise.media.videoUrl) {
+        exercise.media.videoUrl = exercise.videoUrl;
+      }
+    });
+  });
+
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
@@ -207,13 +288,34 @@ db.on("populate", async () => {
     updatedAt: now,
   });
   await db.table("exercises").bulkAdd(
-    starterExercises.map((ex) => ({
-      ...ex,
-      is_custom: false,
-      ...inferExerciseEquipment(ex),
-      createdAt: now,
-      updatedAt: now,
-    }))
+    starterExercises.map((ex) => {
+      const primaryMuscles =
+        Array.isArray(ex.primaryMuscles) && ex.primaryMuscles.length
+          ? ex.primaryMuscles
+          : ex.muscle_group
+            ? [ex.muscle_group]
+            : [];
+      const media =
+        ex.media ??
+        (ex.video_url || ex.videoUrl
+          ? { videoUrl: ex.video_url ?? ex.videoUrl }
+          : {});
+      return {
+        ...ex,
+        primaryMuscles,
+        secondaryMuscles: Array.isArray(ex.secondaryMuscles) ? ex.secondaryMuscles : [],
+        instructions: Array.isArray(ex.instructions) ? ex.instructions : [],
+        commonMistakes: Array.isArray(ex.commonMistakes) ? ex.commonMistakes : [],
+        progressions: Array.isArray(ex.progressions) ? ex.progressions : [],
+        regressions: Array.isArray(ex.regressions) ? ex.regressions : [],
+        aliases: Array.isArray(ex.aliases) ? ex.aliases : [],
+        media,
+        is_custom: false,
+        ...inferExerciseEquipment(ex),
+        createdAt: now,
+        updatedAt: now,
+      };
+    })
   );
 });
 

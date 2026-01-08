@@ -18,6 +18,7 @@ const SYSTEM_PROMPT = [
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
+  "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
   "If a write action is requested, ask for user confirmation before changes are made.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
 ].join(" ");

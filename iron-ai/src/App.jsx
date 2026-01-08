@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
+  BookOpen,
   Dumbbell,
   History,
   Settings as SettingsIcon,
@@ -9,7 +10,8 @@ import {
 } from "lucide-react";
 
 import CoachView from "./features/coach/CoachView";
-import GymsView from "./features/gyms/GymsView";
+import ExercisePickerView from "./features/exercises/ExercisePickerView";
+import LibraryView from "./features/library/LibraryView";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
@@ -56,6 +58,14 @@ import {
 
 const SESSION_NOTE_LIMIT = 500;
 const EXERCISE_NOTE_LIMIT = 250;
+const NAV_ITEMS = [
+  { id: "workout", label: "Workout", icon: Dumbbell },
+  { id: "coach", label: "Coach", icon: MessageSquare },
+  { id: "history", label: "History", icon: History },
+  { id: "templates", label: "Templates", icon: LayoutTemplate },
+  { id: "library", label: "Library", icon: BookOpen },
+  { id: "settings", label: "Settings", icon: SettingsIcon },
+];
 
 function TabButton({ icon: Icon, label, active, onClick }) {
   return (
@@ -86,7 +96,14 @@ function parseRestInput(value) {
   return Math.max(0, parsed);
 }
 
-function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
+function WorkoutView({
+  workoutId,
+  setWorkoutId,
+  onFinish,
+  onNotify,
+  pickerIntent,
+  onConsumePickerIntent,
+}) {
   // Hooks MUST be at the top, always called
   const workoutBundle = useLiveQuery(
     () => (workoutId ? getWorkoutWithDetails(workoutId) : null),
@@ -97,23 +114,12 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
   const equipmentList = useLiveQuery(() => listEquipment(), []);
 
   const viewRef = useRef(null);
-  const addExerciseId = useId();
-  const exerciseSearchId = useId();
   const replaceSelectId = useId();
   const restFieldId = useId();
   const allExercises = useLiveQuery(() => getAllExercises(), []);
   const exerciseUsageCounts = useLiveQuery(() => getExerciseUsageCounts(), []);
-  const [newExerciseId, setNewExerciseId] = useState("");
-  const exerciseSearchRef = useRef(null);
-  const [exerciseSearch, setExerciseSearch] = useState("");
-  const [filterByActiveGym, setFilterByActiveGym] = useState(
-    settings?.exercise_picker_filter_active_gym ?? true
-  );
-  const [showMostUsedFirst, setShowMostUsedFirst] = useState(
-    settings?.exercise_picker_most_used_first ?? true
-  );
-  const [pickerTouched, setPickerTouched] = useState(false);
-  const autoFocusAppliedRef = useRef(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPrefill, setPickerPrefill] = useState(null);
 
   // Replace Exercise UI state (Step C/D)
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -162,10 +168,6 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     return activeSpace;
   }, [activeSpace, workout, workoutSpaces]);
   const pickerSpace = workoutSpace ?? activeSpace;
-  const hasActiveGym = Boolean(pickerSpace);
-  const pickerAutoFocus = settings?.exercise_picker_auto_focus ?? true;
-  const pickerFilterDefault = settings?.exercise_picker_filter_active_gym ?? true;
-  const pickerMostUsedDefault = settings?.exercise_picker_most_used_first ?? true;
   const startSpaceId = activeSpace?.id ?? null;
   const activeSpaceSelectValue =
     settingsActiveSpaceId != null && settingsActiveSpaceId === activeSpace?.id
@@ -196,10 +198,6 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     return new Set(items.map((i) => i.exerciseId));
   }, [items]);
 
-  const availableExercises = useMemo(() => {
-    return (allExercises ?? []).filter((ex) => !existingExerciseIds.has(ex.id));
-  }, [allExercises, existingExerciseIds]);
-
   const replaceOptions = useMemo(() => {
     const list = allExercises ?? [];
     return list.filter(
@@ -207,106 +205,17 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     );
   }, [allExercises, existingExerciseIds, replaceCurrentExerciseId]);
 
-  const exerciseUsageMap = useMemo(() => {
-    const entries = Array.isArray(exerciseUsageCounts) ? exerciseUsageCounts : [];
-    return new Map(entries.map(({ exerciseId, count }) => [exerciseId, count]));
-  }, [exerciseUsageCounts]);
-  const hasUsageHistory = exerciseUsageMap.size > 0;
-  const exerciseSearchQuery = exerciseSearch.trim().toLowerCase();
-  const filteredExercises = useMemo(() => {
-    let filtered = availableExercises;
-    if (filterByActiveGym && hasActiveGym) {
-      const equipmentIds = pickerSpace?.equipmentIds ?? [];
-      filtered = filtered.filter((exercise) => {
-        const missing = getMissingEquipmentForExercise(exercise, equipmentIds, equipmentMap);
-        return missing.length === 0;
-      });
-    }
-    if (exerciseSearchQuery) {
-      filtered = filtered.filter((exercise) => {
-        const name = String(exercise.name ?? "").toLowerCase();
-        const group = String(exercise.muscle_group ?? "").toLowerCase();
-        return name.includes(exerciseSearchQuery) || group.includes(exerciseSearchQuery);
-      });
-    }
-    return filtered;
-  }, [
-    availableExercises,
-    equipmentMap,
-    exerciseSearchQuery,
-    filterByActiveGym,
-    hasActiveGym,
-    pickerSpace,
-  ]);
-
-  const mostUsedExercises = useMemo(() => {
-    if (!showMostUsedFirst || !hasUsageHistory) return [];
-    const filtered = filteredExercises.filter(
-      (exercise) => (exerciseUsageMap.get(exercise.id) ?? 0) > 0
-    );
-    if (!filtered.length) return [];
-    const sorted = [...filtered].sort((a, b) => {
-      const countDiff =
-        (exerciseUsageMap.get(b.id) ?? 0) - (exerciseUsageMap.get(a.id) ?? 0);
-      if (countDiff !== 0) return countDiff;
-      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
-    });
-    return sorted.slice(0, 6);
-  }, [exerciseUsageMap, filteredExercises, hasUsageHistory, showMostUsedFirst]);
-
-  const remainingExercises = useMemo(() => {
-    if (!mostUsedExercises.length) return filteredExercises;
-    const mostUsedIds = new Set(mostUsedExercises.map((exercise) => exercise.id));
-    return filteredExercises.filter((exercise) => !mostUsedIds.has(exercise.id));
-  }, [filteredExercises, mostUsedExercises]);
-
-  const showMostUsedSection = showMostUsedFirst && mostUsedExercises.length > 0;
-  const hasFilteredExercises = filteredExercises.length > 0;
-  const emptyExerciseLabel = availableExercises.length
-    ? "No exercises match filters"
-    : "No exercises available";
-
   useEffect(() => {
-    if (pickerTouched) return;
-    setFilterByActiveGym(pickerFilterDefault && hasActiveGym);
-    setShowMostUsedFirst(pickerMostUsedDefault);
-    if (
-      pickerAutoFocus &&
-      !autoFocusAppliedRef.current &&
-      exerciseSearchRef.current
-    ) {
-      exerciseSearchRef.current.focus();
-      autoFocusAppliedRef.current = true;
-    }
-  }, [
-    hasActiveGym,
-    pickerAutoFocus,
-    pickerFilterDefault,
-    pickerMostUsedDefault,
-    pickerTouched,
-  ]);
-
-  useEffect(() => {
-    if (hasActiveGym) return;
-    setFilterByActiveGym(false);
-  }, [hasActiveGym]);
-
-  useEffect(() => {
-    if (!newExerciseId) return;
-    const stillAvailable = filteredExercises.some(
-      (exercise) => String(exercise.id) === String(newExerciseId)
-    );
-    if (!stillAvailable) {
-      setNewExerciseId("");
-    }
-  }, [filteredExercises, newExerciseId]);
-
-  useEffect(() => {
-    setExerciseSearch("");
-    setNewExerciseId("");
-    setPickerTouched(false);
-    autoFocusAppliedRef.current = false;
+    setPickerOpen(false);
+    setPickerPrefill(null);
   }, [workoutId]);
+
+  useEffect(() => {
+    if (!pickerIntent || !workoutId) return;
+    setPickerPrefill(pickerIntent);
+    setPickerOpen(true);
+    onConsumePickerIntent?.();
+  }, [onConsumePickerIntent, pickerIntent, workoutId]);
 
   useEffect(() => {
     if (!workout || sessionNoteFocused) return;
@@ -547,15 +456,16 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     startRestForSet(itemId, setId);
   };
 
-  const handleAddExercise = async () => {
-    if (!newExerciseId) return;
-    const exId = parseInt(newExerciseId, 10);
-    if (Number.isNaN(exId)) return;
+  const handleSelectExercise = async (exerciseId) => {
+    if (!exerciseId || !workoutId) return false;
     try {
-      await addExerciseToWorkout(workoutId, exId);
-      setNewExerciseId("");
+      await addExerciseToWorkout(workoutId, exerciseId);
+      setPickerOpen(false);
+      setPickerPrefill(null);
+      return true;
     } catch (err) {
       onNotify?.(err?.message ?? "Could not add exercise.", { tone: "error" });
+      return false;
     }
   };
 
@@ -618,6 +528,27 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
     }
     await updateWorkoutSession(workoutId, { exerciseNotes: next });
   };
+
+  if (pickerOpen) {
+    return (
+      <ExercisePickerView
+        title="Add exercise"
+        subtitle="Pick an exercise to add to this workout."
+        exercises={allExercises}
+        equipmentList={equipmentList}
+        usageStats={exerciseUsageCounts}
+        activeSpace={pickerSpace}
+        settings={settings}
+        excludeExerciseIds={existingExerciseIds}
+        prefillExercise={pickerPrefill}
+        onSelectExercise={handleSelectExercise}
+        onClose={() => {
+          setPickerOpen(false);
+          setPickerPrefill(null);
+        }}
+      />
+    );
+  }
 
   // NOW safe to early-return UI
   if (!workoutId) {
@@ -988,117 +919,19 @@ function WorkoutView({ workoutId, setWorkoutId, onFinish, onNotify }) {
           <div className="ui-section-title">Add exercise</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          <div>
-            <Label htmlFor={exerciseSearchId}>Search exercises</Label>
-            <Input
-              id={exerciseSearchId}
-              type="search"
-              placeholder="Search by name or muscle group"
-              value={exerciseSearch}
-              onChange={(e) => {
-                setPickerTouched(true);
-                setExerciseSearch(e.target.value);
-              }}
-              ref={exerciseSearchRef}
-            />
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Available at active gym</div>
-              <div className="template-meta">
-                Only show exercises available at the active gym.
-              </div>
-              {!hasActiveGym ? (
-                <div className="template-meta">Set an active gym to filter by equipment.</div>
-              ) : null}
-            </div>
-            <Button
-              variant={filterByActiveGym ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                if (!hasActiveGym) return;
-                setPickerTouched(true);
-                setFilterByActiveGym((prev) => !prev);
-              }}
-              disabled={!hasActiveGym}
-              aria-pressed={filterByActiveGym}
-            >
-              {filterByActiveGym ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Most used first</div>
-              <div className="template-meta">
-                Prioritize frequently used exercises when opening the picker.
-              </div>
-            </div>
-            <Button
-              variant={showMostUsedFirst ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                setPickerTouched(true);
-                setShowMostUsedFirst((prev) => !prev);
-              }}
-              aria-pressed={showMostUsedFirst}
-            >
-              {showMostUsedFirst ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div>
-            <Label htmlFor={addExerciseId}>Exercise</Label>
-            <Select
-              id={addExerciseId}
-              value={newExerciseId}
-              onChange={(e) => {
-                setPickerTouched(true);
-                setNewExerciseId(e.target.value);
-              }}
-              disabled={!hasFilteredExercises}
-            >
-              <option value="">
-                {hasFilteredExercises ? "Select an exercise" : emptyExerciseLabel}
-              </option>
-              {showMostUsedSection ? (
-                <optgroup label="Most Used">
-                  {mostUsedExercises.map((ex) => (
-                    <option key={ex.id} value={String(ex.id)}>
-                      {ex.name} ({ex.muscle_group})
-                    </option>
-                  ))}
-                </optgroup>
-              ) : null}
-              {showMostUsedSection ? (
-                remainingExercises.length ? (
-                  <optgroup label="All Exercises">
-                    {remainingExercises.map((ex) => (
-                      <option key={ex.id} value={String(ex.id)}>
-                        {ex.name} ({ex.muscle_group})
-                      </option>
-                    ))}
-                  </optgroup>
-                ) : null
-              ) : (
-                filteredExercises.map((ex) => (
-                  <option key={ex.id} value={String(ex.id)}>
-                    {ex.name} ({ex.muscle_group})
-                  </option>
-                ))
-              )}
-            </Select>
+          <div className="template-meta">
+            Open the full-page picker to search, filter, and add exercises fast.
           </div>
           <Button
             variant="secondary"
-            onClick={handleAddExercise}
-            disabled={!newExerciseId}
+            size="md"
+            onClick={() => {
+              setPickerPrefill(null);
+              setPickerOpen(true);
+            }}
             className="w-full"
           >
-            Add exercise
+            Open Exercise Picker
           </Button>
         </CardBody>
       </Card>
@@ -1735,41 +1568,11 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   );
 }
 
-function LibraryView({ onBack, onOpenGyms }) {
-  return (
-    <div className="page">
-      <PageHeader
-        title="Library"
-        subtitle="Quick access to your saved resources."
-        actions={
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            Back to Settings
-          </Button>
-        }
-      />
-      <Card>
-        <CardBody className="ui-stack">
-          <div className="ui-strong">Gyms</div>
-          <div className="template-meta">
-            Create and manage workout spaces, equipment, and template compatibility.
-          </div>
-          <Button variant="primary" size="sm" onClick={onOpenGyms}>
-            Open Gyms
-          </Button>
-        </CardBody>
-      </Card>
-    </div>
-  );
-}
-
 function SettingsView({
   onNotify,
   themeMode,
   resolvedTheme,
   setThemeMode,
-  section,
-  onChangeSection,
-  onLaunchCoach,
 }) {
   const settings = useLiveQuery(() => db.settings.get(1), []);
   const settingsKey = settings
@@ -1782,35 +1585,11 @@ function SettingsView({
       }`
     : "loading";
 
-  if (section === "library") {
-    return (
-      <LibraryView
-        onBack={() => onChangeSection?.("settings")}
-        onOpenGyms={() => onChangeSection?.("gyms")}
-      />
-    );
-  }
-
-  if (section === "gyms") {
-    return (
-      <GymsView
-        onBack={() => onChangeSection?.("library")}
-        onLaunchCoach={onLaunchCoach}
-        onNotify={onNotify}
-      />
-    );
-  }
-
   return (
     <div className="page">
       <PageHeader
         title="Settings"
         subtitle="Manage your local preferences."
-        actions={
-          <Button variant="secondary" size="sm" onClick={() => onChangeSection?.("library")}>
-            Library
-          </Button>
-        }
       />
       <SettingsForm
         key={settingsKey}
@@ -1929,9 +1708,9 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
 
 export default function App() {
   const [tab, setTab] = useState("workout");
-  const [settingsSection, setSettingsSection] = useState("settings");
   const [activeTemplateId, setActiveTemplateId] = useState(null);
   const [workoutId, setWorkoutId] = useState(null);
+  const [exercisePickerIntent, setExercisePickerIntent] = useState(null);
   const [lastSummary, setLastSummary] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [coachLaunchContext, setCoachLaunchContext] = useState(null);
@@ -1998,12 +1777,6 @@ export default function App() {
   }, [workoutId]);
 
   useEffect(() => {
-    if (tab !== "settings" && settingsSection !== "settings") {
-      setSettingsSection("settings");
-    }
-  }, [settingsSection, tab]);
-
-  useEffect(() => {
     if (tab !== "coach" && coachLaunchContext) {
       setCoachLaunchContext(null);
     }
@@ -2029,6 +1802,32 @@ export default function App() {
     setActiveTemplateId(null);
   };
 
+  const handleTabChange = (nextTab) => {
+    if (nextTab === "templates") {
+      setActiveTemplateId(null);
+    }
+    setTab(nextTab);
+  };
+
+  const handleAddExerciseFromLibrary = async (exerciseId) => {
+    if (!exerciseId) return;
+    try {
+      let currentWorkoutId = workoutId;
+      if (!currentWorkoutId) {
+        currentWorkoutId = await createEmptyWorkout({ spaceId: null });
+        setWorkoutId(currentWorkoutId);
+      }
+      const exercise = await db.table("exercises").get(exerciseId);
+      setExercisePickerIntent({
+        id: exerciseId,
+        name: exercise?.name ?? "",
+      });
+      setTab("workout");
+    } catch (err) {
+      notify(err?.message ?? "Unable to add exercise right now.", { tone: "error" });
+    }
+  };
+
   return (
     <div className="app-shell">
       <main>
@@ -2037,6 +1836,8 @@ export default function App() {
             key={workoutId ?? "none"}
             workoutId={workoutId}
             setWorkoutId={setWorkoutId}
+            pickerIntent={exercisePickerIntent}
+            onConsumePickerIntent={() => setExercisePickerIntent(null)}
             onFinish={(summary) => {
               setLastSummary(summary);
               setTab("summary");
@@ -2075,18 +1876,22 @@ export default function App() {
             />
           ))}
 
+        {tab === "library" && (
+          <LibraryView
+            onLaunchCoach={(context) => {
+              setCoachLaunchContext(context);
+              setTab("coach");
+            }}
+            onAddExerciseToWorkout={handleAddExerciseFromLibrary}
+          />
+        )}
+
         {tab === "settings" && (
           <SettingsView
             onNotify={notify}
             themeMode={themeMode}
             resolvedTheme={resolvedTheme}
             setThemeMode={setThemeMode}
-            section={settingsSection}
-            onChangeSection={setSettingsSection}
-            onLaunchCoach={(context) => {
-              setCoachLaunchContext(context);
-              setTab("coach");
-            }}
           />
         )}
       </main>
@@ -2094,43 +1899,16 @@ export default function App() {
       <ToastHost toasts={toasts} onDismiss={dismissToast} />
 
       <nav className="tabbar">
-        <div className="tabbar__inner">
-          <TabButton
-            icon={Dumbbell}
-            label="Workout"
-            active={tab === "workout"}
-            onClick={() => setTab("workout")}
-          />
-          <TabButton
-            icon={MessageSquare}
-            label="Coach"
-            active={tab === "coach"}
-            onClick={() => setTab("coach")}
-          />
-          <TabButton
-            icon={History}
-            label="History"
-            active={tab === "history"}
-            onClick={() => setTab("history")}
-          />
-          <TabButton
-            icon={LayoutTemplate}
-            label="Templates"
-            active={tab === "templates"}
-            onClick={() => {
-              setTab("templates");
-              setActiveTemplateId(null);
-            }}
-          />
-          <TabButton
-            icon={SettingsIcon}
-            label="Settings"
-            active={tab === "settings"}
-            onClick={() => {
-              setTab("settings");
-              setSettingsSection("settings");
-            }}
-          />
+        <div className="tabbar__inner" style={{ "--tab-count": NAV_ITEMS.length }}>
+          {NAV_ITEMS.map((item) => (
+            <TabButton
+              key={item.id}
+              icon={item.icon}
+              label={item.label}
+              active={tab === item.id}
+              onClick={() => handleTabChange(item.id)}
+            />
+          ))}
         </div>
       </nav>
     </div>

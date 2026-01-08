@@ -370,6 +370,8 @@ export async function getCoachContextSnapshot(options = {}) {
           source: launchContext.source ?? null,
           gymId: launchContext.gymId ?? null,
           gymName: launchContext.gymName ?? null,
+          exerciseId: launchContext.exerciseId ?? null,
+          exerciseName: launchContext.exerciseName ?? null,
         }
       : null,
   };
