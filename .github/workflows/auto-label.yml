@@ -14,12 +14,12 @@ jobs:
       - name: Add automerge label for Codex branches
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref }}
         run: |
-          branch="${{ github.head_ref }}"
-          pr="${{ github.event.pull_request.number }}"
-
-          if [[ "$branch" == codex/* ]]; then
-            gh pr edit "$pr" --add-label "automerge"
+          if [[ "$BRANCH" == codex/* ]]; then
+            gh pr edit "$PR" --repo "$REPO" --add-label "automerge"
           else
             echo "Not a codex/* branch; skipping"
           fi
