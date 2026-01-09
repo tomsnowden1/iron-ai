@@ -786,22 +786,6 @@ function WorkoutView({
                   </div>
                 </div>
 
-                <div className="rest-default-row">
-                  <Label htmlFor={`${restFieldId}-item-${it.id}`}>Rest default (sec)</Label>
-                  <Input
-                    id={`${restFieldId}-item-${it.id}`}
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    className="rest-input"
-                    value={it.restSeconds ?? ""}
-                    placeholder={String(restDefaultSeconds)}
-                    onChange={(e) => {
-                      const parsed = parseRestInput(e.target.value);
-                      void updateWorkoutItem(it.id, { restSeconds: parsed });
-                    }}
-                  />
-                </div>
-
                 {it.sets.length === 0 ? (
                   <div className="ui-muted">No sets yet. Add a set above.</div>
                 ) : (
@@ -821,35 +805,25 @@ function WorkoutView({
                           value={s.reps ?? ""}
                           onChange={(e) => updateWorkoutSet(s.id, { reps: e.target.value })}
                         />
-                        <Input
-                          inputMode="numeric"
-                          pattern="[0-9]*"
-                          className="rest-input"
-                          placeholder={`rest ${
-                            it.restSeconds ?? restDefaultSeconds
-                          }s`}
-                          value={s.restSeconds ?? ""}
-                          aria-label={`Rest override seconds for set ${s.setNumber}`}
-                          onChange={(e) => {
-                            const parsed = parseRestInput(e.target.value);
-                            void updateWorkoutSet(s.id, { restSeconds: parsed });
-                          }}
-                        />
                         <div className="set-actions">
-                          <Button
-                            variant="secondary"
-                            size="sm"
+                          <button
+                            type="button"
+                            className="set-action set-action--done"
                             onClick={() => handleCompleteSet(it.id, s.id)}
+                            aria-label="Mark set as done"
+                            title="Done"
                           >
-                            Done
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
+                            <span aria-hidden="true">✓</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="set-action set-action--remove"
                             onClick={() => removeWorkoutSet(it.id, s.id)}
+                            aria-label="Remove set"
+                            title="Remove"
                           >
-                            Remove
-                          </Button>
+                            <span aria-hidden="true">×</span>
+                          </button>
                         </div>
                       </div>
                     ))}

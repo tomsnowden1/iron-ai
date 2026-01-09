@@ -273,7 +273,7 @@
 
   .set-row {
     display: grid;
-    grid-template-columns: 36px minmax(72px, 1fr) minmax(72px, 1fr) minmax(88px, 1fr) auto;
+    grid-template-columns: 36px minmax(72px, 1fr) minmax(72px, 1fr) auto;
     gap: var(--space-2);
     align-items: center;
   }
@@ -287,6 +287,43 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  .set-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1;
+    transition: transform 0.08s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+
+  .set-action:hover {
+    background: var(--color-hover-muted);
+  }
+
+  .set-action:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  .set-action:active {
+    transform: translateY(1px);
+  }
+
+  .set-action--done {
+    color: var(--color-primary);
+  }
+
+  .set-action--remove {
+    color: var(--color-destructive);
   }
 
   .rest-input {
@@ -865,12 +902,7 @@
 
   @media (max-width: 640px) {
     .set-row {
-      grid-template-columns: 32px 1fr 1fr;
-    }
-
-    .set-row .rest-input {
-      grid-column: 1 / -1;
-      max-width: none;
+      grid-template-columns: 32px 1fr 1fr auto;
     }
 
     .set-actions {
