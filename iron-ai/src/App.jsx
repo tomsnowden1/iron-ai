@@ -43,6 +43,7 @@ import {
   getAllExercises,
   getExerciseUsageCounts,
   getMostRecentActiveWorkoutId,
+  getPreviousWorkoutSetsByExercise,
   getWorkoutWithDetails,
   listEquipment,
   listFinishedWorkouts,
@@ -94,6 +95,20 @@ function parseRestInput(value) {
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return null;
   return Math.max(0, parsed);
+}
+
+function formatPreviousSetSummary(sets, maxSets = 4) {
+  if (!Array.isArray(sets) || sets.length === 0) return "";
+  const entries = sets.slice(0, maxSets).map((set) => {
+    const weight = set?.weight == null || set?.weight === "" ? "—" : set.weight;
+    const reps = set?.reps == null || set?.reps === "" ? "—" : set.reps;
+    return `${weight}×${reps}`;
+  });
+  const remainder = sets.length - maxSets;
+  if (remainder > 0) {
+    entries.push(`+${remainder} more`);
+  }
+  return entries.join(", ");
 }
 
 function WorkoutView({
@@ -155,6 +170,10 @@ function WorkoutView({
     () => items.reduce((sum, it) => sum + (it.sets?.length ?? 0), 0),
     [items]
   );
+  const exerciseIds = useMemo(
+    () => items.map((item) => item.exerciseId).filter((id) => id != null),
+    [items]
+  );
   const settingsActiveSpaceId = settings?.active_space_id ?? null;
   const activeSpace = useMemo(
     () => resolveActiveSpace(workoutSpaces ?? [], settingsActiveSpaceId),
@@ -193,6 +212,10 @@ function WorkoutView({
     });
     return map;
   }, [equipmentMap, items, workoutSpace]);
+  const previousSetsByExercise = useLiveQuery(
+    () => getPreviousWorkoutSetsByExercise(exerciseIds, workout?.id ?? null),
+    [exerciseIds, workout?.id]
+  );
 
   const existingExerciseIds = useMemo(() => {
     return new Set(items.map((i) => i.exerciseId));
@@ -649,32 +672,30 @@ function WorkoutView({
         }
       />
 
-      <Card>
-        <CardHeader>
-          <div className="ui-section-title">Workout stats</div>
+      <div className="workout-stats-bar">
+        <div className="workout-stats-title">
+          <span className="ui-section-title">Session</span>
           {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
-        </CardHeader>
-        <CardBody>
-          <div className="stats-grid">
-            <div className="stat-card">
-              <div className="stat-label">Exercises</div>
-              <div className="stat-value">{items.length}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Sets</div>
-              <div className="stat-value">{totalSets}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Template</div>
-              <div className="stat-value">{templateLabel}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Space</div>
-              <div className="stat-value">{spaceLabel}</div>
-            </div>
-          </div>
-        </CardBody>
-      </Card>
+        </div>
+        <div className="workout-stats-chips">
+          <span className="stat-chip">
+            <span className="stat-chip__label">Exercises</span>
+            <span className="stat-chip__value">{items.length}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Sets</span>
+            <span className="stat-chip__value">{totalSets}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Template</span>
+            <span className="stat-chip__value">{templateLabel}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Space</span>
+            <span className="stat-chip__value">{spaceLabel}</span>
+          </span>
+        </div>
+      </div>
 
       <Card>
         <CardHeader>
@@ -727,50 +748,60 @@ function WorkoutView({
         <div className="ui-stack">
           {items.map((it, index) => {
             const missingEquipment = missingEquipmentByItem.get(it.id) ?? [];
+            const previousEntry = previousSetsByExercise?.get(it.exerciseId) ?? null;
+            const previousSummary = formatPreviousSetSummary(previousEntry?.sets ?? []);
+            const previousText = previousSummary || "No previous data";
             return (
               <Card
                 key={it.id}
                 data-workout-item-id={it.id}
                 onFocusCapture={() => setActiveExerciseIndex(index)}
+                className="workout-exercise-card"
               >
-              <CardHeader>
-                <div className="ui-stack">
-                  <div className="ui-strong">{it.exercise?.name ?? "Unknown Exercise"}</div>
-                  <div>
+              <CardHeader className="workout-exercise-header">
+                <div className="workout-exercise-title">
+                  <div
+                    className="ui-strong workout-exercise-name"
+                    title={it.exercise?.name ?? "Unknown Exercise"}
+                  >
+                    {it.exercise?.name ?? "Unknown Exercise"}
+                  </div>
+                  <div className="workout-exercise-meta">
                     <span className="pill pill--muted">
                       {it.exercise?.muscle_group ?? "Unknown"}
                     </span>
                   </div>
                 </div>
-                <div className="ui-row ui-row--wrap">
-                  <Button variant="secondary" size="sm" onClick={() => addWorkoutSet(it.id)}>
-                    + Set
+                <div className="workout-exercise-actions">
+                  <Button variant="primary" size="sm" onClick={() => addWorkoutSet(it.id)}>
+                    Add set
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => openReplace(it)}>
                     Replace
                   </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => removeWorkoutItem(it.id)}
-                  >
+                  <Button variant="ghost" size="sm" onClick={() => removeWorkoutItem(it.id)}>
                     Delete
                   </Button>
                 </div>
               </CardHeader>
 
-              <CardBody className="ui-stack">
+              <CardBody className="workout-exercise-body">
                 {missingEquipment.length ? (
                   <div className="equipment-warning">
                     Missing equipment:{" "}
                     {missingEquipment.map((item) => item?.name ?? "Unknown").join(", ")}
                   </div>
                 ) : null}
-                <div className="ui-row ui-row--between">
+                <div className="workout-prev-summary" title={previousText}>
+                  <span className="workout-prev-label">Prev</span>
+                  <span className="workout-prev-text">{previousText}</span>
+                </div>
+
+                <div className="ui-row ui-row--between workout-sets-header">
                   <div className="ui-section-title">Sets</div>
-                  <div className="ui-row">
+                  <div className="workout-sets-actions">
                     <Button variant="secondary" size="sm" onClick={() => addWorkoutSet(it.id)}>
-                      +1 set
+                      +1
                     </Button>
                     <Button
                       variant="secondary"
@@ -781,7 +812,7 @@ function WorkoutView({
                         await addWorkoutSet(it.id);
                       }}
                     >
-                      +3 sets
+                      +3
                     </Button>
                   </div>
                 </div>
@@ -805,9 +836,13 @@ function WorkoutView({
                 {it.sets.length === 0 ? (
                   <div className="ui-muted">No sets yet. Add a set above.</div>
                 ) : (
-                  <div className="ui-stack">
+                  <div className="ui-stack workout-sets-list">
                     {it.sets.map((s) => (
-                      <div key={s.id} className="set-row" data-workout-set-id={s.id}>
+                      <div
+                        key={s.id}
+                        className="set-row workout-set-row"
+                        data-workout-set-id={s.id}
+                      >
                         <div className="set-index">#{s.setNumber}</div>
                         <Input
                           inputMode="decimal"
@@ -835,10 +870,11 @@ function WorkoutView({
                             void updateWorkoutSet(s.id, { restSeconds: parsed });
                           }}
                         />
-                        <div className="set-actions">
+                        <div className="set-actions workout-set-actions">
                           <Button
-                            variant="secondary"
+                            variant="primary"
                             size="sm"
+                            className="tap-target"
                             onClick={() => handleCompleteSet(it.id, s.id)}
                           >
                             Done
@@ -846,6 +882,8 @@ function WorkoutView({
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="tap-target set-remove-button"
+                            aria-label={`Remove set ${s.setNumber}`}
                             onClick={() => removeWorkoutSet(it.id, s.id)}
                           >
                             Remove

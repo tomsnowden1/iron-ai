@@ -1012,6 +1012,40 @@ export async function listFinishedWorkouts() {
   return done;
 }
 
+export async function getPreviousWorkoutSetsByExercise(exerciseIds, currentWorkoutId = null) {
+  const uniqueIds = Array.from(new Set(exerciseIds ?? [])).filter((id) => id != null);
+  if (uniqueIds.length === 0) return new Map();
+
+  const finished = await listFinishedWorkouts();
+  if (!finished.length) return new Map();
+
+  const remaining = new Set(uniqueIds);
+  const results = new Map();
+
+  for (const workout of finished) {
+    if (remaining.size === 0) break;
+    if (currentWorkoutId != null && workout.id === currentWorkoutId) continue;
+
+    const items = await db.table("workoutItems").where({ workoutId: workout.id }).toArray();
+    const matchingItems = items.filter((item) => remaining.has(item.exerciseId));
+    if (!matchingItems.length) continue;
+
+    for (const item of matchingItems) {
+      if (!remaining.has(item.exerciseId)) continue;
+      const sets = await db.table("workoutSets").where({ workoutItemId: item.id }).toArray();
+      sets.sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0));
+      results.set(item.exerciseId, {
+        workoutId: workout.id,
+        finishedAt: workout.finishedAt ?? workout.startedAt ?? null,
+        sets,
+      });
+      remaining.delete(item.exerciseId);
+    }
+  }
+
+  return results;
+}
+
 export async function getExerciseUsageCounts() {
   const finished = await listFinishedWorkouts();
   if (!finished.length) return [];
