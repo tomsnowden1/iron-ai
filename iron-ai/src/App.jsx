@@ -56,7 +56,7 @@ import {
   updateWorkoutSet,
 } from "./db";
 
-const SESSION_NOTE_LIMIT = 500;
+const SESSION_NOTE_LIMIT = 500 ;
 const EXERCISE_NOTE_LIMIT = 250;
 const NAV_ITEMS = [
   { id: "workout", label: "Workout", icon: Dumbbell },
