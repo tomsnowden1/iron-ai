@@ -529,8 +529,43 @@
   }
 
   .set-prev {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+  }
+
+  .set-progress {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    border: 1px solid var(--color-border-subtle);
+    font-size: 11px;
+    line-height: 1;
+    color: var(--color-text-muted);
+    background: var(--color-surface-muted);
+  }
+
+  .set-progress[data-status="improved"] {
+    color: var(--color-primary);
+    border-color: var(--color-primary-outline);
+    background: var(--color-primary-glow);
+  }
+
+  .set-progress[data-status="same"] {
+    background: var(--color-surface);
+  }
+
+  .set-progress[data-status="worse"] {
+    color: var(--color-text-muted);
+    border-color: var(--color-border-subtle);
+    background: transparent;
+    opacity: 0.7;
   }
 
   .set-actions {
