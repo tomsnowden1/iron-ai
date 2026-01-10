@@ -9,6 +9,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 
+
 import CoachView from "./features/coach/CoachView";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import LibraryView from "./features/library/LibraryView";
