@@ -1,4 +1,4 @@
-# IronAI - Local-First Gym Logger
+# IronAI - Local-First  Gym Logger
 ## Tech Stack
 - React (Vite)
 - Tailwind CSS (Mobile First)
