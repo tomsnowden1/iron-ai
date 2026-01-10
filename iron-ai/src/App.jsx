@@ -113,6 +113,32 @@ function formatSetValue(set) {
   return `${weight}×${reps}`;
 }
 
+function parseSetMetric(value) {
+  if (value == null || value === "") return null;
+  const parsed = Number.parseFloat(String(value));
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function compareWorkoutSet(current, previous) {
+  if (!current || !previous) return null;
+  const currentWeight = parseSetMetric(current.weight);
+  const currentReps = parseSetMetric(current.reps);
+  const previousWeight = parseSetMetric(previous.weight);
+  const previousReps = parseSetMetric(previous.reps);
+  if (
+    currentWeight == null ||
+    currentReps == null ||
+    previousWeight == null ||
+    previousReps == null
+  ) {
+    return null;
+  }
+  if (currentWeight > previousWeight) return "improved";
+  if (currentWeight === previousWeight && currentReps > previousReps) return "improved";
+  if (currentWeight === previousWeight && currentReps === previousReps) return "same";
+  return "worse";
+}
+
 function WorkoutView({
   workoutId,
   setWorkoutId,
@@ -172,10 +198,13 @@ function WorkoutView({
     () => items.reduce((sum, it) => sum + (it.sets?.length ?? 0), 0),
     [items]
   );
-  const exerciseIds = useMemo(
-    () => items.map((item) => item.exerciseId).filter((id) => id != null),
-    [items]
-  );
+  const exerciseIdPayload = useMemo(() => {
+    const uniqueIds = Array.from(
+      new Set(items.map((item) => item.exerciseId).filter((id) => id != null))
+    );
+    return { ids: uniqueIds, key: uniqueIds.join("|") };
+  }, [items]);
+  const exerciseIds = exerciseIdPayload.ids;
   const settingsActiveSpaceId = settings?.active_space_id ?? null;
   const activeSpace = useMemo(
     () => resolveActiveSpace(workoutSpaces ?? [], settingsActiveSpaceId),
@@ -216,7 +245,7 @@ function WorkoutView({
   }, [equipmentMap, items, workoutSpace]);
   const previousSetsByExercise = useLiveQuery(
     () => getPreviousWorkoutSetsByExercise(exerciseIds, workout?.id ?? null),
-    [exerciseIds, workout?.id]
+    [exerciseIdPayload.key, workout?.id]
   );
   const supersetLabels = useMemo(() => {
     const labels = new Map();
@@ -1012,9 +1041,15 @@ function WorkoutView({
                         const label = isWarmup
                           ? `W${(warmupIndex += 1)}`
                           : `${(workingIndex += 1)}`;
+                        const previousSet = isWarmup
+                          ? null
+                          : previousWorkingSets[workingIndex - 1];
                         const previousText = isWarmup
                           ? "—"
-                          : formatSetValue(previousWorkingSets[workingIndex - 1]);
+                          : formatSetValue(previousSet);
+                        const comparisonStatus = isWarmup
+                          ? null
+                          : compareWorkoutSet(s, previousSet);
                         return (
                           <div
                             key={s.id}
@@ -1024,7 +1059,22 @@ function WorkoutView({
                             data-workout-set-id={s.id}
                           >
                             <div className="set-index">{label}</div>
-                            <div className="set-prev">{previousText}</div>
+                            <div className="set-prev">
+                              <span>{previousText}</span>
+                              {comparisonStatus ? (
+                                <span
+                                  className="set-progress"
+                                  data-status={comparisonStatus}
+                                  aria-label={`Set ${label} progress: ${comparisonStatus}`}
+                                >
+                                  {comparisonStatus === "improved"
+                                    ? "↑"
+                                    : comparisonStatus === "same"
+                                      ? "•"
+                                      : "↓"}
+                                </span>
+                              ) : null}
+                            </div>
                             <Input
                               inputMode="decimal"
                               placeholder="kg"
