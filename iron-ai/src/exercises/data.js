@@ -56,6 +56,13 @@ export function getExerciseCommonMistakes(exercise) {
   return { mistakes: DEFAULT_MISTAKES, isFallback: true };
 }
 
+export function getExerciseGotchas(exercise) {
+  const gotchas = Array.isArray(exercise?.gotchas) ? exercise.gotchas.filter(Boolean) : [];
+  if (gotchas.length) return { gotchas, isFallback: false };
+  const fallback = getExerciseCommonMistakes(exercise);
+  return { gotchas: fallback.mistakes, isFallback: fallback.isFallback };
+}
+
 export function getExerciseVideoUrl(exercise) {
   const mediaUrl = exercise?.media?.videoUrl ?? exercise?.media?.video_url;
   return mediaUrl || exercise?.videoUrl || exercise?.video_url || "";
@@ -63,6 +70,17 @@ export function getExerciseVideoUrl(exercise) {
 
 export function getNormalizedEquipment(exercise) {
   return normalizeExerciseEquipment(exercise);
+}
+
+export function getExerciseEquipment(exercise) {
+  const equipment = Array.isArray(exercise?.equipment)
+    ? exercise.equipment.filter(Boolean)
+    : [];
+  if (equipment.length) return equipment;
+  const normalized = normalizeExerciseEquipment(exercise);
+  return Array.isArray(normalized?.requiredEquipmentIds)
+    ? normalized.requiredEquipmentIds
+    : [];
 }
 
 export function buildExerciseSearchText(exercise) {

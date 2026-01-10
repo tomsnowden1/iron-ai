@@ -16,6 +16,7 @@ import LibraryView from "./features/library/LibraryView";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
+import { resetExerciseSeedVersion, seedExercisesIfNeeded } from "./seed/exerciseSeed";
 import {
   Button,
   Card,
@@ -1753,6 +1754,7 @@ export default function App() {
   const [lastSummary, setLastSummary] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [coachLaunchContext, setCoachLaunchContext] = useState(null);
+  const [exerciseSeedState, setExerciseSeedState] = useState({ status: "idle" });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -1820,6 +1822,33 @@ export default function App() {
       setCoachLaunchContext(null);
     }
   }, [coachLaunchContext, tab]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const runSeed = async () => {
+      setExerciseSeedState({ status: "loading" });
+      const result = await seedExercisesIfNeeded();
+      if (cancelled) return;
+      setExerciseSeedState({
+        status: result?.status ?? "error",
+        error: result?.error ?? null,
+      });
+    };
+    runSeed();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleReseedExercises = useCallback(async () => {
+    setExerciseSeedState({ status: "loading" });
+    await resetExerciseSeedVersion();
+    const result = await seedExercisesIfNeeded();
+    setExerciseSeedState({
+      status: result?.status ?? "error",
+      error: result?.error ?? null,
+    });
+  }, []);
 
   const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
     const id = await startWorkoutFromTemplate(templateId, options);
@@ -1922,6 +1951,8 @@ export default function App() {
               setTab("coach");
             }}
             onAddExerciseToWorkout={handleAddExerciseFromLibrary}
+            exerciseSeedState={exerciseSeedState}
+            onReseedExercises={handleReseedExercises}
           />
         )}
 

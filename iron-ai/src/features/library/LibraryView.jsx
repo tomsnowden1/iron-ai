@@ -4,7 +4,12 @@ import { Button, Card, CardBody, PageHeader } from "../../components/ui";
 import ExercisesExplorer from "../exercises/ExercisesExplorer";
 import GymsView from "../gyms/GymsView";
 
-export default function LibraryView({ onLaunchCoach, onAddExerciseToWorkout }) {
+export default function LibraryView({
+  onLaunchCoach,
+  onAddExerciseToWorkout,
+  exerciseSeedState,
+  onReseedExercises,
+}) {
   const [section, setSection] = useState("home");
 
   if (section === "exercises") {
@@ -13,6 +18,8 @@ export default function LibraryView({ onLaunchCoach, onAddExerciseToWorkout }) {
         onBack={() => setSection("home")}
         onLaunchCoach={onLaunchCoach}
         onAddToWorkout={onAddExerciseToWorkout}
+        isSeeding={exerciseSeedState?.status === "loading"}
+        onReseed={onReseedExercises}
       />
     );
   }

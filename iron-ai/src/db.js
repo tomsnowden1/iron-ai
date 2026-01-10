@@ -273,9 +273,85 @@ db.version(7)
     });
   });
 
+/**
+ * v8 (NEW): exercise library seed + meta table
+ */
+db.version(8)
+  .stores({
+    exercises:
+      "++id, slug, name, default_sets, default_reps, muscle_group, video_url, is_custom, status, *aliases, *primaryMuscles, *secondaryMuscles, *equipment",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+    meta: "key",
+  })
+  .upgrade(async (tx) => {
+    const now = Date.now();
+    const slugify = (value) =>
+      String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+    await tx.table("exercises").toCollection().modify((exercise) => {
+      if (!exercise.slug) {
+        const baseSlug = slugify(exercise.name ?? "");
+        const idPrefix = exercise.id != null ? String(exercise.id) : "";
+        if (baseSlug && idPrefix) {
+          exercise.slug = `${idPrefix}-${baseSlug}`;
+        } else {
+          exercise.slug = baseSlug || idPrefix || "exercise";
+        }
+      }
+      if (!exercise.status) exercise.status = "extended";
+      if (!Array.isArray(exercise.aliases)) exercise.aliases = [];
+      if (!Array.isArray(exercise.primaryMuscles)) {
+        const legacy = String(exercise.muscle_group ?? "").trim();
+        exercise.primaryMuscles = legacy ? [legacy] : [];
+      }
+      if (!Array.isArray(exercise.secondaryMuscles)) exercise.secondaryMuscles = [];
+      if (!Array.isArray(exercise.instructions)) exercise.instructions = [];
+      if (!Array.isArray(exercise.gotchas)) exercise.gotchas = [];
+      if (!Array.isArray(exercise.equipment)) exercise.equipment = [];
+      if (!exercise.youtubeSearchQuery && exercise.name) {
+        exercise.youtubeSearchQuery = `${exercise.name} exercise form cues`;
+      }
+      if (exercise.youtubeVideoId === undefined) {
+        exercise.youtubeVideoId = null;
+      }
+      if (!exercise.source) {
+        exercise.source = exercise.is_custom ? "user" : "starter";
+      }
+      if (exercise.createdAt == null) exercise.createdAt = now;
+      if (exercise.updatedAt == null) exercise.updatedAt = now;
+    });
+  });
+
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
+  const slugify = (value) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   await db.table("equipment").bulkPut(EQUIPMENT_CATALOG);
   await db.table("workoutSpaces").add({
     name: "Default Gym",
@@ -289,6 +365,8 @@ db.on("populate", async () => {
   });
   await db.table("exercises").bulkAdd(
     starterExercises.map((ex) => {
+      const name = ex.name ?? "Exercise";
+      const baseSlug = slugify(name);
       const primaryMuscles =
         Array.isArray(ex.primaryMuscles) && ex.primaryMuscles.length
           ? ex.primaryMuscles
@@ -302,13 +380,20 @@ db.on("populate", async () => {
           : {});
       return {
         ...ex,
+        slug: ex.slug ?? (baseSlug || "exercise"),
         primaryMuscles,
         secondaryMuscles: Array.isArray(ex.secondaryMuscles) ? ex.secondaryMuscles : [],
         instructions: Array.isArray(ex.instructions) ? ex.instructions : [],
         commonMistakes: Array.isArray(ex.commonMistakes) ? ex.commonMistakes : [],
+        gotchas: Array.isArray(ex.gotchas) ? ex.gotchas : [],
         progressions: Array.isArray(ex.progressions) ? ex.progressions : [],
         regressions: Array.isArray(ex.regressions) ? ex.regressions : [],
         aliases: Array.isArray(ex.aliases) ? ex.aliases : [],
+        equipment: Array.isArray(ex.equipment) ? ex.equipment : [],
+        status: ex.status ?? "extended",
+        youtubeSearchQuery:
+          ex.youtubeSearchQuery ?? `${name ?? "exercise"} exercise form cues`,
+        youtubeVideoId: ex.youtubeVideoId ?? null,
         media,
         is_custom: false,
         ...inferExerciseEquipment(ex),
