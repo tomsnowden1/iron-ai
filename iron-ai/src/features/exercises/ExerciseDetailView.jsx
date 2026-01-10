@@ -167,6 +167,7 @@ export default function ExerciseDetailView({
     typeof exercise?.youtubeVideoId === "string" && exercise.youtubeVideoId.trim()
       ? exercise.youtubeVideoId.trim()
       : null;
+  const stickyNote = exercise?.stickyNote?.trim() ?? "";
 
   const historyStats = useMemo(() => {
     const sessions = Array.isArray(history) ? history : [];
@@ -484,6 +485,17 @@ export default function ExerciseDetailView({
           </div>
         </CardBody>
       </Card>
+
+      {stickyNote ? (
+        <Card>
+          <CardHeader>
+            <div className="ui-section-title">Sticky note</div>
+          </CardHeader>
+          <CardBody>
+            <div>{stickyNote}</div>
+          </CardBody>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

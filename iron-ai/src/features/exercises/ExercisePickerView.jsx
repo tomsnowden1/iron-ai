@@ -69,6 +69,7 @@ export default function ExercisePickerView({
   onClose,
   onLaunchCoach,
 }) {
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [filterByActiveGym, setFilterByActiveGym] = useState(
     settings?.exercise_picker_filter_active_gym ?? true
@@ -213,12 +214,20 @@ export default function ExercisePickerView({
   ]);
 
   useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setSearch(searchInput);
+    }, 150);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
+
+  useEffect(() => {
     if (hasActiveGym) return;
     setFilterByActiveGym(false);
   }, [hasActiveGym]);
 
   useEffect(() => {
     if (!prefillExercise?.name) return;
+    setSearchInput(prefillExercise.name);
     setSearch(prefillExercise.name);
   }, [prefillExercise]);
 
@@ -263,26 +272,41 @@ export default function ExercisePickerView({
         }
       />
 
+      <div className="sticky-search">
+        <Label htmlFor="exercise-picker-search">Search exercises</Label>
+        <div className="search-field">
+          <Input
+            id="exercise-picker-search"
+            type="search"
+            placeholder="Search by name or alias"
+            value={searchInput}
+            onChange={(event) => {
+              setPickerTouched(true);
+              setSearchInput(event.target.value);
+            }}
+            ref={searchRef}
+          />
+          {searchInput ? (
+            <button
+              type="button"
+              className="search-clear"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+              }}
+              aria-label="Clear search"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <Card>
         <CardHeader>
           <div className="ui-section-title">Search & filters</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          <div>
-            <Label htmlFor="exercise-picker-search">Search exercises</Label>
-            <Input
-              id="exercise-picker-search"
-              type="search"
-              placeholder="Search by name or alias"
-              value={search}
-              onChange={(event) => {
-                setPickerTouched(true);
-                setSearch(event.target.value);
-              }}
-              ref={searchRef}
-            />
-          </div>
-
           <div className="filter-grid">
             <div>
               <Label htmlFor="exercise-picker-muscle">Muscle group</Label>

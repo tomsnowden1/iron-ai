@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
-  BookOpen,
   Dumbbell,
   History,
-  Settings as SettingsIcon,
   LayoutTemplate,
   MessageSquare,
+  MoreHorizontal,
+  MoreVertical,
+  RefreshCcw,
+  StickyNote,
+  FileText,
+  Flame,
+  Link2,
+  Trash2,
 } from "lucide-react";
 
-
 import CoachView from "./features/coach/CoachView";
+import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
-import LibraryView from "./features/library/LibraryView";
+import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
+import GymsView from "./features/gyms/GymsView";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
@@ -38,6 +45,7 @@ import {
   db,
   addExerciseToWorkout,
   addWorkoutSet,
+  addWarmupSets,
   createEmptyWorkout,
   deleteWorkout,
   finishWorkout,
@@ -54,7 +62,6 @@ import {
   removeWorkoutSet,
   setActiveWorkoutSpace,
   startWorkoutFromTemplate,
-  updateWorkoutItem,
   updateWorkoutSession,
   updateWorkoutSet,
 } from "./db";
@@ -66,8 +73,7 @@ const NAV_ITEMS = [
   { id: "coach", label: "Coach", icon: MessageSquare },
   { id: "history", label: "History", icon: History },
   { id: "templates", label: "Templates", icon: LayoutTemplate },
-  { id: "library", label: "Library", icon: BookOpen },
-  { id: "settings", label: "Settings", icon: SettingsIcon },
+  { id: "more", label: "More", icon: MoreHorizontal },
 ];
 
 function TabButton({ icon: Icon, label, active, onClick }) {
@@ -99,18 +105,12 @@ function parseRestInput(value) {
   return Math.max(0, parsed);
 }
 
-function formatPreviousSetSummary(sets, maxSets = 4) {
-  if (!Array.isArray(sets) || sets.length === 0) return "";
-  const entries = sets.slice(0, maxSets).map((set) => {
-    const weight = set?.weight == null || set?.weight === "" ? "—" : set.weight;
-    const reps = set?.reps == null || set?.reps === "" ? "—" : set.reps;
-    return `${weight}×${reps}`;
-  });
-  const remainder = sets.length - maxSets;
-  if (remainder > 0) {
-    entries.push(`+${remainder} more`);
-  }
-  return entries.join(", ");
+function formatSetValue(set) {
+  if (!set) return "—";
+  const weight = set?.weight == null || set?.weight === "" ? "—" : set.weight;
+  const reps = set?.reps == null || set?.reps === "" ? "—" : set.reps;
+  if (weight === "—" && reps === "—") return "—";
+  return `${weight}×${reps}`;
 }
 
 function WorkoutView({
@@ -131,24 +131,20 @@ function WorkoutView({
   const equipmentList = useLiveQuery(() => listEquipment(), []);
 
   const viewRef = useRef(null);
-  const replaceSelectId = useId();
   const restFieldId = useId();
   const allExercises = useLiveQuery(() => getAllExercises(), []);
   const exerciseUsageCounts = useLiveQuery(() => getExerciseUsageCounts(), []);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPrefill, setPickerPrefill] = useState(null);
-
-  // Replace Exercise UI state (Step C/D)
-  const [replaceOpen, setReplaceOpen] = useState(false);
-  const [replaceItemId, setReplaceItemId] = useState(null);
-  const [replaceCurrentExerciseId, setReplaceCurrentExerciseId] = useState(null);
-  const [replaceNewExerciseId, setReplaceNewExerciseId] = useState("");
+  const [pickerMode, setPickerMode] = useState("add");
+  const [replaceItem, setReplaceItem] = useState(null);
   const [finishMessage, setFinishMessage] = useState("");
   const [showDevPanel, setShowDevPanel] = useState(false);
   const [activeExerciseIndex, setActiveExerciseIndex] = useState(null);
   const [restEnabled, setRestEnabled] = useState(true);
   const [restDefaultSeconds, setRestDefaultSeconds] = useState(60);
   const [restDefaultInput, setRestDefaultInput] = useState("60");
+  const [showRestTimer, setShowRestTimer] = useState(true);
   const [restSheetOpen, setRestSheetOpen] = useState(false);
   const [restRunning, setRestRunning] = useState(false);
   const [restRemaining, setRestRemaining] = useState(60);
@@ -159,8 +155,12 @@ function WorkoutView({
   const [sessionNote, setSessionNote] = useState("");
   const [sessionNoteFocused, setSessionNoteFocused] = useState(false);
   const [exerciseNotes, setExerciseNotes] = useState({});
-  const [focusedExerciseNoteId, setFocusedExerciseNoteId] = useState(null);
-  const [exerciseNoteOpenIds, setExerciseNoteOpenIds] = useState({});
+  const [exerciseNoteSheet, setExerciseNoteSheet] = useState(null);
+  const [exerciseNoteDraft, setExerciseNoteDraft] = useState("");
+  const [menuItemId, setMenuItemId] = useState(null);
+  const [supersetSheetItemId, setSupersetSheetItemId] = useState(null);
+  const [detailExerciseId, setDetailExerciseId] = useState(null);
+  const scrollRestoreRef = useRef(0);
 
   // Safe defaults so we can compute memos without crashing
   const workout = workoutBundle?.workout ?? null;
@@ -218,25 +218,46 @@ function WorkoutView({
     () => getPreviousWorkoutSetsByExercise(exerciseIds, workout?.id ?? null),
     [exerciseIds, workout?.id]
   );
+  const supersetLabels = useMemo(() => {
+    const labels = new Map();
+    let index = 0;
+    items.forEach((item) => {
+      const groupId = item.supersetGroupId;
+      if (!groupId || labels.has(groupId)) return;
+      const letter = String.fromCharCode(65 + (index % 26));
+      labels.set(groupId, `Superset ${letter}`);
+      index += 1;
+    });
+    return labels;
+  }, [items]);
+  const activeMenuItem = useMemo(
+    () => items.find((item) => item.id === menuItemId) ?? null,
+    [items, menuItemId]
+  );
 
   const existingExerciseIds = useMemo(() => {
     return new Set(items.map((i) => i.exerciseId));
   }, [items]);
-
-  const replaceOptions = useMemo(() => {
-    const list = allExercises ?? [];
-    return list.filter(
-      (ex) => ex.id === replaceCurrentExerciseId || !existingExerciseIds.has(ex.id)
-    );
-  }, [allExercises, existingExerciseIds, replaceCurrentExerciseId]);
+  const pickerExcludeIds = useMemo(() => {
+    if (pickerMode !== "replace" || !replaceItem) return existingExerciseIds;
+    const next = new Set(existingExerciseIds);
+    next.delete(replaceItem.exerciseId);
+    return next;
+  }, [existingExerciseIds, pickerMode, replaceItem]);
 
   useEffect(() => {
     setPickerOpen(false);
     setPickerPrefill(null);
+    setMenuItemId(null);
+    setExerciseNoteSheet(null);
+    setExerciseNoteDraft("");
+    setSupersetSheetItemId(null);
+    setDetailExerciseId(null);
   }, [workoutId]);
 
   useEffect(() => {
     if (!pickerIntent || !workoutId) return;
+    setPickerMode("add");
     setPickerPrefill(pickerIntent);
     setPickerOpen(true);
     onConsumePickerIntent?.();
@@ -248,16 +269,18 @@ function WorkoutView({
   }, [sessionNoteFocused, workout]);
 
   useEffect(() => {
-    if (!workout || focusedExerciseNoteId != null) return;
+    if (!workout || exerciseNoteSheet) return;
     const next = workout.exerciseNotes ?? {};
     setExerciseNotes({ ...next });
-  }, [focusedExerciseNoteId, workout]);
+  }, [exerciseNoteSheet, workout]);
 
   useEffect(() => {
     const enabled = settings?.rest_enabled;
     const defaultSeconds = parseRestInput(settings?.rest_default_seconds) ?? 60;
+    const timerVisible = settings?.show_rest_timer;
     setRestEnabled(enabled ?? true);
     setRestDefaultSeconds(defaultSeconds);
+    setShowRestTimer(timerVisible ?? true);
   }, [settings]);
 
   useEffect(() => {
@@ -277,6 +300,11 @@ function WorkoutView({
     setRestHint("");
     restEndsAtRef.current = null;
   }, [restEnabled]);
+
+  useEffect(() => {
+    if (showRestTimer) return;
+    setRestSheetOpen(false);
+  }, [showRestTimer]);
 
   const persistRestSettings = useCallback((patch) => {
     return (async () => {
@@ -315,16 +343,7 @@ function WorkoutView({
     restEndsAtRef.current = null;
   }, [restRunning]);
 
-  const resolveRestSeconds = useCallback(
-    (item, set) => {
-      const setOverride = parseRestInput(set?.restSeconds);
-      if (setOverride != null) return setOverride;
-      const itemDefault = parseRestInput(item?.restSeconds);
-      if (itemDefault != null) return itemDefault;
-      return restDefaultSeconds;
-    },
-    [restDefaultSeconds]
-  );
+  const resolveRestSeconds = useCallback(() => restDefaultSeconds, [restDefaultSeconds]);
 
   const buildNextHint = useCallback(
     (itemId, setId) => {
@@ -357,7 +376,7 @@ function WorkoutView({
       const item = items.find((it) => it.id === itemId);
       const set = item?.sets?.find((s) => s.id === setId);
       if (!item || !set) return;
-      const seconds = resolveRestSeconds(item, set);
+      const seconds = resolveRestSeconds();
       const hint = buildNextHint(itemId, setId);
       startRestTimer(seconds, hint);
     },
@@ -415,18 +434,12 @@ function WorkoutView({
   }, [onNotify, restDuration, restRunning]);
 
   // Handlers
-  const openReplace = (workoutItem) => {
-    setReplaceItemId(workoutItem.id);
-    setReplaceCurrentExerciseId(workoutItem.exerciseId);
-    setReplaceNewExerciseId(String(workoutItem.exerciseId));
-    setReplaceOpen(true);
-  };
-
-  const closeReplace = () => {
-    setReplaceOpen(false);
-    setReplaceItemId(null);
-    setReplaceCurrentExerciseId(null);
-    setReplaceNewExerciseId("");
+  const openReplacePicker = (workoutItem) => {
+    setReplaceItem(workoutItem);
+    setPickerMode("replace");
+    setPickerPrefill(null);
+    setPickerOpen(true);
+    setMenuItemId(null);
   };
 
   const handleToggleRestEnabled = () => {
@@ -481,15 +494,160 @@ function WorkoutView({
     startRestForSet(itemId, setId);
   };
 
+  const handleOpenExerciseDetail = (exerciseId) => {
+    if (!exerciseId) return;
+    scrollRestoreRef.current = window.scrollY ?? 0;
+    setDetailExerciseId(exerciseId);
+  };
+
+  const handleCloseExerciseDetail = () => {
+    setDetailExerciseId(null);
+    window.setTimeout(() => {
+      window.scrollTo({ top: scrollRestoreRef.current, behavior: "auto" });
+    }, 0);
+  };
+
+  const openExerciseNoteSheet = (item) => {
+    if (!item) return;
+    setExerciseNoteSheet({ type: "note", itemId: item.id, exerciseId: item.exerciseId });
+    setExerciseNoteDraft(exerciseNotes?.[item.exerciseId] ?? "");
+    setMenuItemId(null);
+  };
+
+  const openStickyNoteSheet = (item) => {
+    if (!item) return;
+    setExerciseNoteSheet({ type: "sticky", itemId: item.id, exerciseId: item.exerciseId });
+    setExerciseNoteDraft(item.exercise?.stickyNote ?? "");
+    setMenuItemId(null);
+  };
+
+  const handleSaveExerciseNote = async () => {
+    if (!exerciseNoteSheet) return;
+    const trimmed = exerciseNoteDraft.trim();
+    if (exerciseNoteSheet.type === "note") {
+      if (!workoutId) return;
+      const next = { ...(workout?.exerciseNotes ?? {}) };
+      if (trimmed) {
+        next[exerciseNoteSheet.exerciseId] = trimmed;
+      } else {
+        delete next[exerciseNoteSheet.exerciseId];
+      }
+      setExerciseNotes({ ...next });
+      await updateWorkoutSession(workoutId, { exerciseNotes: next });
+    } else {
+      await db.table("exercises").update(exerciseNoteSheet.exerciseId, {
+        stickyNote: trimmed,
+      });
+    }
+    setExerciseNoteSheet(null);
+    setExerciseNoteDraft("");
+  };
+
+  const handleAddWarmup = async (itemId) => {
+    if (!itemId) return;
+    await addWarmupSets(itemId, 2);
+    onNotify?.("Warm-up sets added ✅", { tone: "success" });
+    setMenuItemId(null);
+  };
+
+  const handleDeleteExercise = async (item) => {
+    if (!item) return;
+    const hasNote = Boolean(exerciseNotes?.[item.exerciseId]?.trim());
+    const hasSticky = Boolean(item.exercise?.stickyNote?.trim());
+    const confirmText = hasNote
+      ? "Delete this exercise and its workout note? This cannot be undone."
+      : "Delete this exercise? This cannot be undone.";
+    if (!window.confirm(confirmText)) return;
+    if (item.supersetGroupId) {
+      await clearSupersetGroup(item.supersetGroupId);
+    }
+    await removeWorkoutItem(item.id);
+    setMenuItemId(null);
+    if (hasNote && workoutId) {
+      const next = { ...(workout?.exerciseNotes ?? {}) };
+      delete next[item.exerciseId];
+      setExerciseNotes({ ...next });
+      await updateWorkoutSession(workoutId, { exerciseNotes: next });
+    }
+    if (hasSticky) {
+      onNotify?.("Sticky note preserved for this exercise.", { tone: "info" });
+    }
+  };
+
+  const clearSupersetGroup = useCallback(
+    async (groupId) => {
+      if (!groupId || !workoutId) return;
+      await db
+        .table("workoutItems")
+        .where({ workoutId, supersetGroupId: groupId })
+        .modify({ supersetGroupId: null });
+    },
+    [workoutId]
+  );
+
+  const handleCreateSuperset = useCallback(
+    async (primaryId, partnerId) => {
+      const primary = items.find((it) => it.id === primaryId);
+      const partner = items.find((it) => it.id === partnerId);
+      if (!primary || !partner || !workoutId) return;
+      const groupId = `superset-${Date.now()}`;
+      const groupsToClear = new Set(
+        [primary.supersetGroupId, partner.supersetGroupId].filter(Boolean)
+      );
+      await db.transaction("rw", db.table("workoutItems"), async () => {
+        for (const existingGroup of groupsToClear) {
+          await db
+            .table("workoutItems")
+            .where({ workoutId, supersetGroupId: existingGroup })
+            .modify({ supersetGroupId: null });
+        }
+        await db.table("workoutItems").update(primaryId, { supersetGroupId: groupId });
+        await db.table("workoutItems").update(partnerId, { supersetGroupId: groupId });
+      });
+      setSupersetSheetItemId(null);
+      setMenuItemId(null);
+      onNotify?.("Superset created ✅", { tone: "success" });
+    },
+    [items, onNotify, workoutId]
+  );
+
+  const handleRemoveSuperset = useCallback(
+    async (groupId) => {
+      if (!groupId) return;
+      await clearSupersetGroup(groupId);
+      setSupersetSheetItemId(null);
+      setMenuItemId(null);
+      onNotify?.("Superset removed ✅", { tone: "success" });
+    },
+    [clearSupersetGroup, onNotify]
+  );
+
   const handleSelectExercise = async (exerciseId) => {
     if (!exerciseId || !workoutId) return false;
     try {
-      await addExerciseToWorkout(workoutId, exerciseId);
+      if (pickerMode === "replace" && replaceItem) {
+        if (exerciseId === replaceItem.exerciseId) {
+          setPickerOpen(false);
+          setPickerPrefill(null);
+          setPickerMode("add");
+          setReplaceItem(null);
+          return true;
+        }
+        await replaceWorkoutExercise(replaceItem.id, exerciseId);
+      } else {
+        await addExerciseToWorkout(workoutId, exerciseId);
+      }
       setPickerOpen(false);
       setPickerPrefill(null);
+      setPickerMode("add");
+      setReplaceItem(null);
       return true;
     } catch (err) {
-      onNotify?.(err?.message ?? "Could not add exercise.", { tone: "error" });
+      const fallback =
+        pickerMode === "replace"
+          ? "Could not replace exercise."
+          : "Could not add exercise.";
+      onNotify?.(err?.message ?? fallback, { tone: "error" });
       return false;
     }
   };
@@ -540,36 +698,41 @@ function WorkoutView({
     await updateWorkoutSession(workoutId, { sessionNote: nextNote });
   };
 
-  const handleExerciseNoteBlur = async (exerciseId) => {
-    setFocusedExerciseNoteId(null);
-    if (!workoutId) return;
-    const next = { ...(workout?.exerciseNotes ?? {}) };
-    const rawNote = exerciseNotes?.[exerciseId] ?? "";
-    const nextNote = rawNote.trim();
-    if (nextNote) {
-      next[exerciseId] = nextNote;
-    } else {
-      delete next[exerciseId];
-    }
-    await updateWorkoutSession(workoutId, { exerciseNotes: next });
-  };
+  const pickerTitle =
+    pickerMode === "replace" ? "Replace exercise" : "Add exercise";
+  const pickerSubtitle =
+    pickerMode === "replace"
+      ? "Choose a new exercise to swap in."
+      : "Pick an exercise to add to this workout.";
+
+  if (detailExerciseId) {
+    return (
+      <ExerciseDetailView
+        exerciseId={detailExerciseId}
+        onBack={handleCloseExerciseDetail}
+        onOpenExercise={(nextId) => setDetailExerciseId(nextId)}
+      />
+    );
+  }
 
   if (pickerOpen) {
     return (
       <ExercisePickerView
-        title="Add exercise"
-        subtitle="Pick an exercise to add to this workout."
+        title={pickerTitle}
+        subtitle={pickerSubtitle}
         exercises={allExercises}
         equipmentList={equipmentList}
         usageStats={exerciseUsageCounts}
         activeSpace={pickerSpace}
         settings={settings}
-        excludeExerciseIds={existingExerciseIds}
+        excludeExerciseIds={pickerExcludeIds}
         prefillExercise={pickerPrefill}
         onSelectExercise={handleSelectExercise}
         onClose={() => {
           setPickerOpen(false);
           setPickerPrefill(null);
+          setPickerMode("add");
+          setReplaceItem(null);
         }}
       />
     );
@@ -661,6 +824,15 @@ function WorkoutView({
       {workout.templateId ? ` · Template #${workout.templateId}` : ""}
     </span>
   );
+  const supersetSheetItem = supersetSheetItemId
+    ? items.find((item) => item.id === supersetSheetItemId) ?? null
+    : null;
+  const supersetGroupItems = supersetSheetItem?.supersetGroupId
+    ? items.filter((item) => item.supersetGroupId === supersetSheetItem.supersetGroupId)
+    : [];
+  const supersetPartnerOptions = supersetSheetItem
+    ? items.filter((item) => item.id !== supersetSheetItem.id)
+    : [];
 
   return (
     <div className="page" ref={viewRef}>
@@ -751,204 +923,155 @@ function WorkoutView({
           {items.map((it, index) => {
             const missingEquipment = missingEquipmentByItem.get(it.id) ?? [];
             const previousEntry = previousSetsByExercise?.get(it.exerciseId) ?? null;
-            const previousSummary = formatPreviousSetSummary(previousEntry?.sets ?? []);
-            const previousText = previousSummary || "No previous data";
+            const previousWorkingSets = (previousEntry?.sets ?? []).filter(
+              (set) => !set.isWarmup
+            );
+            const supersetLabel = it.supersetGroupId
+              ? supersetLabels.get(it.supersetGroupId)
+              : null;
+            const hasWorkoutNote = Boolean(exerciseNotes?.[it.exerciseId]?.trim());
+            const hasStickyNote = Boolean(it.exercise?.stickyNote?.trim());
+            let warmupIndex = 0;
+            let workingIndex = 0;
             return (
               <Card
                 key={it.id}
                 data-workout-item-id={it.id}
                 onFocusCapture={() => setActiveExerciseIndex(index)}
-                className="workout-exercise-card"
+                className={`workout-exercise-card${
+                  supersetLabel ? " workout-exercise-card--superset" : ""
+                }`}
               >
-              <CardHeader className="workout-exercise-header">
-                <div className="workout-exercise-title">
-                  <div
-                    className="ui-strong workout-exercise-name"
-                    title={it.exercise?.name ?? "Unknown Exercise"}
-                  >
-                    {it.exercise?.name ?? "Unknown Exercise"}
+                <CardHeader className="workout-exercise-header">
+                  <div className="workout-exercise-title">
+                    <button
+                      type="button"
+                      className="workout-exercise-name"
+                      title={it.exercise?.name ?? "Unknown Exercise"}
+                      onClick={() => handleOpenExerciseDetail(it.exerciseId)}
+                    >
+                      {it.exercise?.name ?? "Unknown Exercise"}
+                    </button>
+                    <div className="workout-exercise-meta">
+                      <span className="pill pill--muted">
+                        {it.exercise?.muscle_group ?? "Unknown"}
+                      </span>
+                      {supersetLabel ? (
+                        <span className="pill pill--superset">{supersetLabel}</span>
+                      ) : null}
+                      {hasStickyNote ? (
+                        <span className="pill pill--muted">Sticky</span>
+                      ) : null}
+                      {hasWorkoutNote ? (
+                        <span className="pill pill--muted">Note</span>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="workout-exercise-meta">
-                    <span className="pill pill--muted">
-                      {it.exercise?.muscle_group ?? "Unknown"}
-                    </span>
-                  </div>
-                </div>
-                <div className="workout-exercise-actions">
-                  <Button variant="primary" size="sm" onClick={() => addWorkoutSet(it.id)}>
-                    Add set
-                  </Button>
-                  <Button variant="secondary" size="sm" onClick={() => openReplace(it)}>
-                    Replace
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => removeWorkoutItem(it.id)}>
-                    Delete
-                  </Button>
-                </div>
-              </CardHeader>
-
-              <CardBody className="workout-exercise-body">
-                {missingEquipment.length ? (
-                  <div className="equipment-warning">
-                    Missing equipment:{" "}
-                    {missingEquipment.map((item) => item?.name ?? "Unknown").join(", ")}
-                  </div>
-                ) : null}
-                <div className="workout-prev-summary" title={previousText}>
-                  <span className="workout-prev-label">Prev</span>
-                  <span className="workout-prev-text">{previousText}</span>
-                </div>
-
-                <div className="ui-row ui-row--between workout-sets-header">
-                  <div className="ui-section-title">Sets</div>
-                  <div className="workout-sets-actions">
-                    <Button variant="secondary" size="sm" onClick={() => addWorkoutSet(it.id)}>
-                      +1
-                    </Button>
+                  <div className="workout-exercise-actions">
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={async () => {
-                        await addWorkoutSet(it.id);
-                        await addWorkoutSet(it.id);
-                        await addWorkoutSet(it.id);
-                      }}
+                      className="tap-target"
+                      onClick={() => addWorkoutSet(it.id)}
                     >
-                      +3
+                      + Set
                     </Button>
-                  </div>
-                </div>
-
-                <div className="rest-default-row">
-                  <Label htmlFor={`${restFieldId}-item-${it.id}`}>Rest default (sec)</Label>
-                  <Input
-                    id={`${restFieldId}-item-${it.id}`}
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    className="rest-input"
-                    value={it.restSeconds ?? ""}
-                    placeholder={String(restDefaultSeconds)}
-                    onChange={(e) => {
-                      const parsed = parseRestInput(e.target.value);
-                      void updateWorkoutItem(it.id, { restSeconds: parsed });
-                    }}
-                  />
-                </div>
-
-                {it.sets.length === 0 ? (
-                  <div className="ui-muted">No sets yet. Add a set above.</div>
-                ) : (
-                  <div className="ui-stack workout-sets-list">
-                    {it.sets.map((s) => (
-                      <div
-                        key={s.id}
-                        className="set-row workout-set-row"
-                        data-workout-set-id={s.id}
-                      >
-                        <div className="set-index">#{s.setNumber}</div>
-                        <Input
-                          inputMode="decimal"
-                          placeholder="kg"
-                          value={s.weight ?? ""}
-                          onChange={(e) => updateWorkoutSet(s.id, { weight: e.target.value })}
-                        />
-                        <Input
-                          inputMode="numeric"
-                          placeholder="reps"
-                          value={s.reps ?? ""}
-                          onChange={(e) => updateWorkoutSet(s.id, { reps: e.target.value })}
-                        />
-                        <Input
-                          inputMode="numeric"
-                          pattern="[0-9]*"
-                          className="rest-input"
-                          placeholder={`rest ${
-                            it.restSeconds ?? restDefaultSeconds
-                          }s`}
-                          value={s.restSeconds ?? ""}
-                          aria-label={`Rest override seconds for set ${s.setNumber}`}
-                          onChange={(e) => {
-                            const parsed = parseRestInput(e.target.value);
-                            void updateWorkoutSet(s.id, { restSeconds: parsed });
-                          }}
-                        />
-                        <div className="set-actions workout-set-actions">
-                          <Button
-                            variant="primary"
-                            size="sm"
-                            className="tap-target"
-                            onClick={() => handleCompleteSet(it.id, s.id)}
-                          >
-                            Done
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="tap-target set-remove-button"
-                            aria-label={`Remove set ${s.setNumber}`}
-                            onClick={() => removeWorkoutSet(it.id, s.id)}
-                          >
-                            Remove
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="ui-stack">
-                  <div className="ui-row ui-row--between">
-                    <div className="ui-section-title">Exercise note</div>
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() =>
-                        setExerciseNoteOpenIds((prev) => ({
-                          ...prev,
-                          [it.id]: !prev[it.id],
-                        }))
-                      }
+                      className="icon-button"
+                      aria-label="Exercise actions"
+                      onClick={() => setMenuItemId(it.id)}
                     >
-                      {exerciseNoteOpenIds[it.id]
-                        ? "Hide"
-                        : exerciseNotes?.[it.exerciseId]
-                          ? "Edit"
-                          : "Add note"}
+                      <MoreVertical size={18} />
                     </Button>
                   </div>
-                  {!exerciseNoteOpenIds[it.id] && exerciseNotes?.[it.exerciseId] ? (
-                    <div className="template-meta">Note saved</div>
-                  ) : null}
-                  {exerciseNoteOpenIds[it.id] ? (
-                    <div>
-                      <Label htmlFor={`exercise-note-${it.id}`}>Exercise note</Label>
-                      <textarea
-                        id={`exercise-note-${it.id}`}
-                        className="ui-input ui-textarea"
-                        rows={2}
-                        maxLength={EXERCISE_NOTE_LIMIT}
-                        placeholder="Optional notes for this exercise."
-                        value={exerciseNotes?.[it.exerciseId] ?? ""}
-                        onFocus={() => setFocusedExerciseNoteId(it.id)}
-                        onBlur={() => handleExerciseNoteBlur(it.exerciseId)}
-                        onChange={(e) =>
-                          setExerciseNotes((prev) => ({
-                            ...prev,
-                            [it.exerciseId]: e.target.value,
-                          }))
-                        }
-                      />
-                      {focusedExerciseNoteId === it.id ? (
-                        <div className="template-meta">
-                          Optional | {(exerciseNotes?.[it.exerciseId] ?? "").length}/
-                          {EXERCISE_NOTE_LIMIT}
-                        </div>
-                      ) : null}
+                </CardHeader>
+
+                <CardBody className="workout-exercise-body">
+                  {missingEquipment.length ? (
+                    <div className="equipment-warning">
+                      Missing equipment:{" "}
+                      {missingEquipment.map((item) => item?.name ?? "Unknown").join(", ")}
                     </div>
                   ) : null}
-                </div>
-              </CardBody>
-            </Card>
+
+                  {it.sets.length === 0 ? (
+                    <div className="ui-muted">No sets yet. Add a set above.</div>
+                  ) : (
+                    <div className="workout-sets-grid">
+                      <div className="workout-sets-header-row">
+                        <div>Set</div>
+                        <div>Prev</div>
+                        <div>Kg</div>
+                        <div>Reps</div>
+                        <div>Done</div>
+                      </div>
+                      {it.sets.map((s) => {
+                        const isWarmup = Boolean(s.isWarmup);
+                        const label = isWarmup
+                          ? `W${(warmupIndex += 1)}`
+                          : `${(workingIndex += 1)}`;
+                        const previousText = isWarmup
+                          ? "—"
+                          : formatSetValue(previousWorkingSets[workingIndex - 1]);
+                        return (
+                          <div
+                            key={s.id}
+                            className={`workout-set-row${
+                              isWarmup ? " workout-set-row--warmup" : ""
+                            }`}
+                            data-workout-set-id={s.id}
+                          >
+                            <div className="set-index">{label}</div>
+                            <div className="set-prev">{previousText}</div>
+                            <Input
+                              inputMode="decimal"
+                              placeholder="kg"
+                              value={s.weight ?? ""}
+                              onChange={(e) =>
+                                updateWorkoutSet(s.id, { weight: e.target.value })
+                              }
+                            />
+                            <Input
+                              inputMode="numeric"
+                              placeholder="reps"
+                              value={s.reps ?? ""}
+                              onChange={(e) => updateWorkoutSet(s.id, { reps: e.target.value })}
+                            />
+                            <div className="set-actions">
+                              <label className="set-done">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(s.isComplete)}
+                                  onChange={(e) => {
+                                    const checked = e.target.checked;
+                                    void updateWorkoutSet(s.id, { isComplete: checked });
+                                    if (checked) {
+                                      handleCompleteSet(it.id, s.id);
+                                    }
+                                  }}
+                                  aria-label={`Mark set ${label} complete`}
+                                />
+                                <span>Done</span>
+                              </label>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="set-remove-button"
+                                aria-label={`Remove set ${label}`}
+                                onClick={() => removeWorkoutSet(it.id, s.id)}
+                              >
+                                Remove
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardBody>
+              </Card>
             );
           })}
         </div>
@@ -985,97 +1108,342 @@ function WorkoutView({
         </CardBody>
       </Card>
 
-      <button
-        type="button"
-        className="rest-chip"
-        data-running={restRunning ? "true" : "false"}
-        onClick={() => setRestSheetOpen(true)}
-      >
-        <span className="rest-chip__label">Rest</span>
-        <span className="rest-chip__time">
-          {restEnabled ? formatRestTime(restRemaining) : "Off"}
-        </span>
-        {restRunning && restHint ? (
-          <span className="rest-chip__hint">{restHint}</span>
-        ) : null}
-      </button>
+      {showRestTimer ? (
+        <>
+          <button
+            type="button"
+            className="rest-chip"
+            data-running={restRunning ? "true" : "false"}
+            onClick={() => setRestSheetOpen(true)}
+          >
+            <span className="rest-chip__label">Rest</span>
+            <span className="rest-chip__time">
+              {restEnabled ? formatRestTime(restRemaining) : "Off"}
+            </span>
+            {restRunning && restHint ? (
+              <span className="rest-chip__hint">{restHint}</span>
+            ) : null}
+          </button>
 
-      {restSheetOpen ? (
+          {restSheetOpen ? (
+            <div className="modal">
+              <button
+                type="button"
+                className="modal__backdrop"
+                onClick={() => setRestSheetOpen(false)}
+                aria-label="Close rest timer"
+              />
+              <div className="modal__panel rest-sheet">
+                <div className="ui-stack">
+                  <div className="ui-row ui-row--between">
+                    <div>
+                      <div className="ui-strong">Rest timer</div>
+                      <div className="template-meta">
+                        Keep recovery consistent between sets.
+                      </div>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setRestSheetOpen(false)}
+                    >
+                      Close
+                    </Button>
+                  </div>
+
+                  <div className="rest-time">{formatRestTime(restRemaining)}</div>
+                  {restRunning && restHint ? (
+                    <div className="rest-hint">{restHint}</div>
+                  ) : null}
+
+                  <div className="rest-toggle">
+                    <div>
+                      <div className="ui-strong">Rest enabled</div>
+                      <div className="template-meta">
+                        Auto-starts when you complete a set.
+                      </div>
+                    </div>
+                    <Button
+                      variant={restEnabled ? "primary" : "secondary"}
+                      size="sm"
+                      onClick={handleToggleRestEnabled}
+                    >
+                      {restEnabled ? "On" : "Off"}
+                    </Button>
+                  </div>
+
+                  <div>
+                    <Label htmlFor={`${restFieldId}-default`}>Default rest (sec)</Label>
+                    <Input
+                      id={`${restFieldId}-default`}
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={restDefaultInput}
+                      onChange={handleRestDefaultChange}
+                      onBlur={() => {
+                        if (restDefaultInput.trim() === "") {
+                          setRestDefaultInput(String(restDefaultSeconds));
+                        }
+                      }}
+                    />
+                  </div>
+
+                  <div className="ui-row ui-row--wrap">
+                    <Button
+                      variant="primary"
+                      size="md"
+                      className="flex-1"
+                      onClick={handleStartPauseRest}
+                      disabled={!restEnabled}
+                    >
+                      {restRunning ? "Pause" : "Start"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="md"
+                      className="flex-1"
+                      onClick={handleResetRest}
+                      disabled={!restEnabled}
+                    >
+                      Reset
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {activeMenuItem ? (
         <div className="modal">
           <button
             type="button"
             className="modal__backdrop"
-            onClick={() => setRestSheetOpen(false)}
-            aria-label="Close rest timer"
+            onClick={() => setMenuItemId(null)}
+            aria-label="Close exercise menu"
           />
-          <div className="modal__panel rest-sheet">
+          <div className="modal__panel exercise-menu">
             <div className="ui-stack">
               <div className="ui-row ui-row--between">
                 <div>
-                  <div className="ui-strong">Rest timer</div>
-                  <div className="template-meta">Keep recovery consistent between sets.</div>
+                  <div className="ui-strong">
+                    {activeMenuItem.exercise?.name ?? "Exercise"}
+                  </div>
+                  <div className="template-meta">Exercise actions</div>
                 </div>
-                <Button variant="ghost" size="sm" onClick={() => setRestSheetOpen(false)}>
+                <Button variant="ghost" size="sm" onClick={() => setMenuItemId(null)}>
                   Close
                 </Button>
               </div>
 
-              <div className="rest-time">{formatRestTime(restRemaining)}</div>
-              {restRunning && restHint ? (
-                <div className="rest-hint">{restHint}</div>
-              ) : null}
+              <div className="exercise-menu__list">
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => openReplacePicker(activeMenuItem)}
+                >
+                  <RefreshCcw size={16} />
+                  Replace exercise
+                </button>
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => handleAddWarmup(activeMenuItem.id)}
+                >
+                  <Flame size={16} />
+                  Add warm-up sets
+                </button>
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => openExerciseNoteSheet(activeMenuItem)}
+                >
+                  <FileText size={16} />
+                  Note
+                </button>
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => openStickyNoteSheet(activeMenuItem)}
+                >
+                  <StickyNote size={16} />
+                  Sticky note
+                </button>
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => {
+                    setSupersetSheetItemId(activeMenuItem.id);
+                    setMenuItemId(null);
+                  }}
+                >
+                  <Link2 size={16} />
+                  {activeMenuItem.supersetGroupId ? "Manage superset" : "Make superset"}
+                </button>
+                <button
+                  type="button"
+                  className="exercise-menu__item exercise-menu__item--danger"
+                  onClick={() => handleDeleteExercise(activeMenuItem)}
+                >
+                  <Trash2 size={16} />
+                  Delete exercise
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
-              <div className="rest-toggle">
+      {exerciseNoteSheet ? (
+        <div className="modal">
+          <button
+            type="button"
+            className="modal__backdrop"
+            onClick={() => {
+              setExerciseNoteSheet(null);
+              setExerciseNoteDraft("");
+            }}
+            aria-label="Close note editor"
+          />
+          <div className="modal__panel note-sheet">
+            <div className="ui-stack">
+              <div className="ui-row ui-row--between">
                 <div>
-                  <div className="ui-strong">Rest enabled</div>
+                  <div className="ui-strong">
+                    {exerciseNoteSheet.type === "sticky" ? "Sticky note" : "Exercise note"}
+                  </div>
                   <div className="template-meta">
-                    Auto-starts when you complete a set.
+                    {exerciseNoteSheet.type === "sticky"
+                      ? "Saved on the exercise and reused each workout."
+                      : "Saved with this workout only."}
                   </div>
                 </div>
                 <Button
-                  variant={restEnabled ? "primary" : "secondary"}
+                  variant="ghost"
                   size="sm"
-                  onClick={handleToggleRestEnabled}
+                  onClick={() => {
+                    setExerciseNoteSheet(null);
+                    setExerciseNoteDraft("");
+                  }}
                 >
-                  {restEnabled ? "On" : "Off"}
+                  Close
                 </Button>
               </div>
 
               <div>
-                <Label htmlFor={`${restFieldId}-default`}>Default rest (sec)</Label>
-                <Input
-                  id={`${restFieldId}-default`}
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={restDefaultInput}
-                  onChange={handleRestDefaultChange}
-                  onBlur={() => {
-                    if (restDefaultInput.trim() === "") {
-                      setRestDefaultInput(String(restDefaultSeconds));
-                    }
-                  }}
+                <Label htmlFor="exercise-note-editor">Note</Label>
+                <textarea
+                  id="exercise-note-editor"
+                  className="ui-input ui-textarea"
+                  rows={3}
+                  maxLength={EXERCISE_NOTE_LIMIT}
+                  placeholder="Add a quick note..."
+                  value={exerciseNoteDraft}
+                  onChange={(e) => setExerciseNoteDraft(e.target.value)}
                 />
+                <div className="template-meta">
+                  {exerciseNoteDraft.length}/{EXERCISE_NOTE_LIMIT}
+                </div>
               </div>
 
-              <div className="ui-row ui-row--wrap">
-                <Button
-                  variant="primary"
-                  size="md"
-                  className="flex-1"
-                  onClick={handleStartPauseRest}
-                  disabled={!restEnabled}
-                >
-                  {restRunning ? "Pause" : "Start"}
-                </Button>
+              <div className="ui-row">
                 <Button
                   variant="secondary"
                   size="md"
                   className="flex-1"
-                  onClick={handleResetRest}
-                  disabled={!restEnabled}
+                  onClick={() => {
+                    setExerciseNoteSheet(null);
+                    setExerciseNoteDraft("");
+                  }}
                 >
-                  Reset
+                  Cancel
                 </Button>
+                <Button
+                  variant="primary"
+                  size="md"
+                  className="flex-1"
+                  onClick={handleSaveExerciseNote}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {supersetSheetItem ? (
+        <div className="modal">
+          <button
+            type="button"
+            className="modal__backdrop"
+            onClick={() => setSupersetSheetItemId(null)}
+            aria-label="Close superset menu"
+          />
+          <div className="modal__panel superset-sheet">
+            <div className="ui-stack">
+              <div className="ui-row ui-row--between">
+                <div>
+                  <div className="ui-strong">Superset</div>
+                  <div className="template-meta">
+                    Pair {supersetSheetItem.exercise?.name ?? "exercise"} with another.
+                  </div>
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => setSupersetSheetItemId(null)}>
+                  Close
+                </Button>
+              </div>
+
+              {supersetGroupItems.length ? (
+                <div className="ui-stack">
+                  <div className="template-meta">Current group</div>
+                  <div className="superset-group-list">
+                    {supersetGroupItems.map((item) => (
+                      <div key={item.id} className="superset-group-item">
+                        {item.exercise?.name ?? "Exercise"}
+                      </div>
+                    ))}
+                  </div>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => handleRemoveSuperset(supersetSheetItem.supersetGroupId)}
+                  >
+                    Remove superset
+                  </Button>
+                </div>
+              ) : null}
+
+              <div className="ui-stack">
+                <div className="template-meta">Pair with</div>
+                {supersetPartnerOptions.length ? (
+                  <div className="superset-options">
+                    {supersetPartnerOptions.map((option) => {
+                      const isSameGroup =
+                        option.supersetGroupId &&
+                        option.supersetGroupId === supersetSheetItem.supersetGroupId;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className="superset-option"
+                          onClick={() => handleCreateSuperset(supersetSheetItem.id, option.id)}
+                          disabled={isSameGroup}
+                        >
+                          <span>{option.exercise?.name ?? "Exercise"}</span>
+                          {isSameGroup ? (
+                            <span className="pill pill--muted">Paired</span>
+                          ) : option.supersetGroupId ? (
+                            <span className="pill pill--muted">In superset</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="empty-state">Add another exercise to create a superset.</div>
+                )}
               </div>
             </div>
           </div>
@@ -1117,75 +1485,6 @@ function WorkoutView({
         </Card>
       ) : null}
 
-      {/* Replace Exercise Modal (Step D) */}
-      {replaceOpen && (
-        <div className="modal">
-          <button
-            type="button"
-            className="modal__backdrop"
-            onClick={closeReplace}
-            aria-label="Close replace modal"
-          />
-
-          <div className="modal__panel">
-            <div className="ui-stack">
-              <div className="ui-row ui-row--between">
-                <div>
-                  <div className="ui-strong">Replace exercise</div>
-                  <div className="template-meta">Pick a new exercise (duplicates blocked)</div>
-                </div>
-                <Button variant="ghost" size="sm" onClick={closeReplace}>
-                  Close
-                </Button>
-              </div>
-
-              <div>
-                <Label htmlFor={replaceSelectId}>New exercise</Label>
-                <Select
-                  id={replaceSelectId}
-                  value={replaceNewExerciseId}
-                  onChange={(e) => setReplaceNewExerciseId(e.target.value)}
-                >
-                  {replaceOptions.map((ex) => (
-                    <option key={ex.id} value={String(ex.id)}>
-                      {ex.name} ({ex.muscle_group})
-                    </option>
-                  ))}
-                </Select>
-              </div>
-
-              <div className="ui-row">
-                <Button variant="secondary" size="md" onClick={closeReplace} className="flex-1">
-                  Cancel
-                </Button>
-                <Button
-                  variant="primary"
-                  size="md"
-                  className="flex-1"
-                  onClick={async () => {
-                    try {
-                      const newId = parseInt(replaceNewExerciseId, 10);
-                      if (!replaceItemId || Number.isNaN(newId)) return;
-                      if (newId === replaceCurrentExerciseId) {
-                        closeReplace();
-                        return;
-                      }
-                      await replaceWorkoutExercise(replaceItemId, newId);
-                      closeReplace();
-                    } catch (err) {
-                      onNotify?.(err?.message ?? "Could not replace exercise.", {
-                        tone: "error",
-                      });
-                    }
-                  }}
-                >
-                  Replace
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1335,6 +1634,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [exercisePickerMostUsedFirst, setExercisePickerMostUsedFirst] = useState(
     settings?.exercise_picker_most_used_first ?? true
   );
+  const [showRestTimer, setShowRestTimer] = useState(
+    settings?.show_rest_timer ?? true
+  );
   const [memoryViewOpen, setMemoryViewOpen] = useState(false);
   const [memoryEditOpen, setMemoryEditOpen] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -1367,6 +1669,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
       exercise_picker_auto_focus: exercisePickerAutoFocus,
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
       exercise_picker_most_used_first: exercisePickerMostUsedFirst,
+      show_rest_timer: showRestTimer,
     });
     onNotify?.("Saved locally ✅", { tone: "success" });
   };
@@ -1434,6 +1737,26 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
           {themeMode === "system" ? (
             <div className="template-meta">Currently following {resolvedLabel} mode.</div>
           ) : null}
+        </div>
+
+        <hr className="ui-divider" />
+
+        <div className="ui-section-title">Workout logging</div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-strong">Show rest timer</div>
+            <div className="template-meta">Toggle the floating rest timer chip.</div>
+          </div>
+          <Button
+            variant={showRestTimer ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setShowRestTimer((prev) => !prev)}
+            aria-pressed={showRestTimer}
+          >
+            {showRestTimer ? "On" : "Off"}
+          </Button>
         </div>
 
         <hr className="ui-divider" />
@@ -1608,11 +1931,95 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   );
 }
 
+function MoreView({
+  onLaunchCoach,
+  onAddExerciseToWorkout,
+  exerciseSeedState,
+  onReseedExercises,
+  onNotify,
+  themeMode,
+  resolvedTheme,
+  setThemeMode,
+}) {
+  const [section, setSection] = useState("home");
+
+  if (section === "exercises") {
+    return (
+      <ExercisesExplorer
+        onBack={() => setSection("home")}
+        onLaunchCoach={onLaunchCoach}
+        onAddToWorkout={onAddExerciseToWorkout}
+        isSeeding={exerciseSeedState?.status === "loading"}
+        onReseed={onReseedExercises}
+      />
+    );
+  }
+
+  if (section === "gyms") {
+    return <GymsView onBack={() => setSection("home")} onLaunchCoach={onLaunchCoach} />;
+  }
+
+  if (section === "settings") {
+    return (
+      <SettingsView
+        onNotify={onNotify}
+        themeMode={themeMode}
+        resolvedTheme={resolvedTheme}
+        setThemeMode={setThemeMode}
+        onBack={() => setSection("home")}
+      />
+    );
+  }
+
+  return (
+    <div className="page">
+      <PageHeader title="More" subtitle="Library tools, gyms, and preferences." />
+
+      <div className="library-grid">
+        <Card>
+          <CardBody className="ui-stack">
+            <div className="ui-strong">Exercise library</div>
+            <div className="template-meta">
+              Browse exercises, cues, history, and training details.
+            </div>
+            <Button variant="primary" size="sm" onClick={() => setSection("exercises")}>
+              Open library
+            </Button>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardBody className="ui-stack">
+            <div className="ui-strong">Gyms</div>
+            <div className="template-meta">
+              Manage workout spaces, equipment, and templates.
+            </div>
+            <Button variant="primary" size="sm" onClick={() => setSection("gyms")}>
+              Open gyms
+            </Button>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardBody className="ui-stack">
+            <div className="ui-strong">Settings</div>
+            <div className="template-meta">Adjust logging, Coach, and display options.</div>
+            <Button variant="secondary" size="sm" onClick={() => setSection("settings")}>
+              Open settings
+            </Button>
+          </CardBody>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({
   onNotify,
   themeMode,
   resolvedTheme,
   setThemeMode,
+  onBack,
 }) {
   const settings = useLiveQuery(() => db.settings.get(1), []);
   const settingsKey = settings
@@ -1622,7 +2029,7 @@ function SettingsView({
         settings.exercise_picker_auto_focus ?? ""
       }::${settings.exercise_picker_filter_active_gym ?? ""}::${
         settings.exercise_picker_most_used_first ?? ""
-      }`
+      }::${settings.show_rest_timer ?? ""}`
     : "loading";
 
   return (
@@ -1630,6 +2037,13 @@ function SettingsView({
       <PageHeader
         title="Settings"
         subtitle="Manage your local preferences."
+        actions={
+          onBack ? (
+            <Button variant="ghost" size="sm" onClick={onBack}>
+              Back
+            </Button>
+          ) : null
+        }
       />
       <SettingsForm
         key={settingsKey}
@@ -1824,6 +2238,12 @@ export default function App() {
   }, [coachLaunchContext, tab]);
 
   useEffect(() => {
+    if (tab === "library" || tab === "settings") {
+      setTab("more");
+    }
+  }, [tab]);
+
+  useEffect(() => {
     let cancelled = false;
     const runSeed = async () => {
       setExerciseSeedState({ status: "loading" });
@@ -1871,10 +2291,12 @@ export default function App() {
   };
 
   const handleTabChange = (nextTab) => {
+    const normalized =
+      nextTab === "library" || nextTab === "settings" ? "more" : nextTab;
     if (nextTab === "templates") {
       setActiveTemplateId(null);
     }
-    setTab(nextTab);
+    setTab(normalized);
   };
 
   const handleAddExerciseFromLibrary = async (exerciseId) => {
@@ -1944,8 +2366,8 @@ export default function App() {
             />
           ))}
 
-        {tab === "library" && (
-          <LibraryView
+        {tab === "more" && (
+          <MoreView
             onLaunchCoach={(context) => {
               setCoachLaunchContext(context);
               setTab("coach");
@@ -1953,11 +2375,6 @@ export default function App() {
             onAddExerciseToWorkout={handleAddExerciseFromLibrary}
             exerciseSeedState={exerciseSeedState}
             onReseedExercises={handleReseedExercises}
-          />
-        )}
-
-        {tab === "settings" && (
-          <SettingsView
             onNotify={notify}
             themeMode={themeMode}
             resolvedTheme={resolvedTheme}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import {
@@ -80,6 +80,7 @@ export default function ExercisesExplorer({
   const settings = useLiveQuery(() => db.settings.get(1), []);
   const usageStats = useLiveQuery(() => getExerciseUsageStats(), []);
 
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [selectedMuscle, setSelectedMuscle] = useState("");
   const [selectedEquipment, setSelectedEquipment] = useState("");
@@ -105,6 +106,13 @@ export default function ExercisesExplorer({
     const entries = Array.isArray(usageStats) ? usageStats : [];
     return new Map(entries.map((entry) => [entry.exerciseId, entry]));
   }, [usageStats]);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      setSearch(searchInput);
+    }, 150);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
 
   const searchQuery = search.trim().toLowerCase();
 
@@ -242,22 +250,37 @@ export default function ExercisesExplorer({
         }
       />
 
+      <div className="sticky-search">
+        <Label htmlFor="exercise-library-search">Search exercises</Label>
+        <div className="search-field">
+          <Input
+            id="exercise-library-search"
+            type="search"
+            placeholder="Search by name or alias"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+          />
+          {searchInput ? (
+            <button
+              type="button"
+              className="search-clear"
+              onClick={() => {
+                setSearchInput("");
+                setSearch("");
+              }}
+              aria-label="Clear search"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <Card>
         <CardHeader>
           <div className="ui-section-title">Search & filters</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          <div>
-            <Label htmlFor="exercise-library-search">Search exercises</Label>
-            <Input
-              id="exercise-library-search"
-              type="search"
-              placeholder="Search by name or alias"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-            />
-          </div>
-
           <div className="filter-grid">
             <div>
               <Label htmlFor="exercise-library-muscle">Muscle group</Label>
