@@ -1,0 +1,48 @@
+name: Merge on automerge label
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge if labeled automerge and CI is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BRANCH: ${{ github.head_ref }}
+        run: |
+          # Only for Codex branches
+          if [[ "$BRANCH" != codex/* ]]; then
+            echo "Not codex/*; skipping"
+            exit 0
+          fi
+
+          # Only if the automerge label is present
+          has_label=$(gh pr view "$PR" --repo "$REPO" --json labels --jq 'any(.labels[].name; .=="automerge")')
+          if [[ "$has_label" != "true" ]]; then
+            echo "No automerge label; skipping"
+            exit 0
+          fi
+
+          # If CI is already successful, merge now.
+          # Otherwise exit 0 and let the workflow_run merger handle it after CI completes.
+          ci_ok=$(gh pr view "$PR" --repo "$REPO" --json statusCheckRollup --jq '
+            .statusCheckRollup
+            | map(select(.name=="CI"))
+            | map(.conclusion=="SUCCESS")
+            | any
+          ')
+
+          if [[ "$ci_ok" == "true" ]]; then
+            gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
+          else
+            echo "CI not green yet; will be merged by workflow_run after CI passes."
+          fi
