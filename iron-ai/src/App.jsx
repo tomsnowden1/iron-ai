@@ -11,12 +11,14 @@ import {
   StickyNote,
   FileText,
   Flame,
+  Info,
   Link2,
   Trash2,
 } from "lucide-react";
 
 import CoachView from "./features/coach/CoachView";
 import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
+import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
 import GymsView from "./features/gyms/GymsView";
@@ -186,6 +188,7 @@ function WorkoutView({
   const [menuItemId, setMenuItemId] = useState(null);
   const [supersetSheetItemId, setSupersetSheetItemId] = useState(null);
   const [detailExerciseId, setDetailExerciseId] = useState(null);
+  const [historyExercise, setHistoryExercise] = useState(null);
   const scrollRestoreRef = useRef(0);
 
   // Safe defaults so we can compute memos without crashing
@@ -523,8 +526,18 @@ function WorkoutView({
     startRestForSet(itemId, setId);
   };
 
+  const handleOpenExerciseHistory = (item) => {
+    if (!item?.exerciseId) return;
+    setHistoryExercise({
+      id: item.exerciseId,
+      name: item.exercise?.name ?? "Exercise",
+      stickyNote: item.exercise?.stickyNote ?? "",
+    });
+  };
+
   const handleOpenExerciseDetail = (exerciseId) => {
     if (!exerciseId) return;
+    setHistoryExercise(null);
     scrollRestoreRef.current = window.scrollY ?? 0;
     setDetailExerciseId(exerciseId);
   };
@@ -977,7 +990,7 @@ function WorkoutView({
                       type="button"
                       className="workout-exercise-name"
                       title={it.exercise?.name ?? "Unknown Exercise"}
-                      onClick={() => handleOpenExerciseDetail(it.exerciseId)}
+                      onClick={() => handleOpenExerciseHistory(it)}
                     >
                       {it.exercise?.name ?? "Unknown Exercise"}
                     </button>
@@ -1004,6 +1017,15 @@ function WorkoutView({
                       onClick={() => addWorkoutSet(it.id)}
                     >
                       + Set
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="icon-button"
+                      aria-label={`View history for ${it.exercise?.name ?? "exercise"}`}
+                      onClick={() => handleOpenExerciseHistory(it)}
+                    >
+                      <History size={18} />
                     </Button>
                     <Button
                       variant="ghost"
@@ -1265,6 +1287,14 @@ function WorkoutView({
         </>
       ) : null}
 
+      <ExerciseHistoryDrawer
+        open={Boolean(historyExercise)}
+        exerciseId={historyExercise?.id ?? null}
+        exerciseName={historyExercise?.name ?? null}
+        stickyNote={historyExercise?.stickyNote ?? null}
+        onClose={() => setHistoryExercise(null)}
+      />
+
       {activeMenuItem ? (
         <div className="modal">
           <button
@@ -1288,6 +1318,17 @@ function WorkoutView({
               </div>
 
               <div className="exercise-menu__list">
+                <button
+                  type="button"
+                  className="exercise-menu__item"
+                  onClick={() => {
+                    handleOpenExerciseDetail(activeMenuItem.exerciseId);
+                    setMenuItemId(null);
+                  }}
+                >
+                  <Info size={16} />
+                  Exercise details
+                </button>
                 <button
                   type="button"
                   className="exercise-menu__item"

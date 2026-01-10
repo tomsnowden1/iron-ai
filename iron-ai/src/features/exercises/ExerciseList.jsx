@@ -1,4 +1,4 @@
-import { Info } from "lucide-react";
+import { History, Info } from "lucide-react";
 
 import { Button } from "../../components/ui";
 import { getEquipmentMap } from "../../equipment/catalog";
@@ -51,6 +51,7 @@ export default function ExerciseList({
   activeSpace,
   onSelect,
   onInfo,
+  onHistory,
   emptyLabel,
 }) {
   const equipmentMap =
@@ -100,17 +101,33 @@ export default function ExerciseList({
                 <span className={availability.tone}>{availability.label}</span>
               ) : null}
             </button>
-            {onInfo ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                type="button"
-                onClick={() => onInfo(exercise)}
-                className="exercise-row__info"
-                aria-label={`View details for ${exercise.name ?? "exercise"}`}
-              >
-                <Info size={16} />
-              </Button>
+            {onHistory || onInfo ? (
+              <div className="exercise-row__actions">
+                {onHistory ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => onHistory(exercise)}
+                    className="exercise-row__info"
+                    aria-label={`View history for ${exercise.name ?? "exercise"}`}
+                  >
+                    <History size={16} />
+                  </Button>
+                ) : null}
+                {onInfo ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => onInfo(exercise)}
+                    className="exercise-row__info"
+                    aria-label={`View details for ${exercise.name ?? "exercise"}`}
+                  >
+                    <Info size={16} />
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         );

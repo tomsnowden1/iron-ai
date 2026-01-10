@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState } from "react";
+import { History } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import {
@@ -34,6 +35,7 @@ import {
 } from "../../equipment/engine";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
 import ExercisePickerView from "../exercises/ExercisePickerView";
+import ExerciseHistoryDrawer from "../exercises/ExerciseHistoryDrawer";
 
 export default function TemplateEditor({ templateId, onBack, onStartWorkout, onNotify }) {
   const templateBundle = useLiveQuery(
@@ -118,6 +120,7 @@ function TemplateEditorForm({
 }) {
   const [name, setName] = useState(templateBundle?.template?.name ?? "");
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [historyExercise, setHistoryExercise] = useState(null);
   const nameId = useId();
   const templateSpaceId = useId();
   const activeSpaceId = useId();
@@ -385,22 +388,48 @@ function TemplateEditorForm({
                   <div key={it.id} className="template-item">
                     <div className="template-item__header">
                       <div className="ui-stack">
-                        <div className="ui-strong">
+                        <button
+                          type="button"
+                          className="template-item__title"
+                          onClick={() =>
+                            setHistoryExercise({
+                              id: it.exerciseId,
+                              name: it.exercise?.name ?? "Unknown Exercise",
+                              stickyNote: it.exercise?.stickyNote ?? "",
+                            })
+                          }
+                        >
                           {it.exercise?.name ?? "Unknown Exercise"}
-                        </div>
+                        </button>
                         <div>
                           <span className="pill pill--muted">
                             {it.exercise?.muscle_group ?? "Unknown"}
                           </span>
                         </div>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleRemoveItem(it.id)}
-                      >
-                        Remove
-                      </Button>
+                      <div className="template-item__actions">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setHistoryExercise({
+                              id: it.exerciseId,
+                              name: it.exercise?.name ?? "Unknown Exercise",
+                              stickyNote: it.exercise?.stickyNote ?? "",
+                            })
+                          }
+                          aria-label={`View history for ${it.exercise?.name ?? "exercise"}`}
+                        >
+                          <History size={16} />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveItem(it.id)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
                     </div>
                     <div className="template-set-grid">
                       <div className="template-set-grid__label">Sets</div>
@@ -481,6 +510,14 @@ function TemplateEditorForm({
           </Button>
         </CardFooter>
       </Card>
+
+      <ExerciseHistoryDrawer
+        open={Boolean(historyExercise)}
+        exerciseId={historyExercise?.id ?? null}
+        exerciseName={historyExercise?.name ?? null}
+        stickyNote={historyExercise?.stickyNote ?? null}
+        onClose={() => setHistoryExercise(null)}
+      />
     </div>
   );
 }

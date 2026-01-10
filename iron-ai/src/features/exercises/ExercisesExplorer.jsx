@@ -34,6 +34,7 @@ import { resolveActiveSpace } from "../../workoutSpaces/logic";
 
 import ExerciseDetailView from "./ExerciseDetailView";
 import ExerciseList from "./ExerciseList";
+import ExerciseHistoryDrawer from "./ExerciseHistoryDrawer";
 
 function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
@@ -89,6 +90,7 @@ export default function ExercisesExplorer({
   const [coreOnly, setCoreOnly] = useState(true);
   const [sortMode, setSortMode] = useState("az");
   const [detailExerciseId, setDetailExerciseId] = useState(null);
+  const [historyExercise, setHistoryExercise] = useState(null);
   const [reseeding, setReseeding] = useState(false);
 
   const equipmentMap = useMemo(
@@ -413,6 +415,13 @@ export default function ExercisesExplorer({
             equipmentList={equipmentMap}
             activeSpace={activeSpace}
             onSelect={(exercise) => setDetailExerciseId(exercise.id)}
+            onHistory={(exercise) =>
+              setHistoryExercise({
+                id: exercise.id,
+                name: exercise.name,
+                stickyNote: exercise.stickyNote,
+              })
+            }
             emptyLabel={emptyLabel}
           />
           {coreOnly && !isLoading && filteredExercises.length === 0 ? (
@@ -430,6 +439,14 @@ export default function ExercisesExplorer({
           ) : null}
         </CardBody>
       </Card>
+
+      <ExerciseHistoryDrawer
+        open={Boolean(historyExercise)}
+        exerciseId={historyExercise?.id ?? null}
+        exerciseName={historyExercise?.name ?? null}
+        stickyNote={historyExercise?.stickyNote ?? null}
+        onClose={() => setHistoryExercise(null)}
+      />
     </div>
   );
 }
