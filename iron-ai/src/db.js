@@ -933,6 +933,7 @@ export async function addExerciseToWorkout(workoutId, exerciseId) {
         setNumber: s,
         weight: "",
         reps: targetReps == null ? "" : String(targetReps),
+        isWarmup: false,
       });
     }
   });
@@ -956,6 +957,32 @@ export async function addWorkoutSet(workoutItemId) {
     setNumber: nextN,
     weight: "",
     reps: "",
+    isWarmup: false,
+  });
+}
+
+export async function addWarmupSets(workoutItemId, count = 2) {
+  const safeCount = Math.max(1, Math.floor(count));
+  return db.transaction("rw", db.table("workoutSets"), async () => {
+    const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
+    sets.sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0));
+    const warmupCount = sets.filter((set) => set.isWarmup).length;
+
+    for (const set of sets) {
+      if (set.isWarmup) continue;
+      const current = set.setNumber ?? 0;
+      await db.table("workoutSets").update(set.id, { setNumber: current + safeCount });
+    }
+
+    for (let i = 0; i < safeCount; i += 1) {
+      await db.table("workoutSets").add({
+        workoutItemId,
+        setNumber: warmupCount + i + 1,
+        weight: "",
+        reps: "",
+        isWarmup: true,
+      });
+    }
   });
 }
 
@@ -986,6 +1013,11 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
       // Keep same number of sets currently on the item
       const existingSets = await db.table("workoutSets").where({ workoutItemId }).toArray();
       const setCount = existingSets.length || ex.default_sets || 3;
+      const warmupFlags = existingSets.length
+        ? existingSets
+            .sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0))
+            .map((set) => Boolean(set.isWarmup))
+        : Array.from({ length: setCount }, () => false);
 
       // Update workout item
       await db.table("workoutItems").update(workoutItemId, {
@@ -994,7 +1026,7 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
         targetReps: ex.default_reps ?? null,
       });
 
-      // Reset sets to match new exercise default reps
+      // Reset sets to match new exercise defaults while preserving count
       await db.table("workoutSets").where({ workoutItemId }).delete();
 
       for (let s = 1; s <= setCount; s++) {
@@ -1002,7 +1034,8 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
           workoutItemId,
           setNumber: s,
           weight: "",
-          reps: ex.default_reps == null ? "" : String(ex.default_reps),
+          reps: "",
+          isWarmup: warmupFlags[s - 1] ?? false,
         });
       }
     }

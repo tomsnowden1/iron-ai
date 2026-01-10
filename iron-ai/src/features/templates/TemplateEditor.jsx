@@ -7,6 +7,7 @@ import {
   getExerciseUsageCounts,
   getTemplateWithDetails,
   updateTemplate,
+  updateTemplateItem,
   deleteTemplate,
   addExerciseToTemplate,
   removeTemplateItem,
@@ -377,25 +378,78 @@ function TemplateEditorForm({
             <div className="empty-state">No exercises yet. Add your first one below.</div>
           ) : (
             <div className="ui-stack">
-              {items.map((it) => (
-                <div key={it.id} className="ui-row ui-row--between">
-                  <div className="ui-stack">
-                    <div className="ui-strong">{it.exercise?.name ?? "Unknown Exercise"}</div>
-                    <div>
-                      <span className="pill pill--muted">
-                        {it.exercise?.muscle_group ?? "Unknown"}
-                      </span>
+              {items.map((it) => {
+                const targetSets = Math.max(1, Number(it.targetSets ?? 3));
+                const targetReps = it.targetReps ?? "";
+                return (
+                  <div key={it.id} className="template-item">
+                    <div className="template-item__header">
+                      <div className="ui-stack">
+                        <div className="ui-strong">
+                          {it.exercise?.name ?? "Unknown Exercise"}
+                        </div>
+                        <div>
+                          <span className="pill pill--muted">
+                            {it.exercise?.muscle_group ?? "Unknown"}
+                          </span>
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveItem(it.id)}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                    <div className="template-set-grid">
+                      <div className="template-set-grid__label">Sets</div>
+                      <div className="template-set-grid__label">Reps</div>
+                      <div className="template-set-counter">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() =>
+                            updateTemplateItem(it.id, {
+                              targetSets: Math.max(1, targetSets - 1),
+                            })
+                          }
+                        >
+                          -
+                        </Button>
+                        <Input
+                          inputMode="numeric"
+                          value={targetSets}
+                          onChange={(e) => {
+                            const next = Number.parseInt(e.target.value, 10);
+                            if (Number.isNaN(next)) return;
+                            updateTemplateItem(it.id, { targetSets: Math.max(1, next) });
+                          }}
+                        />
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() =>
+                            updateTemplateItem(it.id, { targetSets: targetSets + 1 })
+                          }
+                        >
+                          +
+                        </Button>
+                      </div>
+                      <div className="template-set-input">
+                        <Input
+                          inputMode="numeric"
+                          placeholder="reps"
+                          value={targetReps}
+                          onChange={(e) =>
+                            updateTemplateItem(it.id, { targetReps: e.target.value })
+                          }
+                        />
+                      </div>
                     </div>
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleRemoveItem(it.id)}
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardBody>
