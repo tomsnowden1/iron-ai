@@ -7,7 +7,7 @@ on:
 
 jobs:
   merge:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -16,19 +16,20 @@ jobs:
       - name: Merge PR if labeled "automerge"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          branch="${{ github.event.workflow_run.head_branch }}"
-
           pr_number=$(gh pr list \
-            --head "$branch" \
+            --repo "$REPO" \
+            --head "$BRANCH" \
             --state open \
             --json number,labels,isDraft \
             --jq '.[] | select(.isDraft==false) | select(any(.labels[].name; . == "automerge")) | .number' \
             | head -n 1)
 
           if [ -z "$pr_number" ]; then
-            echo "No open PR with label 'automerge' found for branch: $branch"
+            echo "No open PR with label 'automerge' found for branch: $BRANCH"
             exit 0
           fi
 
-          gh pr merge "$pr_number" --squash --delete-branch
+          gh pr merge "$pr_number" --repo "$REPO" --squash --delete-branch
