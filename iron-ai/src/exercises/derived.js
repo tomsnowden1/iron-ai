@@ -67,8 +67,28 @@ export async function getExerciseUsageStats() {
   return Array.from(stats.values());
 }
 
-export async function getExerciseHistory(exerciseId, options = {}) {
-  const parsedId = Number(exerciseId);
+function isMatchingExerciseName(exercise, key) {
+  if (!key) return false;
+  return String(exercise?.name ?? "").trim().toLowerCase() === key;
+}
+
+async function resolveExerciseId(exerciseKey) {
+  if (exerciseKey == null || exerciseKey === "") return null;
+  const numericId = Number(exerciseKey);
+  if (!Number.isNaN(numericId) && numericId > 0) return numericId;
+  if (typeof exerciseKey !== "string") return null;
+  const normalized = exerciseKey.trim().toLowerCase();
+  if (!normalized) return null;
+  const matches = await db
+    .table("exercises")
+    .filter((exercise) => isMatchingExerciseName(exercise, normalized))
+    .toArray();
+  if (!matches.length) return null;
+  return matches[0].id ?? null;
+}
+
+export async function getExerciseHistory(exerciseKey, options = {}) {
+  const parsedId = await resolveExerciseId(exerciseKey);
   if (!parsedId || Number.isNaN(parsedId)) return [];
 
   const finished = await listFinishedWorkouts();
@@ -148,6 +168,62 @@ export async function getExerciseHistory(exerciseId, options = {}) {
   const limit = options.limit;
   if (limit == null) return sessions;
   return sessions.slice(0, Math.max(0, limit));
+}
+
+export function computeBestSet(history) {
+  const sessions = Array.isArray(history) ? history : [];
+  let best = null;
+
+  sessions.forEach((session) => {
+    const sets = Array.isArray(session.sets) ? session.sets : [];
+    sets.forEach((set) => {
+      const weight = parseMetric(set.weight);
+      const reps = parseMetric(set.reps);
+      if (weight == null && reps == null) return;
+      if (!best) {
+        best = { weight, reps, date: session.date ?? null };
+        return;
+      }
+      const bestWeight = best.weight ?? null;
+      if (weight != null) {
+        if (bestWeight == null || weight > bestWeight) {
+          best = { weight, reps, date: session.date ?? null };
+          return;
+        }
+        if (weight === bestWeight) {
+          const bestReps = best.reps ?? -1;
+          const currentReps = reps ?? -1;
+          if (currentReps > bestReps) {
+            best = { weight, reps, date: session.date ?? null };
+          }
+          return;
+        }
+      }
+      if (weight == null && bestWeight == null) {
+        const bestReps = best.reps ?? -1;
+        const currentReps = reps ?? -1;
+        if (currentReps > bestReps) {
+          best = { weight: null, reps, date: session.date ?? null };
+        }
+      }
+    });
+  });
+
+  return best;
+}
+
+export function computeTrendPoints(history, options = {}) {
+  const sessions = Array.isArray(history) ? history.slice() : [];
+  const limit = options.limit ?? 8;
+  const ordered = sessions.slice().reverse();
+  const sliced = limit ? ordered.slice(-limit) : ordered;
+  return sliced.map((session) => {
+    const volume = Number(session.volume ?? 0);
+    if (volume > 0) return volume;
+    if (session.maxWeight != null) return Number(session.maxWeight);
+    if (session.maxReps != null) return Number(session.maxReps);
+    return 0;
+  });
 }
 
 export function getGymAvailabilityForExercise(
