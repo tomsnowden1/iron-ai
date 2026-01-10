@@ -1176,6 +1176,13 @@
     background: var(--color-surface-muted);
   }
 
+  .exercise-video {
+    width: 100%;
+    min-height: 220px;
+    border: 0;
+    border-radius: var(--radius-md);
+  }
+
   .exercise-overview__media a {
     color: var(--color-primary);
     font-weight: 600;

@@ -5,6 +5,7 @@ import { getEquipmentMap } from "../../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../../equipment/engine";
 import {
   formatEquipmentLabels,
+  getExerciseEquipment,
   getExercisePrimaryMuscles,
   getNormalizedEquipment,
 } from "../../exercises/data";
@@ -64,6 +65,14 @@ export default function ExerciseList({
       {exercises.map((exercise) => {
         const primaryMuscles = getExercisePrimaryMuscles(exercise);
         const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
+        const equipmentIds = getExerciseEquipment(exercise);
+        const equipmentLabels = equipmentIds.length
+          ? equipmentIds.map((id) => equipmentMap.get(id)?.name ?? id)
+          : [];
+        const metaParts = [
+          primaryMuscles.length ? primaryMuscles.join(", ") : null,
+          equipmentLabels.length ? equipmentLabels.join(", ") : null,
+        ].filter(Boolean);
         const availability = formatAvailability(exercise, activeSpace, equipmentMap);
 
         return (
@@ -77,9 +86,9 @@ export default function ExerciseList({
                 <div className="exercise-row__title">
                   {exercise.name ?? "Unknown Exercise"}
                 </div>
-                {primaryMuscles.length ? (
+                {metaParts.length ? (
                   <div className="exercise-row__meta">
-                    {primaryMuscles.join(", ")}
+                    {metaParts.join(" · ")}
                   </div>
                 ) : null}
                 <EquipmentPills

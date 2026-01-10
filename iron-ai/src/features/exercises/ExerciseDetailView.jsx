@@ -22,7 +22,7 @@ import {
 } from "../../equipment/engine";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
 import {
-  getExerciseCommonMistakes,
+  getExerciseGotchas,
   getExerciseInstructions,
   getExercisePrimaryMuscles,
   getExerciseSecondaryMuscles,
@@ -154,9 +154,19 @@ export default function ExerciseDetailView({
   const primaryMuscles = getExercisePrimaryMuscles(exercise);
   const secondaryMuscles = getExerciseSecondaryMuscles(exercise);
   const instructionsData = getExerciseInstructions(exercise);
-  const mistakesData = getExerciseCommonMistakes(exercise);
+  const gotchasData = getExerciseGotchas(exercise);
   const videoUrl = getExerciseVideoUrl(exercise);
   const normalizedEquipment = getNormalizedEquipment(exercise);
+  const youtubeSearchQuery =
+    exercise?.youtubeSearchQuery ??
+    `${exercise?.name ?? "exercise"} exercise form cues`;
+  const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(
+    youtubeSearchQuery
+  )}`;
+  const youtubeVideoId =
+    typeof exercise?.youtubeVideoId === "string" && exercise.youtubeVideoId.trim()
+      ? exercise.youtubeVideoId.trim()
+      : null;
 
   const historyStats = useMemo(() => {
     const sessions = Array.isArray(history) ? history : [];
@@ -390,7 +400,15 @@ export default function ExerciseDetailView({
         <CardBody className="ui-stack">
           <div className="exercise-overview">
             <div className="exercise-overview__media">
-              {videoUrl ? (
+              {youtubeVideoId ? (
+                <iframe
+                  title={`${exercise.name ?? "Exercise"} video`}
+                  src={`https://www.youtube.com/embed/${youtubeVideoId}`}
+                  className="exercise-video"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : videoUrl ? (
                 <a href={videoUrl} target="_blank" rel="noreferrer">
                   Open video demo
                 </a>
@@ -437,11 +455,32 @@ export default function ExerciseDetailView({
                   </div>
                 </div>
               ) : null}
+              {exercise?.category ? (
+                <div>
+                  <div className="template-meta">Category</div>
+                  <div>{exercise.category}</div>
+                </div>
+              ) : null}
+              {exercise?.pattern ? (
+                <div>
+                  <div className="template-meta">Pattern</div>
+                  <div>{exercise.pattern}</div>
+                </div>
+              ) : null}
               <div className="template-meta">
                 Available at {availableGyms.length} gyms
                 {activeSpace ? ` · Active: ${activeSpace.name ?? "Gym"}` : ""}
               </div>
             </div>
+          </div>
+          <div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => window.open(youtubeUrl, "_blank", "noopener,noreferrer")}
+            >
+              Watch on YouTube
+            </Button>
           </div>
         </CardBody>
       </Card>
@@ -464,14 +503,14 @@ export default function ExerciseDetailView({
 
       <Card>
         <CardHeader>
-          <div className="ui-section-title">Common mistakes</div>
+          <div className="ui-section-title">Gotchas</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          {mistakesData.isFallback ? (
+          {gotchasData.isFallback ? (
             <div className="template-meta">Typical pitfalls (customize as needed).</div>
           ) : null}
           <ul className="exercise-mistakes">
-            {mistakesData.mistakes.map((item, index) => (
+            {gotchasData.gotchas.map((item, index) => (
               <li key={`${item}-${index}`}>{item}</li>
             ))}
           </ul>

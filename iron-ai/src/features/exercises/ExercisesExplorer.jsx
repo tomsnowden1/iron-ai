@@ -21,10 +21,14 @@ import { getEquipmentMap } from "../../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../../equipment/engine";
 import {
   buildExerciseSearchText,
+  getExerciseEquipment,
   getExercisePrimaryMuscles,
   getExerciseType,
-  getNormalizedEquipment,
 } from "../../exercises/data";
+import {
+  resetExerciseSeedVersion,
+  seedExercisesIfNeeded,
+} from "../../seed/exerciseSeed";
 import { getExerciseUsageStats } from "../../exercises/derived";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
 
@@ -55,8 +59,7 @@ function buildTypeOptions(exercises) {
 function buildEquipmentOptions(exercises, equipmentMap) {
   const ids = new Set();
   exercises.forEach((exercise) => {
-    const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
-    requiredEquipmentIds.forEach((id) => ids.add(id));
+    getExerciseEquipment(exercise).forEach((id) => ids.add(id));
   });
   const options = Array.from(ids)
     .map((id) => ({ id, label: equipmentMap.get(id)?.name ?? id }))
@@ -64,7 +67,13 @@ function buildEquipmentOptions(exercises, equipmentMap) {
   return options;
 }
 
-export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkout }) {
+export default function ExercisesExplorer({
+  onBack,
+  onLaunchCoach,
+  onAddToWorkout,
+  isSeeding,
+  onReseed,
+}) {
   const exercises = useLiveQuery(() => getAllExercises(), []);
   const equipmentList = useLiveQuery(() => listEquipment(), []);
   const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
@@ -76,8 +85,10 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
   const [selectedEquipment, setSelectedEquipment] = useState("");
   const [selectedType, setSelectedType] = useState("");
   const [filterByActiveGym, setFilterByActiveGym] = useState(false);
+  const [coreOnly, setCoreOnly] = useState(true);
   const [sortMode, setSortMode] = useState("az");
   const [detailExerciseId, setDetailExerciseId] = useState(null);
+  const [reseeding, setReseeding] = useState(false);
 
   const equipmentMap = useMemo(
     () => getEquipmentMap(equipmentList ?? []),
@@ -111,14 +122,17 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
     }
     if (selectedEquipment) {
       filtered = filtered.filter((exercise) => {
-        const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
-        return requiredEquipmentIds.includes(selectedEquipment);
+        const equipment = getExerciseEquipment(exercise);
+        return equipment.includes(selectedEquipment);
       });
     }
     if (selectedType) {
       filtered = filtered.filter(
         (exercise) => getExerciseType(exercise) === selectedType
       );
+    }
+    if (coreOnly) {
+      filtered = filtered.filter((exercise) => exercise.status === "core");
     }
     if (filterByActiveGym && hasActiveGym) {
       filtered = filtered.filter((exercise) => {
@@ -167,6 +181,7 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
     selectedType,
     sortMode,
     usageMap,
+    coreOnly,
   ]);
 
   const muscleOptions = useMemo(
@@ -178,6 +193,28 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
     () => buildEquipmentOptions(exercises ?? [], equipmentMap),
     [equipmentMap, exercises]
   );
+
+  const isLoading = isSeeding && (!exercises || exercises.length === 0);
+  const emptyLabel = isLoading
+    ? "Loading exercises…"
+    : coreOnly
+      ? "No core exercises found yet. Try turning off Core only."
+      : "No exercises match those filters.";
+
+  const handleReseed = async () => {
+    if (!import.meta.env.DEV) return;
+    setReseeding(true);
+    try {
+      if (onReseed) {
+        await onReseed();
+      } else {
+        await resetExerciseSeedVersion();
+        await seedExercisesIfNeeded();
+      }
+    } finally {
+      setReseeding(false);
+    }
+  };
 
   if (detailExerciseId) {
     return (
@@ -293,6 +330,40 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
             </Button>
           </div>
 
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <div>
+              <div className="ui-strong">Core only</div>
+              <div className="template-meta">Show exercises marked core.</div>
+            </div>
+            <Button
+              variant={coreOnly ? "primary" : "secondary"}
+              size="sm"
+              type="button"
+              onClick={() => setCoreOnly((prev) => !prev)}
+              aria-pressed={coreOnly}
+            >
+              {coreOnly ? "On" : "Off"}
+            </Button>
+          </div>
+
+          {import.meta.env.DEV ? (
+            <div className="ui-row ui-row--between ui-row--wrap">
+              <div>
+                <div className="ui-strong">Seed data</div>
+                <div className="template-meta">Reload the exercise dataset.</div>
+              </div>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={handleReseed}
+                disabled={reseeding}
+              >
+                {reseeding ? "Reseeding…" : "Reseed"}
+              </Button>
+            </div>
+          ) : null}
+
           <div>
             <Label htmlFor="exercise-library-sort">Sort by</Label>
             <Select
@@ -319,8 +390,21 @@ export default function ExercisesExplorer({ onBack, onLaunchCoach, onAddToWorkou
             equipmentList={equipmentMap}
             activeSpace={activeSpace}
             onSelect={(exercise) => setDetailExerciseId(exercise.id)}
-            emptyLabel="No exercises match those filters."
+            emptyLabel={emptyLabel}
           />
+          {coreOnly && !isLoading && filteredExercises.length === 0 ? (
+            <div className="ui-row ui-row--between ui-row--wrap">
+              <div className="template-meta">See all exercises instead.</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setCoreOnly(false)}
+              >
+                Turn off Core only
+              </Button>
+            </div>
+          ) : null}
         </CardBody>
       </Card>
     </div>
