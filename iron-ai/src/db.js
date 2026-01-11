@@ -948,16 +948,17 @@ export async function removeWorkoutItem(workoutItemId) {
   });
 }
 
-export async function addWorkoutSet(workoutItemId) {
+export async function addWorkoutSet(workoutItemId, options = {}) {
   const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
   const maxN = sets.length ? Math.max(...sets.map((s) => s.setNumber ?? 0)) : 0;
   const nextN = maxN + 1;
+  const { weight, reps, isWarmup } = options ?? {};
   return db.table("workoutSets").add({
     workoutItemId,
     setNumber: nextN,
-    weight: "",
-    reps: "",
-    isWarmup: false,
+    weight: weight ?? "",
+    reps: reps ?? "",
+    isWarmup: isWarmup ?? false,
   });
 }
 
