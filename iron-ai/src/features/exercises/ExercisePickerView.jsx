@@ -69,6 +69,7 @@ export default function ExercisePickerView({
   onClose,
   onLaunchCoach,
 }) {
+  const sessionKeyRef = useRef("ironai.exercisePicker.sessionState");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [filterByActiveGym, setFilterByActiveGym] = useState(
@@ -212,6 +213,38 @@ export default function ExercisePickerView({
     pickerTouched,
     prefillExercise,
   ]);
+
+  useEffect(() => {
+    if (pickerTouched || prefillExercise?.name) return;
+    if (typeof window === "undefined") return;
+    const saved = window.sessionStorage.getItem(sessionKeyRef.current);
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved);
+      if (typeof parsed?.search === "string") {
+        setSearchInput(parsed.search);
+        setSearch(parsed.search);
+      }
+      if (typeof parsed?.muscle === "string") {
+        setSelectedMuscle(parsed.muscle);
+      }
+      if (typeof parsed?.equipment === "string") {
+        setSelectedEquipment(parsed.equipment);
+      }
+    } catch {
+      window.sessionStorage.removeItem(sessionKeyRef.current);
+    }
+  }, [pickerTouched, prefillExercise]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const nextState = {
+      search: searchInput,
+      muscle: selectedMuscle,
+      equipment: selectedEquipment,
+    };
+    window.sessionStorage.setItem(sessionKeyRef.current, JSON.stringify(nextState));
+  }, [searchInput, selectedMuscle, selectedEquipment]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
