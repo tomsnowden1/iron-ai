@@ -1059,6 +1059,34 @@ export async function removeWorkoutSet(workoutItemId, setId) {
   });
 }
 
+export async function restoreWorkoutSet(workoutItemId, setData) {
+  return db.transaction("rw", db.table("workoutSets"), async () => {
+    const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
+    const maxPosition = sets.length + 1;
+    const desired = Math.min(
+      maxPosition,
+      Math.max(1, Math.floor(setData?.setNumber ?? maxPosition))
+    );
+
+    for (const set of sets) {
+      if ((set.setNumber ?? 0) >= desired) {
+        const nextNumber = (set.setNumber ?? 0) + 1;
+        await db.table("workoutSets").update(set.id, { setNumber: nextNumber });
+      }
+    }
+
+    await db.table("workoutSets").add({
+      id: setData?.id,
+      workoutItemId,
+      setNumber: desired,
+      weight: setData?.weight ?? "",
+      reps: setData?.reps ?? "",
+      isWarmup: setData?.isWarmup ?? false,
+      isComplete: setData?.isComplete ?? false,
+    });
+  });
+}
+
 export async function updateWorkoutSet(setId, patch) {
   return db.table("workoutSets").update(setId, patch);
 }
