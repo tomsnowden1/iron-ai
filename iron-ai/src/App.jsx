@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
   Dumbbell,
@@ -121,6 +121,116 @@ function parseSetMetric(value) {
   const parsed = Number.parseFloat(String(value));
   return Number.isNaN(parsed) ? null : parsed;
 }
+
+const WorkoutSetRow = memo(function WorkoutSetRow({
+  set,
+  label,
+  previousText,
+  comparisonStatus,
+  isWarmup,
+  itemId,
+  onUpdateSet,
+  onRemoveSet,
+  onToggleComplete,
+  onStartLongPress,
+  onCancelLongPress,
+}) {
+  const handleWeightChange = useCallback(
+    (event) => {
+      onUpdateSet(set.id, { weight: event.target.value });
+    },
+    [onUpdateSet, set.id]
+  );
+
+  const handleRepsChange = useCallback(
+    (event) => {
+      onUpdateSet(set.id, { reps: event.target.value });
+    },
+    [onUpdateSet, set.id]
+  );
+
+  const handleToggleDone = useCallback(
+    (event) => {
+      onToggleComplete(itemId, set.id, event.target.checked);
+    },
+    [itemId, onToggleComplete, set.id]
+  );
+
+  const handlePointerDown = useCallback(() => {
+    onStartLongPress(itemId, set);
+  }, [itemId, onStartLongPress, set]);
+
+  const handlePointerCancel = useCallback(() => {
+    onCancelLongPress(set.id);
+  }, [onCancelLongPress, set.id]);
+
+  const handleRemove = useCallback(() => {
+    onRemoveSet(itemId, set.id);
+  }, [itemId, onRemoveSet, set.id]);
+
+  return (
+    <div
+      className={`workout-set-row${isWarmup ? " workout-set-row--warmup" : ""}`}
+      data-workout-set-id={set.id}
+    >
+      <div className="set-index">{label}</div>
+      <div className="set-prev">
+        <span>{previousText}</span>
+        {comparisonStatus ? (
+          <span
+            className="set-progress"
+            data-status={comparisonStatus}
+            aria-label={`Set ${label} progress: ${comparisonStatus}`}
+          >
+            {comparisonStatus === "improved"
+              ? "↑"
+              : comparisonStatus === "same"
+                ? "•"
+                : "↓"}
+          </span>
+        ) : null}
+      </div>
+      <Input
+        inputMode="decimal"
+        placeholder="kg"
+        value={set.weight ?? ""}
+        onChange={handleWeightChange}
+        className="workout-set-input"
+      />
+      <Input
+        inputMode="numeric"
+        placeholder="reps"
+        value={set.reps ?? ""}
+        onChange={handleRepsChange}
+        className="workout-set-input"
+      />
+      <div className="set-actions">
+        <label className="set-done">
+          <input
+            type="checkbox"
+            checked={Boolean(set.isComplete)}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerCancel}
+            onPointerLeave={handlePointerCancel}
+            onPointerCancel={handlePointerCancel}
+            onChange={handleToggleDone}
+            aria-label={`Mark set ${label} complete`}
+          />
+          <span>Done</span>
+        </label>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="set-remove-button"
+          aria-label={`Remove set ${label}`}
+          onClick={handleRemove}
+        >
+          Remove
+        </Button>
+      </div>
+    </div>
+  );
+});
 
 function compareWorkoutSet(current, previous) {
   if (!current || !previous) return null;
@@ -575,13 +685,13 @@ function WorkoutView({
   );
 
   const handleCompleteAndAddSet = useCallback(
-    async (item, set) => {
-      if (!item || !set || set.isComplete) return;
+    async (itemId, set) => {
+      if (!itemId || !set || set.isComplete) return;
       await updateWorkoutSet(set.id, { isComplete: true });
-      handleCompleteSet(item.id, set.id);
+      handleCompleteSet(itemId, set.id);
       const weight = set.weight ?? "";
       const reps = set.reps ?? "";
-      await addWorkoutSet(item.id, {
+      await addWorkoutSet(itemId, {
         weight: weight === "" ? undefined : weight,
         reps: reps === "" ? undefined : reps,
         isWarmup: set.isWarmup ?? false,
@@ -599,12 +709,12 @@ function WorkoutView({
   }, []);
 
   const startLongPress = useCallback(
-    (item, set) => {
-      if (!longPressDoneAddsNext || !item || !set || set.isComplete) return;
+    (itemId, set) => {
+      if (!longPressDoneAddsNext || !itemId || !set || set.isComplete) return;
       clearLongPress(set.id);
       const timer = window.setTimeout(() => {
         longPressTriggeredRef.current.add(set.id);
-        void handleCompleteAndAddSet(item, set);
+        void handleCompleteAndAddSet(itemId, set);
       }, 450);
       longPressTimeoutsRef.current.set(set.id, timer);
     },
@@ -616,6 +726,34 @@ function WorkoutView({
       clearLongPress(setId);
     },
     [clearLongPress]
+  );
+
+  const handleWorkoutSetUpdate = useCallback(
+    (setId, patch) => {
+      void updateWorkoutSet(setId, patch);
+    },
+    [updateWorkoutSet]
+  );
+
+  const handleRemoveWorkoutSet = useCallback(
+    (itemId, setId) => {
+      void removeWorkoutSet(itemId, setId);
+    },
+    [removeWorkoutSet]
+  );
+
+  const handleToggleWorkoutSetComplete = useCallback(
+    (itemId, setId, checked) => {
+      if (longPressTriggeredRef.current.has(setId)) {
+        longPressTriggeredRef.current.delete(setId);
+        return;
+      }
+      void updateWorkoutSet(setId, { isComplete: checked });
+      if (checked) {
+        handleCompleteSet(itemId, setId);
+      }
+    },
+    [handleCompleteSet, updateWorkoutSet]
   );
 
   const handleResetRest = () => {
@@ -1183,79 +1321,20 @@ function WorkoutView({
                           ? null
                           : compareWorkoutSet(s, previousSet);
                         return (
-                          <div
+                          <WorkoutSetRow
                             key={s.id}
-                            className={`workout-set-row${
-                              isWarmup ? " workout-set-row--warmup" : ""
-                            }`}
-                            data-workout-set-id={s.id}
-                          >
-                            <div className="set-index">{label}</div>
-                            <div className="set-prev">
-                              <span>{previousText}</span>
-                              {comparisonStatus ? (
-                                <span
-                                  className="set-progress"
-                                  data-status={comparisonStatus}
-                                  aria-label={`Set ${label} progress: ${comparisonStatus}`}
-                                >
-                                  {comparisonStatus === "improved"
-                                    ? "↑"
-                                    : comparisonStatus === "same"
-                                      ? "•"
-                                      : "↓"}
-                                </span>
-                              ) : null}
-                            </div>
-                            <Input
-                              inputMode="decimal"
-                              placeholder="kg"
-                              value={s.weight ?? ""}
-                              onChange={(e) =>
-                                updateWorkoutSet(s.id, { weight: e.target.value })
-                              }
-                            />
-                            <Input
-                              inputMode="numeric"
-                              placeholder="reps"
-                              value={s.reps ?? ""}
-                              onChange={(e) => updateWorkoutSet(s.id, { reps: e.target.value })}
-                            />
-                            <div className="set-actions">
-                              <label className="set-done">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(s.isComplete)}
-                                  onPointerDown={() => startLongPress(it, s)}
-                                  onPointerUp={() => cancelLongPress(s.id)}
-                                  onPointerLeave={() => cancelLongPress(s.id)}
-                                  onPointerCancel={() => cancelLongPress(s.id)}
-                                  onChange={(e) => {
-                                    if (longPressTriggeredRef.current.has(s.id)) {
-                                      longPressTriggeredRef.current.delete(s.id);
-                                      return;
-                                    }
-                                    const checked = e.target.checked;
-                                    void updateWorkoutSet(s.id, { isComplete: checked });
-                                    if (checked) {
-                                      handleCompleteSet(it.id, s.id);
-                                    }
-                                  }}
-                                  aria-label={`Mark set ${label} complete`}
-                                />
-                                <span>Done</span>
-                              </label>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="set-remove-button"
-                                aria-label={`Remove set ${label}`}
-                                onClick={() => removeWorkoutSet(it.id, s.id)}
-                              >
-                                Remove
-                              </Button>
-                            </div>
-                          </div>
+                            set={s}
+                            label={label}
+                            previousText={previousText}
+                            comparisonStatus={comparisonStatus}
+                            isWarmup={isWarmup}
+                            itemId={it.id}
+                            onUpdateSet={handleWorkoutSetUpdate}
+                            onRemoveSet={handleRemoveWorkoutSet}
+                            onToggleComplete={handleToggleWorkoutSetComplete}
+                            onStartLongPress={startLongPress}
+                            onCancelLongPress={cancelLongPress}
+                          />
                         );
                       })}
                     </div>
