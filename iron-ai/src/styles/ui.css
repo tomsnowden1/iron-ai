@@ -452,6 +452,11 @@
     color: var(--color-primary);
   }
 
+  .workout-exercise-name:active {
+    color: var(--color-primary);
+    opacity: 0.8;
+  }
+
   .workout-exercise-name:focus-visible {
     outline: 2px solid var(--color-primary-outline);
     outline-offset: 2px;
@@ -475,8 +480,12 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: 36px;
-    min-width: 36px;
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .icon-button:active {
+    background: var(--color-surface-muted);
   }
 
   .workout-exercise-card--superset {
@@ -591,15 +600,18 @@
     gap: var(--space-1);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+    min-height: 44px;
+    padding: 0 var(--space-1);
   }
 
   .set-done input {
-    width: 18px;
-    height: 18px;
+    width: 24px;
+    height: 24px;
   }
 
   .tap-target {
     min-height: 44px;
+    min-width: 44px;
   }
 
   .set-remove-button {
@@ -634,6 +646,11 @@
     background: var(--color-surface-muted);
   }
 
+  .exercise-menu__item:active {
+    background: var(--color-surface-muted);
+    transform: translateY(1px);
+  }
+
   .exercise-menu__item--danger {
     color: var(--color-destructive);
     border-color: color-mix(in srgb, var(--color-destructive) 35%, transparent);
@@ -641,6 +658,10 @@
 
   .exercise-menu__item--danger:hover {
     background: color-mix(in srgb, var(--color-destructive) 10%, var(--color-surface));
+  }
+
+  .exercise-menu__item--danger:active {
+    background: color-mix(in srgb, var(--color-destructive) 16%, var(--color-surface));
   }
 
   .note-sheet textarea {
@@ -675,6 +696,11 @@
     background: var(--color-surface);
     cursor: pointer;
     text-align: left;
+  }
+
+  .superset-option:active:not(:disabled) {
+    background: var(--color-surface-muted);
+    transform: translateY(1px);
   }
 
   .superset-option:disabled {
@@ -1384,6 +1410,26 @@
   .toast__message {
     font-size: var(--text-sm);
     color: var(--color-text);
+    flex: 1;
+    min-width: 0;
+  }
+
+  .toast__action {
+    border: none;
+    background: transparent;
+    color: var(--color-primary);
+    font-weight: 600;
+    font-size: var(--text-sm);
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .toast__action:hover {
+    color: var(--color-primary-strong);
+  }
+
+  .toast__action:active {
+    opacity: 0.7;
   }
 
   .toast__close {

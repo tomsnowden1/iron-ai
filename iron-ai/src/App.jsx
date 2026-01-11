@@ -63,6 +63,7 @@ import {
   listWorkoutSpaces,
   removeWorkoutItem,
   removeWorkoutSet,
+  restoreWorkoutSet,
   setActiveWorkoutSpace,
   startWorkoutFromTemplate,
   updateWorkoutSession,
@@ -737,9 +738,21 @@ function WorkoutView({
 
   const handleRemoveWorkoutSet = useCallback(
     (itemId, setId) => {
+      const item = items.find((entry) => entry.id === itemId);
+      const removedSet = item?.sets?.find((set) => set.id === setId);
       void removeWorkoutSet(itemId, setId);
+      if (!removedSet) return;
+      onNotify?.(`Set ${removedSet.setNumber ?? ""} removed.`, {
+        tone: "info",
+        duration: 5000,
+        actionLabel: "Undo",
+        onAction: async () => {
+          await restoreWorkoutSet(itemId, removedSet);
+          onNotify?.("Set restored ✅", { tone: "success", duration: 2000 });
+        },
+      });
     },
-    [removeWorkoutSet]
+    [items, onNotify, removeWorkoutSet]
   );
 
   const handleToggleWorkoutSetComplete = useCallback(
@@ -833,10 +846,20 @@ function WorkoutView({
     if (!item) return;
     const hasNote = Boolean(exerciseNotes?.[item.exerciseId]?.trim());
     const hasSticky = Boolean(item.exercise?.stickyNote?.trim());
-    const confirmText = hasNote
-      ? "Delete this exercise and its workout note? This cannot be undone."
-      : "Delete this exercise? This cannot be undone.";
-    if (!window.confirm(confirmText)) return;
+    const supersetGroupId = item.supersetGroupId;
+    const supersetItemIds = supersetGroupId
+      ? items
+          .filter((entry) => entry.supersetGroupId === supersetGroupId)
+          .map((entry) => entry.id)
+      : [];
+    const workoutItemRecord = { ...item };
+    delete workoutItemRecord.exercise;
+    delete workoutItemRecord.sets;
+    const setRecords = item.sets?.map((set) => ({
+      ...set,
+      workoutItemId: item.id,
+    }));
+    const noteValue = hasNote ? exerciseNotes?.[item.exerciseId] : null;
     if (item.supersetGroupId) {
       await clearSupersetGroup(item.supersetGroupId);
     }
@@ -851,6 +874,44 @@ function WorkoutView({
     if (hasSticky) {
       onNotify?.("Sticky note preserved for this exercise.", { tone: "info" });
     }
+    onNotify?.("Exercise removed.", {
+      tone: "info",
+      duration: 6000,
+      actionLabel: "Undo",
+      onAction: async () => {
+        try {
+          await db.transaction(
+            "rw",
+            db.table("workoutItems"),
+            db.table("workoutSets"),
+            async () => {
+              await db.table("workoutItems").add(workoutItemRecord);
+              if (Array.isArray(setRecords) && setRecords.length) {
+                await db.table("workoutSets").bulkAdd(setRecords);
+              }
+            }
+          );
+          if (noteValue && workoutId) {
+            const nextNotes = { ...(workout?.exerciseNotes ?? {}) };
+            nextNotes[item.exerciseId] = noteValue;
+            setExerciseNotes({ ...nextNotes });
+            await updateWorkoutSession(workoutId, { exerciseNotes: nextNotes });
+          }
+          if (supersetGroupId && supersetItemIds.length) {
+            await db.transaction("rw", db.table("workoutItems"), async () => {
+              for (const entryId of supersetItemIds) {
+                await db
+                  .table("workoutItems")
+                  .update(entryId, { supersetGroupId });
+              }
+            });
+          }
+          onNotify?.("Exercise restored ✅", { tone: "success", duration: 2000 });
+        } catch (error) {
+          onNotify?.("Unable to restore exercise.", { tone: "error" });
+        }
+      },
+    });
   };
 
   const clearSupersetGroup = useCallback(
@@ -893,12 +954,28 @@ function WorkoutView({
   const handleRemoveSuperset = useCallback(
     async (groupId) => {
       if (!groupId) return;
+      const groupItems = items
+        .filter((item) => item.supersetGroupId === groupId)
+        .map((item) => item.id);
       await clearSupersetGroup(groupId);
       setSupersetSheetItemId(null);
       setMenuItemId(null);
-      onNotify?.("Superset removed ✅", { tone: "success" });
+      onNotify?.("Superset unlinked.", {
+        tone: "info",
+        duration: 5000,
+        actionLabel: "Undo",
+        onAction: async () => {
+          if (!groupItems.length) return;
+          await db.transaction("rw", db.table("workoutItems"), async () => {
+            for (const itemId of groupItems) {
+              await db.table("workoutItems").update(itemId, { supersetGroupId: groupId });
+            }
+          });
+          onNotify?.("Superset restored ✅", { tone: "success", duration: 2000 });
+        },
+      });
     },
-    [clearSupersetGroup, onNotify]
+    [clearSupersetGroup, items, onNotify]
   );
 
   const handleSelectExercise = async (exerciseId) => {
@@ -2500,8 +2577,13 @@ export default function App() {
       toastIdRef.current = id;
       const tone = options.tone || "info";
       const duration = options.duration ?? 3200;
+      const actionLabel = options.actionLabel;
+      const onAction = options.onAction;
 
-      setToasts((prev) => [...prev, { id, message, tone }]);
+      setToasts((prev) => [
+        ...prev,
+        { id, message, tone, actionLabel, onAction },
+      ]);
 
       if (duration > 0) {
         const timer = setTimeout(() => dismissToast(id), duration);
