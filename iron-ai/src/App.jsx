@@ -89,7 +89,7 @@ function TabButton({ icon: Icon, label, active, onClick }) {
       data-active={active ? "true" : "false"}
       aria-pressed={active}
     >
-      <Icon size={20} />
+      <Icon size={18} />
       <span>{label}</span>
     </button>
   );
@@ -1341,7 +1341,7 @@ function WorkoutView({
                       onClick={() => handleDuplicateLastSet(it)}
                       disabled={it.sets.length === 0}
                     >
-                      <Copy size={18} />
+                      <Copy size={16} />
                     </Button>
                     <Button
                       variant="ghost"
@@ -1350,7 +1350,7 @@ function WorkoutView({
                       aria-label={`View history for ${it.exercise?.name ?? "exercise"}`}
                       onClick={() => handleOpenExerciseHistory(it)}
                     >
-                      <History size={18} />
+                      <History size={16} />
                     </Button>
                     <Button
                       variant="ghost"
@@ -1359,7 +1359,7 @@ function WorkoutView({
                       aria-label="Exercise actions"
                       onClick={() => setMenuItemId(it.id)}
                     >
-                      <MoreVertical size={18} />
+                      <MoreVertical size={16} />
                     </Button>
                   </div>
                 </CardHeader>

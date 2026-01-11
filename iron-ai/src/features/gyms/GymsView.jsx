@@ -490,7 +490,7 @@ function GymDetail({ spaceId, onBack, onEdit, onDuplicate, onLaunchCoach, onNoti
       <Card>
         <CardBody className="gym-header">
           <div className="gym-header__icon">
-            <Dumbbell size={24} />
+            <Dumbbell size={18} />
           </div>
           <div className="gym-header__content">
             <div className="ui-row ui-row--between ui-row--wrap">
