@@ -21,6 +21,7 @@ import {
 
 import ExerciseDetailView from "./ExerciseDetailView";
 import ExerciseList from "./ExerciseList";
+import CollapsibleFilters from "./CollapsibleFilters";
 
 function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
@@ -107,6 +108,8 @@ export default function ExercisePickerView({
   const pickerAutoFocus = settings?.exercise_picker_auto_focus ?? true;
   const pickerFilterDefault = settings?.exercise_picker_filter_active_gym ?? true;
   const pickerMostUsedDefault = settings?.exercise_picker_most_used_first ?? true;
+  const sessionStorageAvailable =
+    typeof window !== "undefined" && typeof window.sessionStorage !== "undefined";
 
   const usageMap = useMemo(() => {
     const entries = Array.isArray(usageStats) ? usageStats : [];
@@ -216,7 +219,7 @@ export default function ExercisePickerView({
 
   useEffect(() => {
     if (pickerTouched || prefillExercise?.name) return;
-    if (typeof window === "undefined") return;
+    if (!sessionStorageAvailable) return;
     const saved = window.sessionStorage.getItem(sessionKeyRef.current);
     if (!saved) return;
     try {
@@ -237,14 +240,14 @@ export default function ExercisePickerView({
   }, [pickerTouched, prefillExercise]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (!sessionStorageAvailable) return;
     const nextState = {
       search: searchInput,
       muscle: selectedMuscle,
       equipment: selectedEquipment,
     };
     window.sessionStorage.setItem(sessionKeyRef.current, JSON.stringify(nextState));
-  }, [searchInput, selectedMuscle, selectedEquipment]);
+  }, [searchInput, selectedMuscle, selectedEquipment, sessionStorageAvailable]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
@@ -292,6 +295,20 @@ export default function ExercisePickerView({
   const emptyLabel = availableExercises.length
     ? "No exercises match filters"
     : "No exercises available";
+  const activeFilterCount = [
+    selectedMuscle,
+    selectedEquipment,
+    selectedType,
+    filterByActiveGym && hasActiveGym ? "gym" : "",
+  ].filter(Boolean).length;
+  const clearFilters = () => {
+    setPickerTouched(true);
+    setSelectedMuscle("");
+    setSelectedEquipment("");
+    setSelectedType("");
+    setFilterByActiveGym(pickerFilterDefault && hasActiveGym);
+    setShowMostUsedFirst(pickerMostUsedDefault);
+  };
 
   return (
     <div className="page">
@@ -305,150 +322,186 @@ export default function ExercisePickerView({
         }
       />
 
-      <div className="sticky-search">
-        <Label htmlFor="exercise-picker-search">Search exercises</Label>
-        <div className="search-field">
-          <Input
-            id="exercise-picker-search"
-            type="search"
-            placeholder="Search by name or alias"
-            value={searchInput}
-            onChange={(event) => {
-              setPickerTouched(true);
-              setSearchInput(event.target.value);
-            }}
-            ref={searchRef}
-          />
-          {searchInput ? (
-            <button
-              type="button"
-              className="search-clear"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-              }}
-              aria-label="Clear search"
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <div className="ui-section-title">Search & filters</div>
-        </CardHeader>
-        <CardBody className="ui-stack">
-          <div className="filter-grid">
-            <div>
-              <Label htmlFor="exercise-picker-muscle">Muscle group</Label>
-              <Select
-                id="exercise-picker-muscle"
-                value={selectedMuscle}
-                onChange={(event) => {
-                  setPickerTouched(true);
-                  setSelectedMuscle(event.target.value);
-                }}
-              >
-                <option value="">All muscles</option>
-                {muscleOptions.map((muscle) => (
-                  <option key={muscle} value={muscle}>
-                    {muscle}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="exercise-picker-equipment">Equipment</Label>
-              <Select
-                id="exercise-picker-equipment"
-                value={selectedEquipment}
-                onChange={(event) => {
-                  setPickerTouched(true);
-                  setSelectedEquipment(event.target.value);
-                }}
-              >
-                <option value="">All equipment</option>
-                {equipmentOptions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            {typeOptions.length ? (
-              <div>
-                <Label htmlFor="exercise-picker-type">Type</Label>
-                <Select
-                  id="exercise-picker-type"
-                  value={selectedType}
+      <CollapsibleFilters
+        label="Filters"
+        activeCount={activeFilterCount}
+        defaultExpanded={false}
+        storageKey="ironai.exercisePicker.filtersExpanded"
+      >
+        {({ expanded, label, panelId, toggle }) => (
+          <>
+            <div className="sticky-search sticky-search--stack">
+              <Label htmlFor="exercise-picker-search">Search exercises</Label>
+              <div className="search-field">
+                <Input
+                  id="exercise-picker-search"
+                  type="search"
+                  placeholder="Search by name or alias"
+                  value={searchInput}
                   onChange={(event) => {
                     setPickerTouched(true);
-                    setSelectedType(event.target.value);
+                    setSearchInput(event.target.value);
                   }}
-                >
-                  <option value="">All types</option>
-                {typeOptions.map((type) => (
-                  <option key={type} value={type}>
-                    {type.charAt(0).toUpperCase() + type.slice(1)}
-                  </option>
-                ))}
-                </Select>
+                  ref={searchRef}
+                />
+                {searchInput ? (
+                  <button
+                    type="button"
+                    className="search-clear"
+                    onClick={() => {
+                      setSearchInput("");
+                      setSearch("");
+                    }}
+                    aria-label="Clear search"
+                  >
+                    Clear
+                  </button>
+                ) : null}
               </div>
+              <button
+                type="button"
+                className="filters-toggle"
+                aria-expanded={expanded}
+                aria-controls={panelId}
+                onClick={toggle}
+              >
+                <span className="filters-toggle__label">{label}</span>
+                <span className="filters-toggle__chevron" aria-hidden="true">
+                  {expanded ? "▲" : "▼"}
+                </span>
+              </button>
+            </div>
+            {expanded ? (
+              <Card className="filters-panel">
+                <CardHeader>
+                  <div className="ui-section-title">Search & filters</div>
+                </CardHeader>
+                <CardBody className="ui-stack" id={panelId}>
+                  <div className="filter-grid">
+                    <div>
+                      <Label htmlFor="exercise-picker-muscle">Muscle group</Label>
+                      <Select
+                        id="exercise-picker-muscle"
+                        value={selectedMuscle}
+                        onChange={(event) => {
+                          setPickerTouched(true);
+                          setSelectedMuscle(event.target.value);
+                        }}
+                      >
+                        <option value="">All muscles</option>
+                        {muscleOptions.map((muscle) => (
+                          <option key={muscle} value={muscle}>
+                            {muscle}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    <div>
+                      <Label htmlFor="exercise-picker-equipment">Equipment</Label>
+                      <Select
+                        id="exercise-picker-equipment"
+                        value={selectedEquipment}
+                        onChange={(event) => {
+                          setPickerTouched(true);
+                          setSelectedEquipment(event.target.value);
+                        }}
+                      >
+                        <option value="">All equipment</option>
+                        {equipmentOptions.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    {typeOptions.length ? (
+                      <div>
+                        <Label htmlFor="exercise-picker-type">Type</Label>
+                        <Select
+                          id="exercise-picker-type"
+                          value={selectedType}
+                          onChange={(event) => {
+                            setPickerTouched(true);
+                            setSelectedType(event.target.value);
+                          }}
+                        >
+                          <option value="">All types</option>
+                          {typeOptions.map((type) => (
+                            <option key={type} value={type}>
+                              {type.charAt(0).toUpperCase() + type.slice(1)}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="ui-row ui-row--between ui-row--wrap">
+                    <div>
+                      <div className="ui-strong">Available at active gym</div>
+                      <div className="template-meta">
+                        Only show exercises available at the active gym.
+                      </div>
+                      {!hasActiveGym ? (
+                        <div className="template-meta">
+                          Set an active gym to filter by equipment.
+                        </div>
+                      ) : null}
+                    </div>
+                    <Button
+                      variant={filterByActiveGym ? "primary" : "secondary"}
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        if (!hasActiveGym) return;
+                        setPickerTouched(true);
+                        setFilterByActiveGym((prev) => !prev);
+                      }}
+                      disabled={!hasActiveGym}
+                      aria-pressed={filterByActiveGym}
+                    >
+                      {filterByActiveGym ? "On" : "Off"}
+                    </Button>
+                  </div>
+
+                  <div className="ui-row ui-row--between ui-row--wrap">
+                    <div>
+                      <div className="ui-strong">Most used first</div>
+                      <div className="template-meta">
+                        Prioritize frequently used exercises when opening the picker.
+                      </div>
+                    </div>
+                    <Button
+                      variant={showMostUsedFirst ? "primary" : "secondary"}
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        setPickerTouched(true);
+                        setShowMostUsedFirst((prev) => !prev);
+                      }}
+                      aria-pressed={showMostUsedFirst}
+                    >
+                      {showMostUsedFirst ? "On" : "Off"}
+                    </Button>
+                  </div>
+
+                  <div className="ui-row ui-row--between ui-row--wrap filters-clear">
+                    <div className="template-meta">Reset all filters.</div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={clearFilters}
+                    >
+                      Clear filters
+                    </Button>
+                  </div>
+                </CardBody>
+              </Card>
             ) : null}
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Available at active gym</div>
-              <div className="template-meta">
-                Only show exercises available at the active gym.
-              </div>
-              {!hasActiveGym ? (
-                <div className="template-meta">
-                  Set an active gym to filter by equipment.
-                </div>
-              ) : null}
-            </div>
-            <Button
-              variant={filterByActiveGym ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                if (!hasActiveGym) return;
-                setPickerTouched(true);
-                setFilterByActiveGym((prev) => !prev);
-              }}
-              disabled={!hasActiveGym}
-              aria-pressed={filterByActiveGym}
-            >
-              {filterByActiveGym ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Most used first</div>
-              <div className="template-meta">
-                Prioritize frequently used exercises when opening the picker.
-              </div>
-            </div>
-            <Button
-              variant={showMostUsedFirst ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                setPickerTouched(true);
-                setShowMostUsedFirst((prev) => !prev);
-              }}
-              aria-pressed={showMostUsedFirst}
-            >
-              {showMostUsedFirst ? "On" : "Off"}
-            </Button>
-          </div>
-        </CardBody>
-      </Card>
+          </>
+        )}
+      </CollapsibleFilters>
 
       <Card>
         <CardHeader>

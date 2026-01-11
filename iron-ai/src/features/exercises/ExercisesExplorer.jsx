@@ -35,6 +35,7 @@ import { resolveActiveSpace } from "../../workoutSpaces/logic";
 import ExerciseDetailView from "./ExerciseDetailView";
 import ExerciseList from "./ExerciseList";
 import ExerciseHistoryDrawer from "./ExerciseHistoryDrawer";
+import CollapsibleFilters from "./CollapsibleFilters";
 
 function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
@@ -210,6 +211,22 @@ export default function ExercisesExplorer({
     : coreOnly
       ? "No core exercises found yet. Try turning off Core only."
       : "No exercises match those filters.";
+  const activeFilterCount = [
+    selectedMuscle,
+    selectedEquipment,
+    selectedType,
+    filterByActiveGym && hasActiveGym ? "gym" : "",
+    coreOnly ? "core" : "",
+    sortMode !== "az" ? "sort" : "",
+  ].filter(Boolean).length;
+  const clearFilters = () => {
+    setSelectedMuscle("");
+    setSelectedEquipment("");
+    setSelectedType("");
+    setFilterByActiveGym(false);
+    setCoreOnly(true);
+    setSortMode("az");
+  };
 
   const handleReseed = async () => {
     if (!import.meta.env.DEV) return;
@@ -252,157 +269,193 @@ export default function ExercisesExplorer({
         }
       />
 
-      <div className="sticky-search">
-        <Label htmlFor="exercise-library-search">Search exercises</Label>
-        <div className="search-field">
-          <Input
-            id="exercise-library-search"
-            type="search"
-            placeholder="Search by name or alias"
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-          />
-          {searchInput ? (
-            <button
-              type="button"
-              className="search-clear"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-              }}
-              aria-label="Clear search"
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <div className="ui-section-title">Search & filters</div>
-        </CardHeader>
-        <CardBody className="ui-stack">
-          <div className="filter-grid">
-            <div>
-              <Label htmlFor="exercise-library-muscle">Muscle group</Label>
-              <Select
-                id="exercise-library-muscle"
-                value={selectedMuscle}
-                onChange={(event) => setSelectedMuscle(event.target.value)}
-              >
-                <option value="">All muscles</option>
-                {muscleOptions.map((muscle) => (
-                  <option key={muscle} value={muscle}>
-                    {muscle}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label htmlFor="exercise-library-equipment">Equipment</Label>
-              <Select
-                id="exercise-library-equipment"
-                value={selectedEquipment}
-                onChange={(event) => setSelectedEquipment(event.target.value)}
-              >
-                <option value="">All equipment</option>
-                {equipmentOptions.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.label}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            {typeOptions.length ? (
-              <div>
-                <Label htmlFor="exercise-library-type">Type</Label>
-                <Select
-                  id="exercise-library-type"
-                  value={selectedType}
-                  onChange={(event) => setSelectedType(event.target.value)}
-                >
-                  <option value="">All types</option>
-                  {typeOptions.map((type) => (
-                    <option key={type} value={type}>
-                      {type.charAt(0).toUpperCase() + type.slice(1)}
-                    </option>
-                  ))}
-                </Select>
+      <CollapsibleFilters
+        label="Filters"
+        activeCount={activeFilterCount}
+        defaultExpanded={false}
+        storageKey="ironai.exerciseLibrary.filtersExpanded"
+      >
+        {({ expanded, label, panelId, toggle }) => (
+          <>
+            <div className="sticky-search sticky-search--stack">
+              <Label htmlFor="exercise-library-search">Search exercises</Label>
+              <div className="search-field">
+                <Input
+                  id="exercise-library-search"
+                  type="search"
+                  placeholder="Search by name or alias"
+                  value={searchInput}
+                  onChange={(event) => setSearchInput(event.target.value)}
+                />
+                {searchInput ? (
+                  <button
+                    type="button"
+                    className="search-clear"
+                    onClick={() => {
+                      setSearchInput("");
+                      setSearch("");
+                    }}
+                    aria-label="Clear search"
+                  >
+                    Clear
+                  </button>
+                ) : null}
               </div>
-            ) : null}
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Available at active gym</div>
-              <div className="template-meta">
-                Filter exercises by active gym equipment.
-              </div>
-            </div>
-            <Button
-              variant={filterByActiveGym ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => {
-                if (!hasActiveGym) return;
-                setFilterByActiveGym((prev) => !prev);
-              }}
-              disabled={!hasActiveGym}
-              aria-pressed={filterByActiveGym}
-            >
-              {filterByActiveGym ? "On" : "Off"}
-            </Button>
-          </div>
-
-          <div className="ui-row ui-row--between ui-row--wrap">
-            <div>
-              <div className="ui-strong">Core only</div>
-              <div className="template-meta">Show exercises marked core.</div>
-            </div>
-            <Button
-              variant={coreOnly ? "primary" : "secondary"}
-              size="sm"
-              type="button"
-              onClick={() => setCoreOnly((prev) => !prev)}
-              aria-pressed={coreOnly}
-            >
-              {coreOnly ? "On" : "Off"}
-            </Button>
-          </div>
-
-          {import.meta.env.DEV ? (
-            <div className="ui-row ui-row--between ui-row--wrap">
-              <div>
-                <div className="ui-strong">Seed data</div>
-                <div className="template-meta">Reload the exercise dataset.</div>
-              </div>
-              <Button
-                variant="secondary"
-                size="sm"
+              <button
                 type="button"
-                onClick={handleReseed}
-                disabled={reseeding}
+                className="filters-toggle"
+                aria-expanded={expanded}
+                aria-controls={panelId}
+                onClick={toggle}
               >
-                {reseeding ? "Reseeding…" : "Reseed"}
-              </Button>
+                <span className="filters-toggle__label">{label}</span>
+                <span className="filters-toggle__chevron" aria-hidden="true">
+                  {expanded ? "▲" : "▼"}
+                </span>
+              </button>
             </div>
-          ) : null}
+            {expanded ? (
+              <Card className="filters-panel">
+                <CardHeader>
+                  <div className="ui-section-title">Search & filters</div>
+                </CardHeader>
+                <CardBody className="ui-stack" id={panelId}>
+                  <div className="filter-grid">
+                    <div>
+                      <Label htmlFor="exercise-library-muscle">Muscle group</Label>
+                      <Select
+                        id="exercise-library-muscle"
+                        value={selectedMuscle}
+                        onChange={(event) => setSelectedMuscle(event.target.value)}
+                      >
+                        <option value="">All muscles</option>
+                        {muscleOptions.map((muscle) => (
+                          <option key={muscle} value={muscle}>
+                            {muscle}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    <div>
+                      <Label htmlFor="exercise-library-equipment">Equipment</Label>
+                      <Select
+                        id="exercise-library-equipment"
+                        value={selectedEquipment}
+                        onChange={(event) => setSelectedEquipment(event.target.value)}
+                      >
+                        <option value="">All equipment</option>
+                        {equipmentOptions.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                    {typeOptions.length ? (
+                      <div>
+                        <Label htmlFor="exercise-library-type">Type</Label>
+                        <Select
+                          id="exercise-library-type"
+                          value={selectedType}
+                          onChange={(event) => setSelectedType(event.target.value)}
+                        >
+                          <option value="">All types</option>
+                          {typeOptions.map((type) => (
+                            <option key={type} value={type}>
+                              {type.charAt(0).toUpperCase() + type.slice(1)}
+                            </option>
+                          ))}
+                        </Select>
+                      </div>
+                    ) : null}
+                  </div>
 
-          <div>
-            <Label htmlFor="exercise-library-sort">Sort by</Label>
-            <Select
-              id="exercise-library-sort"
-              value={sortMode}
-              onChange={(event) => setSortMode(event.target.value)}
-            >
-              <option value="az">A-Z</option>
-              <option value="most_used">Most used</option>
-              <option value="recent">Recently used</option>
-            </Select>
-          </div>
-        </CardBody>
-      </Card>
+                  <div className="ui-row ui-row--between ui-row--wrap">
+                    <div>
+                      <div className="ui-strong">Available at active gym</div>
+                      <div className="template-meta">
+                        Filter exercises by active gym equipment.
+                      </div>
+                    </div>
+                    <Button
+                      variant={filterByActiveGym ? "primary" : "secondary"}
+                      size="sm"
+                      type="button"
+                      onClick={() => {
+                        if (!hasActiveGym) return;
+                        setFilterByActiveGym((prev) => !prev);
+                      }}
+                      disabled={!hasActiveGym}
+                      aria-pressed={filterByActiveGym}
+                    >
+                      {filterByActiveGym ? "On" : "Off"}
+                    </Button>
+                  </div>
+
+                  <div className="ui-row ui-row--between ui-row--wrap">
+                    <div>
+                      <div className="ui-strong">Core only</div>
+                      <div className="template-meta">Show exercises marked core.</div>
+                    </div>
+                    <Button
+                      variant={coreOnly ? "primary" : "secondary"}
+                      size="sm"
+                      type="button"
+                      onClick={() => setCoreOnly((prev) => !prev)}
+                      aria-pressed={coreOnly}
+                    >
+                      {coreOnly ? "On" : "Off"}
+                    </Button>
+                  </div>
+
+                  {import.meta.env.DEV ? (
+                    <div className="ui-row ui-row--between ui-row--wrap">
+                      <div>
+                        <div className="ui-strong">Seed data</div>
+                        <div className="template-meta">Reload the exercise dataset.</div>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        type="button"
+                        onClick={handleReseed}
+                        disabled={reseeding}
+                      >
+                        {reseeding ? "Reseeding…" : "Reseed"}
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  <div>
+                    <Label htmlFor="exercise-library-sort">Sort by</Label>
+                    <Select
+                      id="exercise-library-sort"
+                      value={sortMode}
+                      onChange={(event) => setSortMode(event.target.value)}
+                    >
+                      <option value="az">A-Z</option>
+                      <option value="most_used">Most used</option>
+                      <option value="recent">Recently used</option>
+                    </Select>
+                  </div>
+
+                  <div className="ui-row ui-row--between ui-row--wrap filters-clear">
+                    <div className="template-meta">Reset all filters.</div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      onClick={clearFilters}
+                    >
+                      Clear filters
+                    </Button>
+                  </div>
+                </CardBody>
+              </Card>
+            ) : null}
+          </>
+        )}
+      </CollapsibleFilters>
 
       <Card>
         <CardHeader>
