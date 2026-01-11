@@ -82,6 +82,14 @@ const NAV_ITEMS = [
   { id: "templates", label: "Templates", icon: LayoutTemplate },
   { id: "more", label: "More", icon: MoreHorizontal },
 ];
+const KNOWN_TABS = new Set([
+  "workout",
+  "coach",
+  "history",
+  "summary",
+  "templates",
+  "more",
+]);
 
 function TabButton({ icon: Icon, label, active, onClick }) {
   return (
@@ -95,6 +103,26 @@ function TabButton({ icon: Icon, label, active, onClick }) {
       <Icon size={18} />
       <span>{label}</span>
     </button>
+  );
+}
+
+function NotFoundView({ onGoHome }) {
+  return (
+    <div className="page">
+      <PageHeader
+        title="Page not found"
+        subtitle="That section doesn't exist. Pick another tab to continue."
+        actions={<Button onClick={onGoHome}>Go to Workout</Button>}
+      />
+      <Card>
+        <CardBody>
+          <p className="ui-muted">
+            If you followed a stale link, try returning to the Workout tab and
+            navigating again.
+          </p>
+        </CardBody>
+      </Card>
+    </div>
   );
 }
 
@@ -381,10 +409,24 @@ function WorkoutView({
 
   // Safe defaults so we can compute memos without crashing
   const workout = workoutBundle?.workout ?? null;
-  const items = useMemo(
-    () => (Array.isArray(workoutBundle?.items) ? workoutBundle.items : []),
-    [workoutBundle]
-  );
+  const items = useMemo(() => {
+    const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
+    let warned = false;
+    return rawItems
+      .filter(Boolean)
+      .map((item) => {
+        if (!Array.isArray(item.sets)) {
+          if (!warned) {
+            console.error(
+              "Workout items contain invalid set arrays; falling back to empty arrays."
+            );
+            warned = true;
+          }
+          return { ...item, sets: [] };
+        }
+        return item;
+      });
+  }, [workoutBundle]);
   const totalSets = useMemo(
     () => items.reduce((sum, it) => sum + (it.sets?.length ?? 0), 0),
     [items]
@@ -684,6 +726,19 @@ function WorkoutView({
     startRestForSet(itemId, setId);
   };
 
+  const addSetAndFocus = useCallback(
+    async (itemId, options) => {
+      if (!itemId) return null;
+      pendingScrollRestoreRef.current = window.scrollY ?? 0;
+      const setId = await addWorkoutSet(itemId, options);
+      if (setId != null) {
+        pendingFocusRef.current = { setId, field: "weight" };
+      }
+      return setId;
+    },
+    [addWorkoutSet]
+  );
+
   useEffect(() => {
     if (!workoutId) return;
     // Cmd/Ctrl + Enter completes the focused set and adds a new one.
@@ -769,19 +824,6 @@ function WorkoutView({
       return null;
     },
     [items]
-  );
-
-  const addSetAndFocus = useCallback(
-    async (itemId, options) => {
-      if (!itemId) return null;
-      pendingScrollRestoreRef.current = window.scrollY ?? 0;
-      const setId = await addWorkoutSet(itemId, options);
-      if (setId != null) {
-        pendingFocusRef.current = { setId, field: "weight" };
-      }
-      return setId;
-    },
-    [addWorkoutSet]
   );
 
   useEffect(() => {
@@ -2936,9 +2978,11 @@ export default function App() {
   const [toasts, setToasts] = useState([]);
   const [coachLaunchContext, setCoachLaunchContext] = useState(null);
   const [exerciseSeedState, setExerciseSeedState] = useState({ status: "idle" });
+  const [dbHealth, setDbHealth] = useState({ status: "idle" });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
+  const isDev = import.meta.env.DEV;
 
   const dismissToast = useCallback((toastId) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== toastId));
@@ -2976,6 +3020,29 @@ export default function App() {
     return () => {
       timers.forEach((timer) => clearTimeout(timer));
       timers.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const checkDb = async () => {
+      try {
+        await db.open();
+        const tables = db.tables.map((table) => table.name);
+        console.info("Dexie DB opened", { version: db.verno, tables });
+        if (!cancelled) {
+          setDbHealth({ status: "ok", version: db.verno, tables });
+        }
+      } catch (error) {
+        console.error("Failed to open Dexie DB:", error);
+        if (!cancelled) {
+          setDbHealth({ status: "error", error });
+        }
+      }
+    };
+    checkDb();
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -3093,6 +3160,23 @@ export default function App() {
   return (
     <div className="app-shell">
       <main>
+        {dbHealth.status === "error" && (
+          <div className="db-health-banner" role="alert">
+            <div className="db-health-banner__copy">
+              <strong>Local database failed to open.</strong>
+              <span className="ui-muted">
+                You can try reloading the app. Your local data might be out of sync.
+              </span>
+              {isDev ? (
+                <span className="ui-muted">
+                  Dev hint: reset local data in the browser devtools (Application →
+                  IndexedDB) and reload.
+                </span>
+              ) : null}
+            </div>
+            <Button onClick={() => window.location.reload()}>Reload app</Button>
+          </div>
+        )}
         {tab === "workout" && (
           <WorkoutView
             key={workoutId ?? "none"}
@@ -3153,6 +3237,7 @@ export default function App() {
             setThemeMode={setThemeMode}
           />
         )}
+        {!KNOWN_TABS.has(tab) && <NotFoundView onGoHome={() => setTab("workout")} />}
       </main>
 
       <ToastHost toasts={toasts} onDismiss={dismissToast} />

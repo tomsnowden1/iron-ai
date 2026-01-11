@@ -77,7 +77,9 @@ export async function seedExercisesIfNeeded() {
 
   let response;
   try {
-    response = await fetch("/seed/exercises.json");
+    const baseUrl = import.meta.env.BASE_URL ?? "/";
+    const seedUrl = new URL(`${baseUrl}seed/exercises.json`, window.location.origin);
+    response = await fetch(seedUrl.toString());
   } catch (error) {
     console.error("Failed to fetch exercise seed:", error);
     return { status: "error", error };

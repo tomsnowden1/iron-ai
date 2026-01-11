@@ -13,6 +13,40 @@
     min-height: 100vh;
   }
 
+  .error-boundary {
+    min-height: 60vh;
+    justify-content: center;
+    align-items: flex-start;
+  }
+
+  .error-boundary__details {
+    width: 100%;
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    white-space: pre-wrap;
+  }
+
+  .db-health-banner {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+  }
+
+  .db-health-banner__copy {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
   @media (min-width: 768px) {
     .page {
       padding: var(--space-7) var(--space-6)
