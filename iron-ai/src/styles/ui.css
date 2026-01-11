@@ -1501,6 +1501,12 @@
     border-bottom: 1px solid var(--color-border-subtle);
   }
 
+  .sticky-search--stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
   .search-field {
     display: flex;
     align-items: center;
@@ -1524,6 +1530,34 @@
     display: grid;
     gap: var(--space-3);
     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+
+  .filters-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-lg);
+    background: var(--color-surface-muted);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+    cursor: pointer;
+  }
+
+  .filters-toggle__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .filters-toggle__chevron {
+    font-size: var(--text-xs);
+  }
+
+  .filters-panel {
+    margin-top: var(--space-2);
   }
 
   .exercise-list {
