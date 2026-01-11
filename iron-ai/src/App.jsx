@@ -199,6 +199,8 @@ const WorkoutSetRow = memo(function WorkoutSetRow({
         placeholder="kg"
         value={set.weight ?? ""}
         onChange={handleWeightChange}
+        data-workout-set-id={set.id}
+        data-workout-set-field="weight"
         className="workout-set-input"
       />
       <Input
@@ -206,6 +208,8 @@ const WorkoutSetRow = memo(function WorkoutSetRow({
         placeholder="reps"
         value={set.reps ?? ""}
         onChange={handleRepsChange}
+        data-workout-set-id={set.id}
+        data-workout-set-field="reps"
         className="workout-set-input"
       />
       <div className="set-actions">
@@ -366,6 +370,9 @@ function WorkoutView({
   const [detailExerciseId, setDetailExerciseId] = useState(null);
   const [historyExercise, setHistoryExercise] = useState(null);
   const scrollRestoreRef = useRef(0);
+  const pendingScrollRestoreRef = useRef(null);
+  const pendingFocusRef = useRef(null);
+  const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
   const lastActivityAtRef = useRef(Date.now());
@@ -467,6 +474,9 @@ function WorkoutView({
     setExerciseNoteDraft("");
     setSupersetSheetItemId(null);
     setDetailExerciseId(null);
+    pendingScrollRestoreRef.current = null;
+    pendingFocusRef.current = null;
+    autoScrollAppliedRef.current = false;
   }, [workoutId]);
 
   useEffect(() => {
@@ -677,7 +687,7 @@ function WorkoutView({
   useEffect(() => {
     if (!workoutId) return;
     // Cmd/Ctrl + Enter completes the focused set and adds a new one.
-    const handleKeyDown = (event) => {
+    const handleKeyDown = async (event) => {
       if (!(event.metaKey || event.ctrlKey) || event.key !== "Enter") return;
       const active = document.activeElement;
       if (!viewRef.current || !active || !viewRef.current.contains(active)) return;
@@ -699,15 +709,15 @@ function WorkoutView({
       const item = items.find((entry) => entry.id === itemId);
       if (item) {
         const prefill = getPrefillValues(item.sets);
-        addWorkoutSet(itemId, prefill);
+        await addSetAndFocus(itemId, prefill);
       } else {
-        addWorkoutSet(itemId);
+        await addSetAndFocus(itemId);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, markSessionActivity, startRestForSet, workoutId]);
+  }, [addSetAndFocus, items, markSessionActivity, startRestForSet, workoutId]);
 
   useEffect(() => {
     if (!restRunning) return;
@@ -730,6 +740,84 @@ function WorkoutView({
     const interval = window.setInterval(tick, 500);
     return () => window.clearInterval(interval);
   }, [onNotify, restDuration, restRunning]);
+
+  const focusWorkoutField = useCallback((setId, field) => {
+    if (!setId || !viewRef.current) return;
+    const selector = `[data-workout-set-id="${setId}"][data-workout-set-field="${field}"]`;
+    const input = viewRef.current.querySelector(selector);
+    if (!input || typeof input.focus !== "function") return;
+    try {
+      input.focus({ preventScroll: true });
+    } catch {
+      input.focus();
+    }
+  }, []);
+
+  const resolveNextIncompleteSetId = useCallback(
+    (itemId, setId) => {
+      const itemIndex = items.findIndex((item) => item.id === itemId);
+      if (itemIndex < 0) return null;
+      const currentSets = items[itemIndex]?.sets ?? [];
+      const currentIndex = currentSets.findIndex((set) => set.id === setId);
+      for (let i = currentIndex + 1; i < currentSets.length; i += 1) {
+        if (!currentSets[i]?.isComplete) return currentSets[i].id;
+      }
+      for (let i = itemIndex + 1; i < items.length; i += 1) {
+        const nextSet = (items[i]?.sets ?? []).find((set) => !set?.isComplete);
+        if (nextSet) return nextSet.id;
+      }
+      return null;
+    },
+    [items]
+  );
+
+  const addSetAndFocus = useCallback(
+    async (itemId, options) => {
+      if (!itemId) return null;
+      pendingScrollRestoreRef.current = window.scrollY ?? 0;
+      const setId = await addWorkoutSet(itemId, options);
+      if (setId != null) {
+        pendingFocusRef.current = { setId, field: "weight" };
+      }
+      return setId;
+    },
+    [addWorkoutSet]
+  );
+
+  useEffect(() => {
+    if (pendingScrollRestoreRef.current != null) {
+      window.scrollTo({ top: pendingScrollRestoreRef.current, behavior: "auto" });
+      pendingScrollRestoreRef.current = null;
+    }
+    if (pendingFocusRef.current) {
+      const { setId, field } = pendingFocusRef.current;
+      pendingFocusRef.current = null;
+      focusWorkoutField(setId, field);
+    }
+  }, [focusWorkoutField, items]);
+
+  useEffect(() => {
+    if (!workoutId || !items.length) return;
+    if (autoScrollAppliedRef.current) return;
+    if ((window.scrollY ?? 0) > 20) return;
+    const active = document.activeElement;
+    if (active && viewRef.current?.contains(active)) return;
+    const firstIncompleteItem = items.find((item) =>
+      (item.sets ?? []).some((set) => !set?.isComplete)
+    );
+    if (!firstIncompleteItem) {
+      autoScrollAppliedRef.current = true;
+      return;
+    }
+    const target = viewRef.current?.querySelector(
+      `[data-workout-item-id="${firstIncompleteItem.id}"]`
+    );
+    if (!target) return;
+    autoScrollAppliedRef.current = true;
+    window.requestAnimationFrame(() => {
+      target.scrollIntoView({ block: "start", behavior: "auto" });
+    });
+  }, [items, workoutId]);
 
   // Handlers
   const openReplacePicker = (workoutItem) => {
@@ -784,28 +872,28 @@ function WorkoutView({
   const longPressDoneAddsNext = settings?.long_press_done_adds_next ?? false;
 
   const handleAddSet = useCallback(
-    (item) => {
+    async (item) => {
       if (!item) return;
       const prefill = getPrefillValues(item.sets);
       markSessionActivity();
-      void addWorkoutSet(item.id, prefill);
+      await addSetAndFocus(item.id, prefill);
     },
-    [addWorkoutSet, markSessionActivity]
+    [addSetAndFocus, markSessionActivity]
   );
 
   const handleDuplicateLastSet = useCallback(
-    (item) => {
+    async (item) => {
       if (!item) return;
       const lastSet = getLastWorkoutSet(item.sets);
       if (!lastSet) return;
       markSessionActivity();
-      void addWorkoutSet(item.id, {
+      await addSetAndFocus(item.id, {
         weight: lastSet.weight ?? "",
         reps: lastSet.reps ?? "",
         isWarmup: lastSet.isWarmup ?? false,
       });
     },
-    [addWorkoutSet, markSessionActivity]
+    [addSetAndFocus, markSessionActivity]
   );
 
   const handleCompleteAndAddSet = useCallback(
@@ -816,13 +904,13 @@ function WorkoutView({
       handleCompleteSet(itemId, set.id);
       const weight = set.weight ?? "";
       const reps = set.reps ?? "";
-      await addWorkoutSet(itemId, {
+      await addSetAndFocus(itemId, {
         weight: weight === "" ? undefined : weight,
         reps: reps === "" ? undefined : reps,
         isWarmup: set.isWarmup ?? false,
       });
     },
-    [addWorkoutSet, handleCompleteSet, markSessionActivity, updateWorkoutSet]
+    [addSetAndFocus, handleCompleteSet, markSessionActivity, updateWorkoutSet]
   );
 
   const clearLongPress = useCallback((setId) => {
@@ -891,9 +979,13 @@ function WorkoutView({
       void updateWorkoutSet(setId, { isComplete: checked });
       if (checked) {
         handleCompleteSet(itemId, setId);
+        const nextSetId = resolveNextIncompleteSetId(itemId, setId);
+        if (nextSetId) {
+          pendingFocusRef.current = { setId: nextSetId, field: "weight" };
+        }
       }
     },
-    [handleCompleteSet, markSessionActivity, updateWorkoutSet]
+    [handleCompleteSet, markSessionActivity, resolveNextIncompleteSetId, updateWorkoutSet]
   );
 
   const handleResetRest = () => {
