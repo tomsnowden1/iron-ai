@@ -735,6 +735,7 @@ export async function createEmptyWorkout(options = {}) {
         templateId: null,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       await db.table("workouts").put({
@@ -744,6 +745,7 @@ export async function createEmptyWorkout(options = {}) {
         templateId: null,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       return workoutId;
@@ -779,6 +781,7 @@ export async function startWorkoutFromTemplate(templateId, options = {}) {
         templateId,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       await db.table("workouts").put({
@@ -788,6 +791,7 @@ export async function startWorkoutFromTemplate(templateId, options = {}) {
         templateId,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       return id;
@@ -1111,6 +1115,10 @@ export async function getWorkoutWithDetails(workoutId) {
         spaceId: workoutRecord.spaceId ?? null,
         sessionNote:
           typeof workoutRecord.sessionNote === "string" ? workoutRecord.sessionNote : "",
+        sessionReflection:
+          typeof workoutRecord.sessionReflection === "string"
+            ? workoutRecord.sessionReflection
+            : "",
         exerciseNotes:
           workoutRecord.exerciseNotes && typeof workoutRecord.exerciseNotes === "object"
             ? workoutRecord.exerciseNotes

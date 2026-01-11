@@ -256,6 +256,43 @@ function compareWorkoutSet(current, previous) {
   return "worse";
 }
 
+function isComparableSet(set) {
+  if (!set) return false;
+  const weight = parseSetMetric(set.weight);
+  const reps = parseSetMetric(set.reps);
+  return weight != null && reps != null;
+}
+
+function compareSetQuality(current, previous) {
+  if (!current || !previous) return 0;
+  const currentWeight = parseSetMetric(current.weight);
+  const currentReps = parseSetMetric(current.reps);
+  const previousWeight = parseSetMetric(previous.weight);
+  const previousReps = parseSetMetric(previous.reps);
+  if (
+    currentWeight == null ||
+    currentReps == null ||
+    previousWeight == null ||
+    previousReps == null
+  ) {
+    return 0;
+  }
+  if (currentWeight > previousWeight) return 1;
+  if (currentWeight === previousWeight && currentReps > previousReps) return 1;
+  if (currentWeight === previousWeight && currentReps === previousReps) return 0;
+  return -1;
+}
+
+function getBestComparableSet(sets) {
+  if (!Array.isArray(sets) || sets.length === 0) return null;
+  return sets.reduce((best, set) => {
+    if (!set || set.isWarmup) return best;
+    if (!isComparableSet(set)) return best;
+    if (!best) return set;
+    return compareSetQuality(set, best) > 0 ? set : best;
+  }, null);
+}
+
 function getLastWorkoutSet(sets) {
   if (!Array.isArray(sets) || sets.length === 0) return null;
   return sets.reduce((latest, set) => {
@@ -2568,8 +2605,20 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
     [summary?.workoutId]
   );
   const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
+  const exerciseIds = useMemo(
+    () =>
+      (details?.items ?? [])
+        .map((item) => item.exerciseId)
+        .filter((id) => id != null),
+    [details?.items]
+  );
+  const previousSetsMap = useLiveQuery(
+    () => getPreviousWorkoutSetsByExercise(exerciseIds, summary?.workoutId),
+    [exerciseIds.join("|"), summary?.workoutId]
+  );
   const sessionNote = details?.workout?.sessionNote?.trim() ?? "";
   const exerciseNotes = details?.workout?.exerciseNotes ?? {};
+  const [sessionReflection, setSessionReflection] = useState("");
   const exerciseNotesList = details?.items?.filter((it) =>
     Boolean(exerciseNotes?.[it.exerciseId]?.trim())
   );
@@ -2580,6 +2629,96 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
   const spaceLabel = details?.workout?.spaceId
     ? spaceMap.get(details.workout.spaceId)?.name
     : null;
+
+  useEffect(() => {
+    setSessionReflection(details?.workout?.sessionReflection?.trim() ?? "");
+  }, [details?.workout?.sessionReflection, summary?.workoutId]);
+
+  const comparisons = useMemo(() => {
+    const sections = {
+      improved: [],
+      same: [],
+      regressed: [],
+    };
+    if (!details?.items?.length) return sections;
+    const lookup = previousSetsMap ?? new Map();
+
+    details.items.forEach((item) => {
+      const currentBest = getBestComparableSet(item.sets);
+      const previous = lookup.get(item.exerciseId) ?? null;
+      const previousBest = getBestComparableSet(previous?.sets);
+      const status = compareWorkoutSet(currentBest, previousBest) ?? "same";
+      const name = item.exercise?.name ?? "Unknown Exercise";
+      const stickyNote = item.exercise?.stickyNote?.trim() ?? "";
+      let comparisonLine = currentBest
+        ? `Best set ${formatSetValue(currentBest)}`
+        : "No logged sets";
+      if (previousBest) {
+        comparisonLine += ` vs ${formatSetValue(previousBest)} last time`;
+      } else if (currentBest) {
+        comparisonLine += " · first time logged";
+      }
+
+      const payload = {
+        id: item.id,
+        name,
+        comparisonLine,
+        status,
+        stickyNote,
+      };
+
+      if (status === "improved") {
+        sections.improved.push(payload);
+      } else if (status === "worse") {
+        sections.regressed.push(payload);
+      } else {
+        sections.same.push(payload);
+      }
+    });
+
+    return sections;
+  }, [details?.items, previousSetsMap]);
+
+  const recapLine = useMemo(() => {
+    if (!summary) return "";
+    const parts = [
+      `${summary.totalExercises} exercises`,
+      `${summary.totalSets} sets`,
+      summary.estimatedMinutes != null ? `${summary.estimatedMinutes} min` : null,
+      spaceLabel,
+    ].filter(Boolean);
+    return parts.join(" · ");
+  }, [summary, spaceLabel]);
+
+  const handleReflectionSelect = useCallback(
+    async (value) => {
+      if (!summary?.workoutId) return;
+      const nextValue = sessionReflection === value ? "" : value;
+      setSessionReflection(nextValue);
+      await updateWorkoutSession(summary.workoutId, { sessionReflection: nextValue });
+    },
+    [sessionReflection, summary?.workoutId]
+  );
+
+  const renderExerciseList = (items, muted = false) => {
+    if (!items.length) return null;
+    return (
+      <div className={`summary-list ${muted ? "summary-list--muted" : ""}`}>
+        {items.map((item) => (
+          <div
+            key={item.id}
+            className={`summary-item ${muted ? "summary-item--muted" : ""}`}
+          >
+            <div className="summary-item__title">{item.name}</div>
+            <div className="summary-item__meta">{item.comparisonLine}</div>
+            {muted && item.stickyNote ? (
+              <div className="summary-item__note">Sticky note: {item.stickyNote}</div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   if (!summary) {
     return (
@@ -2598,30 +2737,12 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
 
   return (
     <div className="page">
-      <PageHeader title="Workout Summary" subtitle="Great work — here’s your recap." />
+      <PageHeader title="Workout Summary" subtitle="Great work — here’s what moved." />
 
       <Card>
         <CardBody className="ui-stack">
-          <div className="ui-row ui-row--between">
-            <span className="ui-muted">Total exercises</span>
-            <span className="ui-strong">{summary.totalExercises}</span>
-          </div>
-          <div className="ui-row ui-row--between">
-            <span className="ui-muted">Total sets</span>
-            <span className="ui-strong">{summary.totalSets}</span>
-          </div>
-          <div className="ui-row ui-row--between">
-            <span className="ui-muted">Estimated duration</span>
-            <span className="ui-strong">
-              {summary.estimatedMinutes != null ? `${summary.estimatedMinutes} min` : "Unknown"}
-            </span>
-          </div>
-          {spaceLabel ? (
-            <div className="ui-row ui-row--between">
-              <span className="ui-muted">Space</span>
-              <span className="ui-strong">{spaceLabel}</span>
-            </div>
-          ) : null}
+          <div className="summary-kicker">You stayed consistent today.</div>
+          <div className="summary-recap">{recapLine}</div>
         </CardBody>
         <CardFooter className="ui-row ui-row--wrap">
           <Button variant="secondary" size="md" onClick={onBackToWorkout} className="flex-1">
@@ -2631,6 +2752,55 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
             View History
           </Button>
         </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="ui-section-title">Exercise check-in</div>
+        </CardHeader>
+        <CardBody className="ui-stack summary-sections">
+          {comparisons.improved.length ? (
+            <div className="summary-section">
+              <div className="summary-section__title">Improved exercises ↑</div>
+              {renderExerciseList(comparisons.improved)}
+            </div>
+          ) : null}
+          {comparisons.same.length ? (
+            <div className="summary-section">
+              <div className="summary-section__title">Same</div>
+              {renderExerciseList(comparisons.same)}
+            </div>
+          ) : null}
+          {comparisons.regressed.length ? (
+            <div className="summary-section summary-section--muted">
+              <div className="summary-section__title">Regressed</div>
+              {renderExerciseList(comparisons.regressed, true)}
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="ui-section-title">Quick reflection (optional)</div>
+        </CardHeader>
+        <CardBody className="summary-reflection ui-stack">
+          <div className="summary-reflection__options">
+            {["Felt strong", "Felt tired", "Felt rushed"].map((option) => (
+              <Button
+                key={option}
+                variant={sessionReflection === option ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => handleReflectionSelect(option)}
+              >
+                {option}
+              </Button>
+            ))}
+          </div>
+          <div className="ui-muted">
+            Tap once to save, tap again to clear. Totally optional.
+          </div>
+        </CardBody>
       </Card>
 
       {sessionNote || (exerciseNotesList && exerciseNotesList.length) ? (
