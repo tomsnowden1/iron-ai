@@ -72,6 +72,9 @@ import {
 
 const SESSION_NOTE_LIMIT = 500;
 const EXERCISE_NOTE_LIMIT = 250;
+const SESSION_IDLE_MS = 8 * 60 * 1000;
+const SESSION_PROLONGED_IDLE_MS = 12 * 60 * 1000;
+const RESUME_BANNER_MINUTES_MS = 3 * 60 * 1000;
 const NAV_ITEMS = [
   { id: "workout", label: "Workout", icon: Dumbbell },
   { id: "coach", label: "Coach", icon: MessageSquare },
@@ -319,12 +322,18 @@ function WorkoutView({
   const [exerciseNoteSheet, setExerciseNoteSheet] = useState(null);
   const [exerciseNoteDraft, setExerciseNoteDraft] = useState("");
   const [menuItemId, setMenuItemId] = useState(null);
+  const [sessionState, setSessionState] = useState("active");
+  const [showResumeBanner, setShowResumeBanner] = useState(false);
+  const [isProlongedIdle, setIsProlongedIdle] = useState(false);
   const [supersetSheetItemId, setSupersetSheetItemId] = useState(null);
   const [detailExerciseId, setDetailExerciseId] = useState(null);
   const [historyExercise, setHistoryExercise] = useState(null);
   const scrollRestoreRef = useRef(0);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
+  const lastActivityAtRef = useRef(Date.now());
+  const lastBackgroundAtRef = useRef(null);
+  const resumeBannerShownRef = useRef(false);
 
   // Safe defaults so we can compute memos without crashing
   const workout = workoutBundle?.workout ?? null;
@@ -401,6 +410,7 @@ function WorkoutView({
     () => items.find((item) => item.id === menuItemId) ?? null,
     [items, menuItemId]
   );
+  const isIdle = sessionState === "idle";
 
   const existingExerciseIds = useMemo(() => {
     return new Set(items.map((i) => i.exerciseId));
@@ -423,6 +433,15 @@ function WorkoutView({
   }, [workoutId]);
 
   useEffect(() => {
+    lastActivityAtRef.current = Date.now();
+    lastBackgroundAtRef.current = null;
+    resumeBannerShownRef.current = false;
+    setSessionState("active");
+    setIsProlongedIdle(false);
+    setShowResumeBanner(false);
+  }, [workoutId]);
+
+  useEffect(() => {
     if (!pickerIntent || !workoutId) return;
     setPickerMode("add");
     setPickerPrefill(pickerIntent);
@@ -440,6 +459,16 @@ function WorkoutView({
     const next = workout.exerciseNotes ?? {};
     setExerciseNotes({ ...next });
   }, [exerciseNoteSheet, workout]);
+
+  useEffect(() => {
+    if (!workout || workout.finishedAt) return;
+    if (resumeBannerShownRef.current) return;
+    const startedAtMs = workout.startedAt ? new Date(workout.startedAt).getTime() : null;
+    if (startedAtMs && Date.now() - startedAtMs > RESUME_BANNER_MINUTES_MS) {
+      setShowResumeBanner(true);
+      resumeBannerShownRef.current = true;
+    }
+  }, [workout, workout?.finishedAt, workout?.startedAt]);
 
   useEffect(() => {
     const enabled = settings?.rest_enabled;
@@ -472,6 +501,60 @@ function WorkoutView({
     if (showRestTimer) return;
     setRestSheetOpen(false);
   }, [showRestTimer]);
+
+  useEffect(() => {
+    if (!workoutId || workout?.finishedAt) return;
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        setSessionState("backgrounded");
+        lastBackgroundAtRef.current = Date.now();
+        return;
+      }
+      const idleFor = Date.now() - lastActivityAtRef.current;
+      const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
+      setSessionState(nextState);
+      setIsProlongedIdle(idleFor >= SESSION_PROLONGED_IDLE_MS);
+      if (lastBackgroundAtRef.current) {
+        setShowResumeBanner(true);
+        resumeBannerShownRef.current = true;
+      }
+    };
+    const handleBlur = () => {
+      if (document.visibilityState !== "hidden") {
+        setSessionState("backgrounded");
+        lastBackgroundAtRef.current = Date.now();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", handleVisibility);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleVisibility);
+      window.removeEventListener("blur", handleBlur);
+    };
+  }, [workoutId, workout?.finishedAt]);
+
+  useEffect(() => {
+    if (!workoutId || workout?.finishedAt) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      const idleFor = Date.now() - lastActivityAtRef.current;
+      const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
+      setSessionState((prev) =>
+        prev === "backgrounded" || prev === nextState ? prev : nextState
+      );
+      setIsProlongedIdle(idleFor >= SESSION_PROLONGED_IDLE_MS);
+    }, 30000);
+    return () => window.clearInterval(interval);
+  }, [workoutId, workout?.finishedAt]);
+
+  const markSessionActivity = useCallback(() => {
+    lastActivityAtRef.current = Date.now();
+    setIsProlongedIdle(false);
+    setSessionState((prev) => (prev === "backgrounded" ? prev : "active"));
+    setShowResumeBanner(false);
+  }, []);
 
   const persistRestSettings = useCallback((patch) => {
     return (async () => {
@@ -575,6 +658,7 @@ function WorkoutView({
           startRestForSet(itemId, setId);
         }
       }
+      markSessionActivity();
       const item = items.find((entry) => entry.id === itemId);
       if (item) {
         const prefill = getPrefillValues(item.sets);
@@ -586,7 +670,7 @@ function WorkoutView({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [items, startRestForSet, workoutId]);
+  }, [items, markSessionActivity, startRestForSet, workoutId]);
 
   useEffect(() => {
     if (!restRunning) return;
@@ -666,9 +750,10 @@ function WorkoutView({
     (item) => {
       if (!item) return;
       const prefill = getPrefillValues(item.sets);
+      markSessionActivity();
       void addWorkoutSet(item.id, prefill);
     },
-    [addWorkoutSet]
+    [addWorkoutSet, markSessionActivity]
   );
 
   const handleDuplicateLastSet = useCallback(
@@ -676,18 +761,20 @@ function WorkoutView({
       if (!item) return;
       const lastSet = getLastWorkoutSet(item.sets);
       if (!lastSet) return;
+      markSessionActivity();
       void addWorkoutSet(item.id, {
         weight: lastSet.weight ?? "",
         reps: lastSet.reps ?? "",
         isWarmup: lastSet.isWarmup ?? false,
       });
     },
-    [addWorkoutSet]
+    [addWorkoutSet, markSessionActivity]
   );
 
   const handleCompleteAndAddSet = useCallback(
     async (itemId, set) => {
       if (!itemId || !set || set.isComplete) return;
+      markSessionActivity();
       await updateWorkoutSet(set.id, { isComplete: true });
       handleCompleteSet(itemId, set.id);
       const weight = set.weight ?? "";
@@ -698,7 +785,7 @@ function WorkoutView({
         isWarmup: set.isWarmup ?? false,
       });
     },
-    [addWorkoutSet, handleCompleteSet, updateWorkoutSet]
+    [addWorkoutSet, handleCompleteSet, markSessionActivity, updateWorkoutSet]
   );
 
   const clearLongPress = useCallback((setId) => {
@@ -731,15 +818,17 @@ function WorkoutView({
 
   const handleWorkoutSetUpdate = useCallback(
     (setId, patch) => {
+      markSessionActivity();
       void updateWorkoutSet(setId, patch);
     },
-    [updateWorkoutSet]
+    [markSessionActivity, updateWorkoutSet]
   );
 
   const handleRemoveWorkoutSet = useCallback(
     (itemId, setId) => {
       const item = items.find((entry) => entry.id === itemId);
       const removedSet = item?.sets?.find((set) => set.id === setId);
+      markSessionActivity();
       void removeWorkoutSet(itemId, setId);
       if (!removedSet) return;
       onNotify?.(`Set ${removedSet.setNumber ?? ""} removed.`, {
@@ -752,7 +841,7 @@ function WorkoutView({
         },
       });
     },
-    [items, onNotify, removeWorkoutSet]
+    [items, markSessionActivity, onNotify, removeWorkoutSet]
   );
 
   const handleToggleWorkoutSetComplete = useCallback(
@@ -761,12 +850,13 @@ function WorkoutView({
         longPressTriggeredRef.current.delete(setId);
         return;
       }
+      markSessionActivity();
       void updateWorkoutSet(setId, { isComplete: checked });
       if (checked) {
         handleCompleteSet(itemId, setId);
       }
     },
-    [handleCompleteSet, updateWorkoutSet]
+    [handleCompleteSet, markSessionActivity, updateWorkoutSet]
   );
 
   const handleResetRest = () => {
@@ -1202,6 +1292,25 @@ function WorkoutView({
         }
       />
 
+      {showResumeBanner ? (
+        <div className="workout-resume-banner" role="status">
+          <div>
+            <div className="ui-strong">Resume workout</div>
+            <div className="template-meta">Your session is still active.</div>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              markSessionActivity();
+              setShowResumeBanner(false);
+            }}
+          >
+            Resume
+          </Button>
+        </div>
+      ) : null}
+
       <div className="workout-stats-bar">
         <div className="workout-stats-title">
           <span className="ui-section-title">Session</span>
@@ -1447,7 +1556,13 @@ function WorkoutView({
 
       <Card>
         <CardBody className="ui-stack">
-          <Button variant="primary" size="lg" onClick={handleFinish} className="w-full">
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={handleFinish}
+            className="w-full workout-finish-button"
+            data-idle={isProlongedIdle ? "true" : "false"}
+          >
             Finish Workout
           </Button>
           {finishMessage ? <div className="ui-muted">{finishMessage}</div> : null}
@@ -1460,6 +1575,7 @@ function WorkoutView({
             type="button"
             className="rest-chip"
             data-running={restRunning ? "true" : "false"}
+            data-idle={isIdle ? "true" : "false"}
             onClick={() => setRestSheetOpen(true)}
           >
             <span className="rest-chip__label">Rest</span>
