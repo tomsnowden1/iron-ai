@@ -5,6 +5,7 @@ import {
   History,
   LayoutTemplate,
   MessageSquare,
+  Copy,
   MoreHorizontal,
   MoreVertical,
   RefreshCcw,
@@ -141,6 +142,27 @@ function compareWorkoutSet(current, previous) {
   return "worse";
 }
 
+function getLastWorkoutSet(sets) {
+  if (!Array.isArray(sets) || sets.length === 0) return null;
+  return sets.reduce((latest, set) => {
+    if (!latest) return set;
+    const latestNumber = latest.setNumber ?? -Infinity;
+    const currentNumber = set?.setNumber ?? -Infinity;
+    return currentNumber >= latestNumber ? set : latest;
+  }, null);
+}
+
+function getPrefillValues(sets) {
+  const lastSet = getLastWorkoutSet(sets);
+  if (!lastSet) return {};
+  const weight = lastSet?.weight ?? "";
+  const reps = lastSet?.reps ?? "";
+  const prefill = {};
+  if (weight !== "") prefill.weight = weight;
+  if (reps !== "") prefill.reps = reps;
+  return prefill;
+}
+
 function WorkoutView({
   workoutId,
   setWorkoutId,
@@ -190,6 +212,8 @@ function WorkoutView({
   const [detailExerciseId, setDetailExerciseId] = useState(null);
   const [historyExercise, setHistoryExercise] = useState(null);
   const scrollRestoreRef = useRef(0);
+  const longPressTimeoutsRef = useRef(new Map());
+  const longPressTriggeredRef = useRef(new Set());
 
   // Safe defaults so we can compute memos without crashing
   const workout = workoutBundle?.workout ?? null;
@@ -415,6 +439,10 @@ function WorkoutView({
     [items, resolveRestSeconds, buildNextHint, startRestTimer]
   );
 
+  const handleCompleteSet = (itemId, setId) => {
+    startRestForSet(itemId, setId);
+  };
+
   useEffect(() => {
     if (!workoutId) return;
     // Cmd/Ctrl + Enter completes the focused set and adds a new one.
@@ -436,12 +464,18 @@ function WorkoutView({
           startRestForSet(itemId, setId);
         }
       }
-      addWorkoutSet(itemId);
+      const item = items.find((entry) => entry.id === itemId);
+      if (item) {
+        const prefill = getPrefillValues(item.sets);
+        addWorkoutSet(itemId, prefill);
+      } else {
+        addWorkoutSet(itemId);
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [startRestForSet, workoutId]);
+  }, [items, startRestForSet, workoutId]);
 
   useEffect(() => {
     if (!restRunning) return;
@@ -515,15 +549,80 @@ function WorkoutView({
     startRestTimer(seconds, hint);
   };
 
+  const longPressDoneAddsNext = settings?.long_press_done_adds_next ?? false;
+
+  const handleAddSet = useCallback(
+    (item) => {
+      if (!item) return;
+      const prefill = getPrefillValues(item.sets);
+      void addWorkoutSet(item.id, prefill);
+    },
+    [addWorkoutSet]
+  );
+
+  const handleDuplicateLastSet = useCallback(
+    (item) => {
+      if (!item) return;
+      const lastSet = getLastWorkoutSet(item.sets);
+      if (!lastSet) return;
+      void addWorkoutSet(item.id, {
+        weight: lastSet.weight ?? "",
+        reps: lastSet.reps ?? "",
+        isWarmup: lastSet.isWarmup ?? false,
+      });
+    },
+    [addWorkoutSet]
+  );
+
+  const handleCompleteAndAddSet = useCallback(
+    async (item, set) => {
+      if (!item || !set || set.isComplete) return;
+      await updateWorkoutSet(set.id, { isComplete: true });
+      handleCompleteSet(item.id, set.id);
+      const weight = set.weight ?? "";
+      const reps = set.reps ?? "";
+      await addWorkoutSet(item.id, {
+        weight: weight === "" ? undefined : weight,
+        reps: reps === "" ? undefined : reps,
+        isWarmup: set.isWarmup ?? false,
+      });
+    },
+    [addWorkoutSet, handleCompleteSet, updateWorkoutSet]
+  );
+
+  const clearLongPress = useCallback((setId) => {
+    const timer = longPressTimeoutsRef.current.get(setId);
+    if (timer) {
+      window.clearTimeout(timer);
+      longPressTimeoutsRef.current.delete(setId);
+    }
+  }, []);
+
+  const startLongPress = useCallback(
+    (item, set) => {
+      if (!longPressDoneAddsNext || !item || !set || set.isComplete) return;
+      clearLongPress(set.id);
+      const timer = window.setTimeout(() => {
+        longPressTriggeredRef.current.add(set.id);
+        void handleCompleteAndAddSet(item, set);
+      }, 450);
+      longPressTimeoutsRef.current.set(set.id, timer);
+    },
+    [clearLongPress, handleCompleteAndAddSet, longPressDoneAddsNext]
+  );
+
+  const cancelLongPress = useCallback(
+    (setId) => {
+      clearLongPress(setId);
+    },
+    [clearLongPress]
+  );
+
   const handleResetRest = () => {
     restEndsAtRef.current = null;
     setRestRunning(false);
     setRestRemaining(restDuration);
     setRestHint("");
-  };
-
-  const handleCompleteSet = (itemId, setId) => {
-    startRestForSet(itemId, setId);
   };
 
   const handleOpenExerciseHistory = (item) => {
@@ -1014,9 +1113,20 @@ function WorkoutView({
                       variant="secondary"
                       size="sm"
                       className="tap-target"
-                      onClick={() => addWorkoutSet(it.id)}
+                      onClick={() => handleAddSet(it)}
                     >
                       + Set
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="icon-button"
+                      aria-label={`Duplicate last set for ${it.exercise?.name ?? "exercise"}`}
+                      title="Duplicate last set"
+                      onClick={() => handleDuplicateLastSet(it)}
+                      disabled={it.sets.length === 0}
+                    >
+                      <Copy size={18} />
                     </Button>
                     <Button
                       variant="ghost"
@@ -1116,7 +1226,15 @@ function WorkoutView({
                                 <input
                                   type="checkbox"
                                   checked={Boolean(s.isComplete)}
+                                  onPointerDown={() => startLongPress(it, s)}
+                                  onPointerUp={() => cancelLongPress(s.id)}
+                                  onPointerLeave={() => cancelLongPress(s.id)}
+                                  onPointerCancel={() => cancelLongPress(s.id)}
                                   onChange={(e) => {
+                                    if (longPressTriggeredRef.current.has(s.id)) {
+                                      longPressTriggeredRef.current.delete(s.id);
+                                      return;
+                                    }
                                     const checked = e.target.checked;
                                     void updateWorkoutSet(s.id, { isComplete: checked });
                                     if (checked) {
@@ -1728,6 +1846,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [showRestTimer, setShowRestTimer] = useState(
     settings?.show_rest_timer ?? true
   );
+  const [longPressDoneAddsNext, setLongPressDoneAddsNext] = useState(
+    settings?.long_press_done_adds_next ?? false
+  );
   const [memoryViewOpen, setMemoryViewOpen] = useState(false);
   const [memoryEditOpen, setMemoryEditOpen] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
@@ -1761,6 +1882,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
       exercise_picker_most_used_first: exercisePickerMostUsedFirst,
       show_rest_timer: showRestTimer,
+      long_press_done_adds_next: longPressDoneAddsNext,
     });
     onNotify?.("Saved locally ✅", { tone: "success" });
   };
@@ -1847,6 +1969,24 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             aria-pressed={showRestTimer}
           >
             {showRestTimer ? "On" : "Off"}
+          </Button>
+        </div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-strong">Long-press done adds next set</div>
+            <div className="template-meta">
+              Hold the done checkbox to complete the set and add a new one.
+            </div>
+          </div>
+          <Button
+            variant={longPressDoneAddsNext ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setLongPressDoneAddsNext((prev) => !prev)}
+            aria-pressed={longPressDoneAddsNext}
+          >
+            {longPressDoneAddsNext ? "On" : "Off"}
           </Button>
         </div>
 
@@ -2120,7 +2260,9 @@ function SettingsView({
         settings.exercise_picker_auto_focus ?? ""
       }::${settings.exercise_picker_filter_active_gym ?? ""}::${
         settings.exercise_picker_most_used_first ?? ""
-      }::${settings.show_rest_timer ?? ""}`
+      }::${settings.show_rest_timer ?? ""}::${
+        settings.long_press_done_adds_next ?? ""
+      }`
     : "loading";
 
   return (
