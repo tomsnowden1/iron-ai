@@ -492,30 +492,36 @@
 
   .workout-sets-grid {
     display: grid;
-    gap: var(--space-2);
+    gap: var(--space-1);
+    grid-auto-rows: minmax(48px, auto);
+    overflow-anchor: none;
+    --workout-set-columns: 36px minmax(0, 1fr) minmax(72px, 96px) minmax(72px, 96px) 140px;
   }
 
   .workout-sets-header-row {
     display: grid;
-    grid-template-columns: 36px minmax(0, 1fr) minmax(64px, 90px) minmax(64px, 90px) 140px;
+    grid-template-columns: var(--workout-set-columns);
     gap: var(--space-2);
     font-size: var(--text-xs);
     color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
-    padding: 0 var(--space-1);
+    padding: 0 var(--space-2);
+    min-height: 32px;
+    align-items: center;
   }
 
   .workout-set-row {
     display: grid;
-    grid-template-columns: 36px minmax(0, 1fr) minmax(64px, 90px) minmax(64px, 90px) 140px;
+    grid-template-columns: var(--workout-set-columns);
     gap: var(--space-2);
     align-items: center;
-    padding: var(--space-2);
+    padding: var(--space-1) var(--space-2);
     border: 1px solid var(--color-border-subtle);
     border-radius: var(--radius-md);
     background: var(--color-surface);
+    min-height: 48px;
   }
 
   .workout-set-row--warmup {
@@ -573,6 +579,10 @@
     align-items: center;
     justify-content: flex-end;
     gap: var(--space-2);
+  }
+
+  .workout-set-input {
+    min-width: 0;
   }
 
   .set-done {
@@ -1314,9 +1324,8 @@
   }
 
   @media (max-width: 640px) {
-    .workout-sets-header-row,
-    .workout-set-row {
-      grid-template-columns: 32px minmax(0, 1fr) minmax(52px, 70px) minmax(52px, 70px)
+    .workout-sets-grid {
+      --workout-set-columns: 32px minmax(0, 1fr) minmax(52px, 70px) minmax(52px, 70px)
         minmax(96px, 1fr);
     }
 
