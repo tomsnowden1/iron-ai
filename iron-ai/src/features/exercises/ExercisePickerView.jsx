@@ -28,10 +28,10 @@ function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
 }
 
-function buildEquipmentOptions(exercises, equipmentMap) {
+function buildEquipmentOptions(exercises, equipmentMap, equipmentIdSet) {
   const ids = new Set();
   exercises.forEach((exercise) => {
-    const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
+    const { requiredEquipmentIds } = getNormalizedEquipment(exercise, equipmentIdSet);
     requiredEquipmentIds.forEach((id) => ids.add(id));
   });
   const options = Array.from(ids)
@@ -94,6 +94,10 @@ export default function ExercisePickerView({
     () => (equipmentList instanceof Map ? equipmentList : getEquipmentMap(equipmentList ?? [])),
     [equipmentList]
   );
+  const equipmentIdSet = useMemo(
+    () => new Set(Array.from(equipmentMap.keys())),
+    [equipmentMap]
+  );
 
   const excludeSet = useMemo(() => {
     if (!excludeExerciseIds) return new Set();
@@ -124,8 +128,8 @@ export default function ExercisePickerView({
     [availableExercises]
   );
   const equipmentOptions = useMemo(
-    () => buildEquipmentOptions(availableExercises, equipmentMap),
-    [availableExercises, equipmentMap]
+    () => buildEquipmentOptions(availableExercises, equipmentMap, equipmentIdSet),
+    [availableExercises, equipmentIdSet, equipmentMap]
   );
   const typeOptions = useMemo(
     () => buildTypeOptions(availableExercises),
@@ -147,7 +151,7 @@ export default function ExercisePickerView({
     }
     if (selectedEquipment) {
       filtered = filtered.filter((exercise) => {
-        const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
+        const { requiredEquipmentIds } = getNormalizedEquipment(exercise, equipmentIdSet);
         return requiredEquipmentIds.includes(selectedEquipment);
       });
     }
@@ -172,6 +176,7 @@ export default function ExercisePickerView({
     activeSpace,
     availableExercises,
     equipmentMap,
+    equipmentIdSet,
     filterByActiveGym,
     hasActiveGym,
     searchQuery,

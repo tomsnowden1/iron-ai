@@ -5,13 +5,15 @@ import { normalizeString, normalizeStringArray, slugify } from "./seedUtils.js";
 const exerciseSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
-  primaryMuscles: z.array(z.string().min(1)).min(1),
-  equipment: z.array(z.string().min(1)).min(1),
-  instructions: z.array(z.string().min(1)).min(1),
+  primaryMuscles: z.array(z.string().min(1)),
+  equipment: z.array(z.string().min(1)),
+  instructions: z.array(z.string().min(1)),
   aliases: z.array(z.string()).optional(),
   secondaryMuscles: z.array(z.string()).optional(),
   gotchas: z.array(z.string()).optional(),
   commonMistakes: z.array(z.string()).optional(),
+  progressions: z.array(z.string()).optional(),
+  regressions: z.array(z.string()).optional(),
   category: z.string().optional(),
   pattern: z.string().optional(),
   status: z.string().optional(),
@@ -28,7 +30,14 @@ const exerciseSchema = z.object({
 });
 
 function normalizeSeedArray(value) {
-  return normalizeStringArray(value);
+  const list = Array.isArray(value) ? value : value ? [value] : [];
+  const expanded = list.flatMap((item) => {
+    if (typeof item === "string" && item.includes("\n")) {
+      return item.split(/\r?\n+/);
+    }
+    return item;
+  });
+  return normalizeStringArray(expanded);
 }
 
 export function normalizeSeedRecord(record, now = Date.now()) {
@@ -47,28 +56,47 @@ export function normalizeSeedRecord(record, now = Date.now()) {
   const primaryMuscles = normalizeSeedArray(
     record?.primaryMuscles ??
       record?.primary_muscles ??
+      record?.primary_muscle ??
+      record?.primary ??
       (record?.muscle_group ? [record.muscle_group] : [])
   );
   const secondaryMuscles = normalizeSeedArray(
-    record?.secondaryMuscles ?? record?.secondary_muscles
+    record?.secondaryMuscles ??
+      record?.secondary_muscles ??
+      record?.secondary_muscle ??
+      record?.secondary
   );
   const equipment = normalizeSeedArray(
     record?.equipment ??
       record?.equipmentList ??
       record?.requiredEquipment ??
       record?.required_equipment ??
+      record?.equipment_list ??
+      record?.equipment_required ??
       record?.equipment_ids
   );
   const aliases = normalizeSeedArray(
     record?.aliases ?? record?.alternativeNames ?? record?.aka
   );
-  const instructions = normalizeSeedArray(record?.instructions ?? record?.steps);
+  const instructions = normalizeSeedArray(
+    record?.instructions ?? record?.steps ?? record?.execution ?? record?.howTo
+  );
   const gotchas = normalizeSeedArray(record?.gotchas ?? record?.tips ?? record?.cues);
   const commonMistakes = normalizeSeedArray(
-    record?.commonMistakes ?? record?.common_mistakes
+    record?.commonMistakes ?? record?.common_mistakes ?? record?.mistakes
   );
-  const category = normalizeString(record?.category ?? record?.type ?? record?.movement);
-  const pattern = normalizeString(record?.pattern ?? record?.mechanic ?? record?.force);
+  const progressions = normalizeSeedArray(
+    record?.progressions ?? record?.progression ?? record?.advanced_exercises
+  );
+  const regressions = normalizeSeedArray(
+    record?.regressions ?? record?.regression ?? record?.beginner_exercises
+  );
+  const category = normalizeString(
+    record?.category ?? record?.type ?? record?.movement ?? record?.bodyPart
+  );
+  const pattern = normalizeString(
+    record?.pattern ?? record?.mechanic ?? record?.mechanics ?? record?.force
+  );
   const status = normalizeString(record?.status) || "extended";
   const youtubeSearchQuery =
     normalizeString(record?.youtubeSearchQuery) ||
@@ -92,13 +120,15 @@ export function normalizeSeedRecord(record, now = Date.now()) {
     instructions,
     gotchas,
     commonMistakes,
+    progressions,
+    regressions,
     category,
     pattern,
     status,
     youtubeSearchQuery,
     youtubeVideoId,
     media,
-    source: normalizeString(record?.source) || "seed",
+    source: normalizeString(record?.source) || "free-exercise-db",
     sourceKey: externalId,
     externalId,
     is_custom: false,

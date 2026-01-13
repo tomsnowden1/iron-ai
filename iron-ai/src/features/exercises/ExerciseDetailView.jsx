@@ -147,6 +147,10 @@ export default function ExerciseDetailView({
     () => getEquipmentMap(equipmentList ?? []),
     [equipmentList]
   );
+  const equipmentIdSet = useMemo(
+    () => new Set((equipmentList ?? []).map((item) => item.id)),
+    [equipmentList]
+  );
   const activeSpace = useMemo(
     () => resolveActiveSpace(workoutSpaces ?? [], settings?.active_space_id ?? null),
     [settings?.active_space_id, workoutSpaces]
@@ -157,7 +161,7 @@ export default function ExerciseDetailView({
   const instructionsData = getExerciseInstructions(exercise);
   const gotchasData = getExerciseGotchas(exercise);
   const videoUrl = getExerciseVideoUrl(exercise);
-  const normalizedEquipment = getNormalizedEquipment(exercise);
+  const normalizedEquipment = getNormalizedEquipment(exercise, equipmentIdSet);
   const youtubeSearchQuery =
     exercise?.youtubeSearchQuery ??
     `${exercise?.name ?? "exercise"} exercise form cues`;
@@ -258,6 +262,14 @@ export default function ExerciseDetailView({
     () => new Map((allExercises ?? []).map((ex) => [ex.id, ex])),
     [allExercises]
   );
+  const exerciseStableIdMap = useMemo(
+    () => new Map((allExercises ?? []).map((ex) => [ex.stableId, ex])),
+    [allExercises]
+  );
+  const exerciseSlugMap = useMemo(
+    () => new Map((allExercises ?? []).map((ex) => [ex.slug, ex])),
+    [allExercises]
+  );
 
   const progressions = useMemo(() => {
     const list = Array.isArray(exercise?.progressions) ? exercise.progressions : [];
@@ -267,6 +279,10 @@ export default function ExerciseDetailView({
         if (typeof item === "string") {
           const parsed = Number(item);
           if (!Number.isNaN(parsed)) return exerciseMap.get(parsed) ?? null;
+          const stableMatch = exerciseStableIdMap.get(item);
+          if (stableMatch) return stableMatch;
+          const slugMatch = exerciseSlugMap.get(item);
+          if (slugMatch) return slugMatch;
           return (
             allExercises ?? []
           ).find((ex) => String(ex.name ?? "").toLowerCase() === item.toLowerCase()) ?? null;
@@ -280,7 +296,13 @@ export default function ExerciseDetailView({
       .filter(Boolean)
       .map((item) => ({ id: item.id, name: item.name ?? "Exercise" }));
     return resolved;
-  }, [allExercises, exercise?.progressions, exerciseMap]);
+  }, [
+    allExercises,
+    exercise?.progressions,
+    exerciseMap,
+    exerciseSlugMap,
+    exerciseStableIdMap,
+  ]);
 
   const regressions = useMemo(() => {
     const list = Array.isArray(exercise?.regressions) ? exercise.regressions : [];
@@ -290,6 +312,10 @@ export default function ExerciseDetailView({
         if (typeof item === "string") {
           const parsed = Number(item);
           if (!Number.isNaN(parsed)) return exerciseMap.get(parsed) ?? null;
+          const stableMatch = exerciseStableIdMap.get(item);
+          if (stableMatch) return stableMatch;
+          const slugMatch = exerciseSlugMap.get(item);
+          if (slugMatch) return slugMatch;
           return (
             allExercises ?? []
           ).find((ex) => String(ex.name ?? "").toLowerCase() === item.toLowerCase()) ?? null;
@@ -303,7 +329,13 @@ export default function ExerciseDetailView({
       .filter(Boolean)
       .map((item) => ({ id: item.id, name: item.name ?? "Exercise" }));
     return resolved;
-  }, [allExercises, exercise?.regressions, exerciseMap]);
+  }, [
+    allExercises,
+    exercise?.regressions,
+    exerciseMap,
+    exerciseSlugMap,
+    exerciseStableIdMap,
+  ]);
 
   const fallbackAlternatives = useMemo(() => {
     if (!exercise || !allExercises?.length) return [];
@@ -425,7 +457,7 @@ export default function ExerciseDetailView({
                   Open video demo
                 </a>
               ) : (
-                <div className="template-meta">Video placeholder</div>
+                <div className="template-meta">No video yet.</div>
               )}
             </div>
             <div className="exercise-overview__meta">
@@ -513,14 +545,15 @@ export default function ExerciseDetailView({
           <div className="ui-section-title">How to perform</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          {instructionsData.isFallback ? (
-            <div className="template-meta">General cues (add custom steps later).</div>
-          ) : null}
-          <ol className="exercise-steps">
-            {instructionsData.steps.map((step, index) => (
-              <li key={`${step}-${index}`}>{step}</li>
-            ))}
-          </ol>
+          {instructionsData.steps.length ? (
+            <ol className="exercise-steps">
+              {instructionsData.steps.map((step, index) => (
+                <li key={`${step}-${index}`}>{step}</li>
+              ))}
+            </ol>
+          ) : (
+            <div className="template-meta">No instructions yet.</div>
+          )}
         </CardBody>
       </Card>
 
@@ -529,14 +562,15 @@ export default function ExerciseDetailView({
           <div className="ui-section-title">Gotchas</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          {gotchasData.isFallback ? (
-            <div className="template-meta">Typical pitfalls (customize as needed).</div>
-          ) : null}
-          <ul className="exercise-mistakes">
-            {gotchasData.gotchas.map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
-            ))}
-          </ul>
+          {gotchasData.gotchas.length ? (
+            <ul className="exercise-mistakes">
+              {gotchasData.gotchas.map((item, index) => (
+                <li key={`${item}-${index}`}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="template-meta">No gotchas yet.</div>
+          )}
         </CardBody>
       </Card>
 

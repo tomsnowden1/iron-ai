@@ -37,8 +37,16 @@ export function normalizeFreeExerciseRecord(record, now = Date.now()) {
   const equipment = toArray(record?.equipment ?? record?.equipmentList);
   const category = toString(record?.category ?? record?.type ?? record?.movement);
   const pattern = toString(record?.pattern ?? record?.mechanic ?? record?.force);
-  const instructions = toArray(record?.instructions ?? record?.steps);
+  const instructions = toArray(
+    record?.instructions ?? record?.steps ?? record?.execution ?? record?.howTo
+  );
   const gotchas = toArray(record?.gotchas ?? record?.tips ?? record?.cues);
+  const progressions = toArray(
+    record?.progressions ?? record?.progression ?? record?.advanced_exercises
+  );
+  const regressions = toArray(
+    record?.regressions ?? record?.regression ?? record?.beginner_exercises
+  );
 
   const youtubeSearchQuery =
     toString(record?.youtubeSearchQuery) || `${name} exercise form cues`;
@@ -60,6 +68,8 @@ export function normalizeFreeExerciseRecord(record, now = Date.now()) {
     instructions,
     gotchas,
     commonMistakes: gotchas,
+    progressions,
+    regressions,
     youtubeSearchQuery,
     youtubeVideoId,
     source: "free-exercise-db",

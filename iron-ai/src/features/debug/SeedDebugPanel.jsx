@@ -4,10 +4,13 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { db } from "../../db";
 import {
   importExercises,
+  recomputeExerciseLinks,
+  repairSeedExercises,
   SEED_MIN_COUNT,
   SEED_VERSION,
   STARTER_MIN_COUNT,
 } from "../../seed/exerciseSeed";
+import { getExercisePrimaryMuscles } from "../../exercises/data";
 import { Button, Card, CardBody, Input, Label, PageHeader } from "../../components/ui";
 
 const META_KEYS = [
@@ -20,6 +23,12 @@ const META_KEYS = [
   "seed.lastValidationReport",
   "seed.auditLog",
   "seed.lastSourceUsed",
+  "seed.lastRepairAt",
+  "seed.lastRepairStatus",
+  "seed.lastRepairMessage",
+  "seed.lastRepairStats",
+  "seed.lastLinkerAt",
+  "seed.lastLinkerStats",
 ];
 
 function useSeedMeta() {
@@ -39,6 +48,12 @@ function useSeedMeta() {
       lastValidationReport: map.get("seed.lastValidationReport") ?? null,
       auditLog: map.get("seed.auditLog") ?? [],
       lastSourceUsed: map.get("seed.lastSourceUsed") ?? null,
+      lastRepairAt: map.get("seed.lastRepairAt") ?? null,
+      lastRepairStatus: map.get("seed.lastRepairStatus") ?? null,
+      lastRepairMessage: map.get("seed.lastRepairMessage") ?? null,
+      lastRepairStats: map.get("seed.lastRepairStats") ?? null,
+      lastLinkerAt: map.get("seed.lastLinkerAt") ?? null,
+      lastLinkerStats: map.get("seed.lastLinkerStats") ?? null,
     };
   }, [items]);
 }
@@ -54,9 +69,38 @@ export default function SeedDebugPanel({ onBack }) {
     () => db.table("exercises").filter((ex) => ex.is_custom).count(),
     []
   );
+  const missingInstructionsCount = useLiveQuery(
+    () =>
+      db
+        .table("exercises")
+        .filter((ex) => !(Array.isArray(ex.instructions) && ex.instructions.length))
+        .count(),
+    []
+  );
+  const missingEquipmentCount = useLiveQuery(
+    () =>
+      db
+        .table("exercises")
+        .filter((ex) => !(Array.isArray(ex.equipment) && ex.equipment.length))
+        .count(),
+    []
+  );
+  const missingPrimaryMusclesCount = useLiveQuery(
+    () =>
+      db
+        .table("exercises")
+        .filter((ex) => getExercisePrimaryMuscles(ex).length === 0)
+        .count(),
+    []
+  );
   const [progress, setProgress] = useState({ stage: "idle", startedAt: null });
   const [dryRunResult, setDryRunResult] = useState(null);
   const [dryRunError, setDryRunError] = useState(null);
+  const [repairProgress, setRepairProgress] = useState({ stage: "idle", startedAt: null });
+  const [repairResult, setRepairResult] = useState(null);
+  const [repairError, setRepairError] = useState(null);
+  const [linkerResult, setLinkerResult] = useState(null);
+  const [linkerError, setLinkerError] = useState(null);
   const [resetText, setResetText] = useState("");
 
   const runImport = useCallback(
@@ -81,6 +125,35 @@ export default function SeedDebugPanel({ onBack }) {
     },
     []
   );
+
+  const runRepair = useCallback(async ({ dryRun = false } = {}) => {
+    setRepairError(null);
+    setRepairResult(null);
+    setRepairProgress({ stage: "starting", startedAt: Date.now() });
+    const result = await repairSeedExercises({
+      dryRun,
+      onProgress: (next) => setRepairProgress(next),
+    });
+    if (result.status === "error") {
+      setRepairError(result.error ?? "Repair failed.");
+    } else {
+      setRepairResult(result);
+    }
+    setRepairProgress((prev) => ({ ...prev, stage: "done" }));
+    return result;
+  }, []);
+
+  const runLinker = useCallback(async ({ dryRun = false } = {}) => {
+    setLinkerError(null);
+    setLinkerResult(null);
+    const result = await recomputeExerciseLinks({ dryRun });
+    if (result.status === "error") {
+      setLinkerError(result.error ?? "Linker failed.");
+    } else {
+      setLinkerResult(result);
+    }
+    return result;
+  }, []);
 
   const handleReset = useCallback(async () => {
     if (resetText.trim() !== "RESET") return;
@@ -150,6 +223,15 @@ export default function SeedDebugPanel({ onBack }) {
             <div className="template-meta">Total: {exerciseCount ?? "—"}</div>
             <div className="template-meta">Seeded: {seededCount ?? "—"}</div>
             <div className="template-meta">Custom: {customCount ?? "—"}</div>
+            <div className="template-meta">
+              Missing instructions: {missingInstructionsCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Missing equipment: {missingEquipmentCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Missing primary muscles: {missingPrimaryMusclesCount ?? "—"}
+            </div>
           </CardBody>
         </Card>
       </div>
@@ -203,6 +285,59 @@ export default function SeedDebugPanel({ onBack }) {
 
       <Card>
         <CardBody className="ui-stack">
+          <div className="ui-section-title">Repair controls</div>
+          <div className="template-meta">Stage: {repairProgress.stage}</div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={() => runRepair({ dryRun: true })}>
+              Dry-run repair
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => runRepair({})}>
+              Repair seeded exercises
+            </Button>
+          </div>
+          {repairError ? <div className="template-meta">Repair error: {repairError}</div> : null}
+          {repairResult && repairResult.status === "dry-run" ? (
+            <div className="template-meta">
+              Dry-run: {repairResult.totalNormalized ?? 0} normalized records ready to
+              repair.
+            </div>
+          ) : null}
+          {repairResult && repairResult.status === "success" ? (
+            <div className="template-meta">
+              Updated {repairResult.updated ?? 0} exercises (cleared{" "}
+              {repairResult.clearedPlaceholders ?? 0} placeholders).
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Linker controls</div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={() => runLinker({ dryRun: true })}>
+              Dry-run linker
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => runLinker({})}>
+              Recompute progressions/regressions
+            </Button>
+          </div>
+          {linkerError ? <div className="template-meta">Linker error: {linkerError}</div> : null}
+          {linkerResult && linkerResult.status === "dry-run" ? (
+            <div className="template-meta">
+              Dry-run: would update {linkerResult.updated ?? 0} exercises.
+            </div>
+          ) : null}
+          {linkerResult && linkerResult.status === "success" ? (
+            <div className="template-meta">
+              Updated {linkerResult.updated ?? 0} exercises.
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
           <div className="ui-section-title">Last import stats</div>
           {lastStats ? (
             <div className="ui-stack">
@@ -216,6 +351,41 @@ export default function SeedDebugPanel({ onBack }) {
             </div>
           ) : (
             <div className="template-meta">No stats recorded yet.</div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Last repair stats</div>
+          {meta.lastRepairStats ? (
+            <div className="ui-stack">
+              <div className="template-meta">Total seed: {meta.lastRepairStats.totalSeed ?? 0}</div>
+              <div className="template-meta">Updated: {meta.lastRepairStats.updated ?? 0}</div>
+              <div className="template-meta">Skipped: {meta.lastRepairStats.skipped ?? 0}</div>
+              <div className="template-meta">
+                Cleared placeholders: {meta.lastRepairStats.clearedPlaceholders ?? 0}
+              </div>
+            </div>
+          ) : (
+            <div className="template-meta">No repair stats recorded yet.</div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Last linker stats</div>
+          {meta.lastLinkerStats ? (
+            <div className="ui-stack">
+              <div className="template-meta">Updated: {meta.lastLinkerStats.updated ?? 0}</div>
+              <div className="template-meta">Skipped: {meta.lastLinkerStats.skipped ?? 0}</div>
+              {meta.lastLinkerStats.error ? (
+                <div className="template-meta">Error: {meta.lastLinkerStats.error}</div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="template-meta">No linker stats recorded yet.</div>
           )}
         </CardBody>
       </Card>

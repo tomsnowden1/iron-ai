@@ -56,6 +56,7 @@ export default function ExerciseList({
 }) {
   const equipmentMap =
     equipmentList instanceof Map ? equipmentList : getEquipmentMap(equipmentList ?? []);
+  const equipmentIdSet = new Set(equipmentMap.keys());
 
   if (!exercises.length) {
     return <div className="empty-state">{emptyLabel ?? "No exercises match."}</div>;
@@ -65,7 +66,7 @@ export default function ExerciseList({
     <div className="exercise-list">
       {exercises.map((exercise) => {
         const primaryMuscles = getExercisePrimaryMuscles(exercise);
-        const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
+        const { requiredEquipmentIds } = getNormalizedEquipment(exercise, equipmentIdSet);
         const equipmentIds = getExerciseEquipment(exercise);
         const equipmentLabels = equipmentIds.length
           ? equipmentIds.map((id) => equipmentMap.get(id)?.name ?? id)
@@ -74,6 +75,7 @@ export default function ExerciseList({
           primaryMuscles.length ? primaryMuscles.join(", ") : null,
           equipmentLabels.length ? equipmentLabels.join(", ") : null,
         ].filter(Boolean);
+        const metaLabel = metaParts.length ? metaParts.join(" · ") : "—";
         const availability = formatAvailability(exercise, activeSpace, equipmentMap);
         const isCustom = exercise?.source === "user" || exercise?.is_custom;
 
@@ -89,11 +91,7 @@ export default function ExerciseList({
                   <span>{exercise.name ?? "Unknown Exercise"}</span>
                   {isCustom ? <span className="pill pill--custom">Custom</span> : null}
                 </div>
-                {metaParts.length ? (
-                  <div className="exercise-row__meta">
-                    {metaParts.join(" · ")}
-                  </div>
-                ) : null}
+                <div className="exercise-row__meta">{metaLabel}</div>
                 <EquipmentPills
                   equipmentIds={requiredEquipmentIds}
                   equipmentMap={equipmentMap}
