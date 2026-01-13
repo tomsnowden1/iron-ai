@@ -31,6 +31,7 @@ import {
   SEED_MIN_COUNT,
   resetExerciseSeedVersion,
   seedExercisesIfNeeded,
+  repairSeededExercises,
 } from "./seed/exerciseSeed";
 import {
   Button,
@@ -3329,6 +3330,7 @@ export default function App() {
     const runSeed = async () => {
       setExerciseSeedState({ status: "loading" });
       const result = await seedExercisesIfNeeded();
+      await repairSeededExercises({ force: false });
       if (cancelled) return;
       setExerciseSeedState({
         status: result?.status ?? "error",

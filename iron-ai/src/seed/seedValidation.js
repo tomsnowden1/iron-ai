@@ -25,6 +25,7 @@ const exerciseSchema = z.object({
     })
     .optional(),
   source: z.string().optional(),
+  sourceId: z.string().nullable().optional(),
   sourceKey: z.string().nullable().optional(),
   externalId: z.string().nullable().optional(),
 });
@@ -49,7 +50,8 @@ export function normalizeSeedRecord(record, now = Date.now()) {
   const name = normalizeString(rawName);
   const rawId =
     record?.externalId ?? record?.external_id ?? record?.id ?? record?._id;
-  const externalId = normalizeString(rawId) || null;
+  const sourceId = normalizeString(rawId) || null;
+  const externalId = sourceId;
   const baseSlug = slugify(name || externalId || "exercise");
   const slug = baseSlug || "exercise";
 
@@ -129,6 +131,7 @@ export function normalizeSeedRecord(record, now = Date.now()) {
     youtubeVideoId,
     media,
     source: normalizeString(record?.source) || "free-exercise-db",
+    sourceId,
     sourceKey: externalId,
     externalId,
     is_custom: false,
