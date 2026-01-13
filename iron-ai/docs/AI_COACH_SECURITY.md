@@ -5,6 +5,7 @@
 - Anyone with access to the device or browser storage can read it.
 - Use a low-privilege key when possible and rotate keys periodically.
 - The key is never logged by the app.
+- The Settings “Test API Key” button calls OpenAI directly from the browser.
 
 ## Best Practices
 - Keep the key private and do not share screenshots.
