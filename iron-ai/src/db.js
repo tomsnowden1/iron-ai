@@ -6,6 +6,10 @@ import { computeStableId } from "./seed/seedUtils";
 
 export const db = new Dexie("ironAI");
 const COACH_ACTIVE_GYM_KEY = "coach.activeGymId.v1";
+const MIGRATION_META_KEYS = {
+  version: "migration.version",
+  lastMigrationAt: "migration.lastMigrationAt",
+};
 
 function normalizeCoachGymId(value) {
   if (value == null) return null;
@@ -485,6 +489,21 @@ db.on("populate", async () => {
     })
   );
   await db.table("exercises").bulkAdd(starterRecords);
+});
+
+db.on("ready", async () => {
+  try {
+    const metaTable = db.table("meta");
+    const stored = await metaTable.get(MIGRATION_META_KEYS.version);
+    const storedVersion = stored?.value ?? null;
+    if (storedVersion !== db.verno) {
+      const now = Date.now();
+      await metaTable.put({ key: MIGRATION_META_KEYS.version, value: db.verno });
+      await metaTable.put({ key: MIGRATION_META_KEYS.lastMigrationAt, value: now });
+    }
+  } catch (error) {
+    console.warn("Unable to store migration metadata.", error);
+  }
 });
 
 // --------------------

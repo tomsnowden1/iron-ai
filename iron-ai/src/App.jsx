@@ -23,6 +23,7 @@ import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
 import SeedDebugPanel from "./features/debug/SeedDebugPanel";
+import DiagnosticsHub from "./features/debug/DiagnosticsHub";
 import GymsView from "./features/gyms/GymsView";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
@@ -2753,6 +2754,7 @@ function MoreView({
   pendingNavigation,
   onPendingNavigationConsumed,
   debugPanelEnabled,
+  diagnosticsEnabled,
   onToggleDebugPanel,
   onOpenDebugPanel,
 }) {
@@ -2813,6 +2815,10 @@ function MoreView({
     return <SeedDebugPanel onBack={() => setSection("home")} />;
   }
 
+  if (section === "diagnostics") {
+    return <DiagnosticsHub onBack={() => setSection("home")} />;
+  }
+
   return (
     <div className="page">
       <PageHeader title="More" subtitle="Library tools, gyms, and preferences." />
@@ -2858,6 +2864,21 @@ function MoreView({
               <div className="template-meta">Seed diagnostics and controls.</div>
               <Button variant="secondary" size="sm" onClick={() => setSection("debug")}>
                 Open debug
+              </Button>
+            </CardBody>
+          </Card>
+        ) : null}
+        {diagnosticsEnabled ? (
+          <Card>
+            <CardBody className="ui-stack">
+              <div className="ui-strong">Diagnostics</div>
+              <div className="template-meta">Local diagnostics report.</div>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setSection("diagnostics")}
+              >
+                Open diagnostics
               </Button>
             </CardBody>
           </Card>
@@ -3191,6 +3212,14 @@ export default function App() {
     if (import.meta.env.DEV) return true;
     return window.localStorage.getItem("ironai.debugPanelEnabled") === "true";
   });
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(() => {
+    if (import.meta.env.DEV) return true;
+    const params = new URLSearchParams(window.location.search);
+    return (
+      params.get("debug") === "1" ||
+      window.localStorage.getItem("ironai.diagnosticsEnabled") === "true"
+    );
+  });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -3264,6 +3293,15 @@ export default function App() {
       timers.forEach((timer) => clearTimeout(timer));
       timers.clear();
     };
+  }, []);
+
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("debug") === "1") {
+      window.localStorage.setItem("ironai.diagnosticsEnabled", "true");
+      setDiagnosticsEnabled(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -3505,6 +3543,7 @@ export default function App() {
             pendingNavigation={pendingMoreNavigation}
             onPendingNavigationConsumed={() => setPendingMoreNavigation(null)}
             debugPanelEnabled={debugPanelEnabled}
+            diagnosticsEnabled={diagnosticsEnabled}
             onToggleDebugPanel={handleToggleDebugPanel}
             onOpenDebugPanel={() => openMoreSection("debug")}
           />
