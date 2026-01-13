@@ -133,6 +133,40 @@ export async function streamChatCompletion({
   return { content: content.trim(), toolCalls };
 }
 
+export async function createChatCompletion({
+  apiKey,
+  model = DEFAULT_COACH_MODEL,
+  messages,
+  responseFormat,
+  temperature = 0.2,
+  signal,
+} = {}) {
+  const body = {
+    model,
+    messages,
+    temperature,
+  };
+  if (responseFormat) {
+    body.response_format = responseFormat;
+  }
+
+  const response = await fetch(OPENAI_CHAT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return response.json();
+}
+
 export async function testOpenAIKey({ apiKey, signal } = {}) {
   const response = await fetch(OPENAI_MODELS_URL, {
     method: "GET",

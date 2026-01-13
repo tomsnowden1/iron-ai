@@ -36,6 +36,7 @@ import ExerciseDetailView from "./ExerciseDetailView";
 import ExerciseList from "./ExerciseList";
 import ExerciseHistoryDrawer from "./ExerciseHistoryDrawer";
 import CollapsibleFilters from "./CollapsibleFilters";
+import CustomExerciseEditor from "./CustomExerciseEditor";
 
 function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
@@ -93,6 +94,8 @@ export default function ExercisesExplorer({
   const [detailExerciseId, setDetailExerciseId] = useState(null);
   const [historyExercise, setHistoryExercise] = useState(null);
   const [reseeding, setReseeding] = useState(false);
+  const [customEditorOpen, setCustomEditorOpen] = useState(false);
+  const [editingExercise, setEditingExercise] = useState(null);
 
   const equipmentMap = useMemo(
     () => getEquipmentMap(equipmentList ?? []),
@@ -251,6 +254,10 @@ export default function ExercisesExplorer({
         onOpenExercise={(nextId) => setDetailExerciseId(nextId)}
         onAddExercise={onAddToWorkout}
         onLaunchCoach={onLaunchCoach}
+        onEditExercise={(exercise) => {
+          setEditingExercise(exercise);
+          setCustomEditorOpen(true);
+        }}
       />
     );
   }
@@ -261,11 +268,23 @@ export default function ExercisesExplorer({
         title="Exercises"
         subtitle="Browse the full exercise library."
         actions={
-          onBack ? (
-            <Button variant="ghost" size="sm" onClick={onBack}>
-              Back
+          <div className="ui-row ui-row--wrap">
+            {onBack ? (
+              <Button variant="ghost" size="sm" onClick={onBack}>
+                Back
+              </Button>
+            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setEditingExercise(null);
+                setCustomEditorOpen(true);
+              }}
+            >
+              Create custom exercise
             </Button>
-          ) : null
+          </div>
         }
       />
 
@@ -300,6 +319,19 @@ export default function ExercisesExplorer({
                     Clear
                   </button>
                 ) : null}
+              </div>
+              <div className="exercise-editor__inline-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => {
+                    setEditingExercise(null);
+                    setCustomEditorOpen(true);
+                  }}
+                >
+                  + Custom exercise
+                </Button>
               </div>
               <button
                 type="button"
@@ -499,6 +531,19 @@ export default function ExercisesExplorer({
         exerciseName={historyExercise?.name ?? null}
         stickyNote={historyExercise?.stickyNote ?? null}
         onClose={() => setHistoryExercise(null)}
+      />
+
+      <CustomExerciseEditor
+        open={customEditorOpen}
+        exercise={editingExercise}
+        equipmentList={equipmentList}
+        allExercises={exercises}
+        onClose={() => setCustomEditorOpen(false)}
+        onSaved={(exerciseId) => {
+          setCustomEditorOpen(false);
+          setEditingExercise(null);
+          if (exerciseId) setDetailExerciseId(exerciseId);
+        }}
       />
     </div>
   );
