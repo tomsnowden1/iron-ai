@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useLiveQuery } from "dexie-react-hooks";
 import {
   Button,
   Card,
@@ -13,6 +14,9 @@ import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
+import { getCoachActiveGymMeta, listWorkoutSpaces, setCoachActiveGymMeta } from "../../db";
+import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
+import BottomSheet from "../../components/ui/BottomSheet";
 
 function createMessage(id, role, content) {
   return {
@@ -47,7 +51,23 @@ function summarizeProposalResult(result) {
   return "Proposal updated.";
 }
 
-export default function CoachView({ launchContext, onLaunchContextConsumed }) {
+function equipmentCount(equipmentIds) {
+  if (!Array.isArray(equipmentIds)) return null;
+  return equipmentIds.filter((id) => id !== "bodyweight").length;
+}
+
+function formatEquipmentCount(space) {
+  const count = equipmentCount(space?.equipmentIds);
+  if (count == null) return "— equipment";
+  return `${count} equipment`;
+}
+
+export default function CoachView({
+  launchContext,
+  onLaunchContextConsumed,
+  onNotify,
+  onNavigateToGyms,
+}) {
   const { settings, apiKey, hasKey, keyStatus, coachMemoryEnabled } = useSettings();
   const memoryEnabled = coachMemoryEnabled;
   const memory = useMemo(
@@ -56,6 +76,11 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   );
 
   const [state, dispatch] = useReducer(coachReducer, initialCoachState);
+  const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
+  const sortedSpaces = useMemo(
+    () => (workoutSpaces ? sortSpacesByName(workoutSpaces) : []),
+    [workoutSpaces]
+  );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
@@ -65,6 +90,10 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextMeta, setContextMeta] = useState(null);
   const [contextLoading, setContextLoading] = useState(false);
+  const [gymPickerOpen, setGymPickerOpen] = useState(false);
+  const [activeGymId, setActiveGymId] = useState(null);
+  const [coachGymLoaded, setCoachGymLoaded] = useState(false);
+  const [coachGymHasStored, setCoachGymHasStored] = useState(false);
   const [pendingLaunchContext, setPendingLaunchContext] = useState(
     () => launchContext ?? null
   );
@@ -88,6 +117,49 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
     [hasKey, keyStatus]
   );
   const canSend = accessState.canChat && input.trim().length > 0 && !sending;
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCoachGym = async () => {
+      const result = await getCoachActiveGymMeta();
+      if (cancelled) return;
+      setActiveGymId(result.value ?? null);
+      setCoachGymLoaded(true);
+      setCoachGymHasStored(result.exists);
+    };
+    void loadCoachGym();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!coachGymLoaded || coachGymHasStored) return;
+    if (!sortedSpaces.length) return;
+    const defaultSpace = resolveActiveSpace(
+      sortedSpaces,
+      settings?.active_space_id ?? null
+    );
+    if (!defaultSpace) return;
+    setActiveGymId(defaultSpace.id ?? null);
+    setCoachGymHasStored(true);
+  }, [coachGymLoaded, coachGymHasStored, sortedSpaces, settings?.active_space_id]);
+
+  useEffect(() => {
+    if (!coachGymLoaded) return;
+    if (activeGymId == null) return;
+    if (!sortedSpaces.length) return;
+    const exists = sortedSpaces.some((space) => space.id === activeGymId);
+    if (!exists) {
+      setActiveGymId(null);
+      setCoachGymHasStored(true);
+    }
+  }, [activeGymId, coachGymLoaded, sortedSpaces]);
+
+  useEffect(() => {
+    if (!coachGymLoaded) return;
+    void setCoachActiveGymMeta(activeGymId);
+  }, [activeGymId, coachGymLoaded]);
 
   useEffect(() => {
     if (!launchContext) return;
@@ -118,6 +190,18 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
     }
   }, [contextEnabled]);
 
+  const hasGyms = sortedSpaces.length > 0;
+  const selectedGym = useMemo(
+    () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
+    [sortedSpaces, activeGymId]
+  );
+  const gymNameLabel = hasGyms
+    ? selectedGym
+      ? selectedGym.name ?? "Untitled Gym"
+      : "No gym selected"
+    : "None";
+  const gymEquipmentLabel = selectedGym ? formatEquipmentCount(selectedGym) : "— equipment";
+
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
     setContextLoading(true);
@@ -125,6 +209,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
       const { snapshot, meta } = await getCoachContextSnapshot({
         scopes: contextScopes,
         memorySummary: memoryEnabled ? memory : null,
+        activeGymId,
       });
       setContextPreview(snapshot);
       setContextMeta(meta);
@@ -134,7 +219,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
     } finally {
       setContextLoading(false);
     }
-  }, [contextEnabled, contextPreviewOpen, contextScopes, memory, memoryEnabled]);
+  }, [contextEnabled, contextPreviewOpen, contextScopes, memory, memoryEnabled, activeGymId]);
 
   useEffect(() => {
     void buildContextPreview();
@@ -179,6 +264,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
           enabled: effectiveContextEnabled,
           scopes: contextScopes,
           launchContext: pendingLaunchContext,
+          activeGymId,
         },
         memoryEnabled,
         memorySummary: memory,
@@ -308,9 +394,58 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
     });
   };
 
+  const handleSelectGym = (spaceId) => {
+    const nextId = spaceId ?? null;
+    if (nextId === activeGymId) {
+      setGymPickerOpen(false);
+      return;
+    }
+    const previousId = activeGymId;
+    setActiveGymId(nextId);
+    setGymPickerOpen(false);
+    if (!onNotify) return;
+    const nextGym = sortedSpaces.find((space) => space.id === nextId);
+    const nextLabel = nextGym?.name ?? "No gym selected";
+    onNotify(`Gym changed to ${nextLabel}`, {
+      tone: "info",
+      duration: 5000,
+      actionLabel: "Undo",
+      onAction: () => setActiveGymId(previousId ?? null),
+    });
+  };
+
   return (
     <div className="page">
       <PageHeader title="AI Coach" subtitle="Tool-enabled coaching with your data." />
+
+      <div className="coach-gym-bar">
+        <div className="coach-gym-bar__inner">
+          <div className="coach-gym-pill">
+            <span className="coach-gym-pill__label">Gym</span>
+            <span className="coach-gym-pill__name">{gymNameLabel}</span>
+            <span className="coach-gym-pill__count">({gymEquipmentLabel})</span>
+          </div>
+          <div className="coach-gym-bar__actions">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setGymPickerOpen(true)}
+              disabled={!hasGyms}
+            >
+              Change
+            </Button>
+            {!hasGyms ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => onNavigateToGyms?.({ create: true })}
+              >
+                Create a gym
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </div>
 
       <Card className="coach-card">
         <CardHeader>
@@ -552,6 +687,37 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
           </CardBody>
         </Card>
       ) : null}
+
+      <BottomSheet
+        open={gymPickerOpen}
+        onClose={() => setGymPickerOpen(false)}
+        title="Select gym"
+        ariaLabel="Select a gym"
+      >
+        {sortedSpaces.length ? (
+          <div className="coach-gym-list">
+            {sortedSpaces.map((space) => {
+              const selected = space.id === activeGymId;
+              return (
+                <button
+                  key={space.id}
+                  type="button"
+                  className={`coach-gym-option${selected ? " is-selected" : ""}`}
+                  onClick={() => handleSelectGym(space.id)}
+                >
+                  <div>
+                    <div className="ui-strong">{space.name ?? "Untitled Gym"}</div>
+                    <div className="template-meta">{formatEquipmentCount(space)}</div>
+                  </div>
+                  {selected ? <span className="pill">Selected</span> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="template-meta">No gyms saved yet.</div>
+        )}
+      </BottomSheet>
     </div>
   );
 }

@@ -10,7 +10,7 @@ import {
 } from "../db";
 import { getEquipmentMap } from "../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../equipment/engine";
-import { resolveActiveSpace } from "../workoutSpaces/logic";
+import { isSpaceExpired } from "../workoutSpaces/logic";
 import { summarizeCoachMemory } from "./memory";
 
 const DEFAULT_SESSION_LIMIT = 5;
@@ -208,6 +208,14 @@ function truncateSnapshot(snapshot, maxBytes) {
   return { snapshot: working, meta };
 }
 
+function resolveCoachActiveSpace(spaces, activeGymId) {
+  if (!Array.isArray(spaces) || spaces.length === 0) return null;
+  const validSpaces = spaces.filter((space) => !isSpaceExpired(space));
+  if (!validSpaces.length) return null;
+  if (activeGymId == null) return null;
+  return validSpaces.find((space) => space.id === activeGymId) ?? null;
+}
+
 export async function getCoachContextSnapshot(options = {}) {
   const {
     scopes = {},
@@ -216,6 +224,7 @@ export async function getCoachContextSnapshot(options = {}) {
     maxBytes = DEFAULT_MAX_BYTES,
     memorySummary = null,
     launchContext = null,
+    activeGymId = null,
   } = options;
 
   const resolvedSessionLimit = clamp(
@@ -267,7 +276,7 @@ export async function getCoachContextSnapshot(options = {}) {
     ? summarizeExerciseLibrary(allExercises, sessions)
     : null;
 
-  const settingsRow = includeSettings || includeSpaces ? await db.settings.get(1) : null;
+  const settingsRow = includeSettings ? await db.settings.get(1) : null;
   const settings = includeSettings ? buildSettingsSummary(settingsRow) : null;
   const memorySummaryData = memorySummary ? summarizeCoachMemory(memorySummary) : null;
 
@@ -277,7 +286,7 @@ export async function getCoachContextSnapshot(options = {}) {
 
   if (includeSpaces) {
     const spaces = await listWorkoutSpaces();
-    activeSpace = resolveActiveSpace(spaces, settingsRow?.active_space_id ?? null);
+    activeSpace = resolveCoachActiveSpace(spaces, activeGymId);
 
     if (activeSpace) {
       const equipmentList = await listEquipment();

@@ -106,6 +106,7 @@ export async function runCoachTurn({
 }) {
   const allowReadTools = Boolean(contextConfig?.enabled);
   const allowedTools = new Set(WRITE_TOOLS);
+  const activeGymId = contextConfig?.activeGymId ?? null;
   if (allowReadTools) {
     const scopes = contextConfig?.scopes ?? {};
     Object.entries(READ_TOOL_SCOPES).forEach(([scopeKey, toolNames]) => {
@@ -139,6 +140,7 @@ export async function runCoachTurn({
       templateLimit: contextConfig.templateLimit,
       memorySummary: memoryEnabled ? memorySummary : null,
       launchContext: contextConfig.launchContext ?? null,
+      activeGymId,
     });
     contextSnapshot = snapshot;
     debug.contextMeta = meta;
@@ -260,6 +262,7 @@ export async function runCoachTurn({
       try {
         const result = await executeTool(name, parsedArgs, {
           scopes: contextConfig?.scopes ?? {},
+          activeGymId,
         });
         toolEvents.push({
           name,

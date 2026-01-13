@@ -15,7 +15,7 @@ import {
 } from "../db";
 import { normalizeCoachMemory, upsertGoal } from "./memory";
 import { validateSchema } from "./schema";
-import { resolveActiveSpace } from "../workoutSpaces/logic";
+import { isSpaceExpired } from "../workoutSpaces/logic";
 import { getExerciseSubstitutions } from "../equipment/engine";
 
 const MAX_LIST_LIMIT = 50;
@@ -30,6 +30,14 @@ function clampLimit(value, fallback, max) {
 function parseNumber(value) {
   const parsed = Number.parseFloat(String(value));
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function resolveCoachActiveSpace(spaces, activeGymId) {
+  if (!Array.isArray(spaces) || spaces.length === 0) return null;
+  const validSpaces = spaces.filter((space) => !isSpaceExpired(space));
+  if (!validSpaces.length) return null;
+  if (activeGymId == null) return null;
+  return validSpaces.find((space) => space.id === activeGymId) ?? null;
 }
 
 async function getSessionBundles(limit) {
@@ -510,10 +518,9 @@ export const toolDefinitions = [
     inputSchema: { type: "object", properties: {} },
     outputSchema: { type: "object" },
     isWriteTool: false,
-    handler: async () => {
+    handler: async (input, context) => {
       const spaces = await listWorkoutSpaces();
-      const settings = await db.settings.get(1);
-      const active = resolveActiveSpace(spaces, settings?.active_space_id ?? null);
+      const active = resolveCoachActiveSpace(spaces, context?.activeGymId ?? null);
       if (!active) return { activeSpace: null };
       return {
         activeSpace: {
@@ -539,10 +546,9 @@ export const toolDefinitions = [
     },
     outputSchema: { type: "object" },
     isWriteTool: false,
-    handler: async ({ spaceId }) => {
+    handler: async ({ spaceId }, context) => {
       const spaces = await listWorkoutSpaces();
-      const settings = await db.settings.get(1);
-      const active = resolveActiveSpace(spaces, settings?.active_space_id ?? null);
+      const active = resolveCoachActiveSpace(spaces, context?.activeGymId ?? null);
       const target = spaceId ? await getWorkoutSpaceById(spaceId) : active;
       if (!target) return { error: "Space not found." };
       const equipment = await listEquipment();

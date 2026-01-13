@@ -4,6 +4,30 @@ import { EQUIPMENT_CATALOG } from "./equipment/catalog";
 import { inferExerciseEquipment } from "./equipment/inference";
 
 export const db = new Dexie("ironAI");
+const COACH_ACTIVE_GYM_KEY = "coach.activeGymId.v1";
+
+function normalizeCoachGymId(value) {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function readCoachGymFromStorage(storage) {
+  if (!storage) return { value: null, exists: false };
+  const raw = storage.getItem(COACH_ACTIVE_GYM_KEY);
+  if (raw == null) return { value: null, exists: false };
+  try {
+    const parsed = JSON.parse(raw);
+    return { value: normalizeCoachGymId(parsed), exists: true };
+  } catch {
+    return { value: null, exists: true };
+  }
+}
+
+function writeCoachGymToStorage(storage, value) {
+  if (!storage) return;
+  storage.setItem(COACH_ACTIVE_GYM_KEY, JSON.stringify(value));
+}
 
 /**
  * v2 (existing)
@@ -686,6 +710,40 @@ export async function setActiveWorkoutSpace(spaceId) {
     ...(settings ?? { id: 1 }),
     active_space_id: spaceId ?? null,
   });
+}
+
+export async function getCoachActiveGymMeta() {
+  try {
+    const record = await db.table("meta").get(COACH_ACTIVE_GYM_KEY);
+    if (record) {
+      return {
+        value: normalizeCoachGymId(record.value),
+        exists: true,
+      };
+    }
+  } catch {
+    // Ignore Dexie errors and fall back to local storage.
+  }
+  if (typeof window === "undefined") {
+    return { value: null, exists: false };
+  }
+  return readCoachGymFromStorage(window.localStorage);
+}
+
+export async function setCoachActiveGymMeta(nextValue) {
+  const normalized = normalizeCoachGymId(nextValue);
+  const record = {
+    key: COACH_ACTIVE_GYM_KEY,
+    value: normalized,
+    updatedAt: Date.now(),
+  };
+  try {
+    await db.table("meta").put(record);
+  } catch {
+    // Ignore Dexie errors and fall back to local storage.
+  }
+  if (typeof window === "undefined") return;
+  writeCoachGymToStorage(window.localStorage, normalized);
 }
 
 function parseRestSeconds(value, fallback = 60) {
