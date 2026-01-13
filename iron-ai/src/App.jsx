@@ -22,11 +22,16 @@ import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
 import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
+import SeedDebugPanel from "./features/debug/SeedDebugPanel";
 import GymsView from "./features/gyms/GymsView";
 import TemplatesList from "./features/templates/TemplatesList";
 import TemplateEditor from "./features/templates/TemplateEditor";
 import useTheme from "./utils/useTheme";
-import { resetExerciseSeedVersion, seedExercisesIfNeeded } from "./seed/exerciseSeed";
+import {
+  SEED_MIN_COUNT,
+  resetExerciseSeedVersion,
+  seedExercisesIfNeeded,
+} from "./seed/exerciseSeed";
 import {
   Button,
   Card,
@@ -2746,6 +2751,9 @@ function MoreView({
   setThemeMode,
   pendingNavigation,
   onPendingNavigationConsumed,
+  debugPanelEnabled,
+  onToggleDebugPanel,
+  onOpenDebugPanel,
 }) {
   const [section, setSection] = useState("home");
   const [gymInitialView, setGymInitialView] = useState(null);
@@ -2792,9 +2800,16 @@ function MoreView({
         themeMode={themeMode}
         resolvedTheme={resolvedTheme}
         setThemeMode={setThemeMode}
+        debugPanelEnabled={debugPanelEnabled}
+        onToggleDebugPanel={onToggleDebugPanel}
+        onOpenDebugPanel={onOpenDebugPanel}
         onBack={() => setSection("home")}
       />
     );
+  }
+
+  if (section === "debug") {
+    return <SeedDebugPanel onBack={() => setSection("home")} />;
   }
 
   return (
@@ -2835,6 +2850,17 @@ function MoreView({
             </Button>
           </CardBody>
         </Card>
+        {debugPanelEnabled ? (
+          <Card>
+            <CardBody className="ui-stack">
+              <div className="ui-strong">Debug tools</div>
+              <div className="template-meta">Seed diagnostics and controls.</div>
+              <Button variant="secondary" size="sm" onClick={() => setSection("debug")}>
+                Open debug
+              </Button>
+            </CardBody>
+          </Card>
+        ) : null}
       </div>
     </div>
   );
@@ -2845,6 +2871,9 @@ function SettingsView({
   themeMode,
   resolvedTheme,
   setThemeMode,
+  debugPanelEnabled,
+  onToggleDebugPanel,
+  onOpenDebugPanel,
   onBack,
 }) {
   const { settings } = useSettings();
@@ -2881,6 +2910,31 @@ function SettingsView({
         resolvedTheme={resolvedTheme}
         setThemeMode={setThemeMode}
       />
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-strong">Debug tools</div>
+          <div className="template-meta">
+            Enable the seed debug panel for diagnostics and manual imports.
+          </div>
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <div className="template-meta">
+              Debug panel: {debugPanelEnabled ? "Enabled" : "Disabled"}
+            </div>
+            <Button
+              variant={debugPanelEnabled ? "secondary" : "primary"}
+              size="sm"
+              onClick={() => onToggleDebugPanel?.(!debugPanelEnabled)}
+            >
+              {debugPanelEnabled ? "Disable" : "Enable"}
+            </Button>
+          </div>
+          {debugPanelEnabled ? (
+            <Button variant="secondary" size="sm" onClick={onOpenDebugPanel}>
+              Open debug panel
+            </Button>
+          ) : null}
+        </CardBody>
+      </Card>
     </div>
   );
 }
@@ -3132,10 +3186,32 @@ export default function App() {
   const [pendingMoreNavigation, setPendingMoreNavigation] = useState(null);
   const [exerciseSeedState, setExerciseSeedState] = useState({ status: "idle" });
   const [dbHealth, setDbHealth] = useState({ status: "idle" });
+  const [debugPanelEnabled, setDebugPanelEnabled] = useState(() => {
+    if (import.meta.env.DEV) return true;
+    return window.localStorage.getItem("ironai.debugPanelEnabled") === "true";
+  });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
   const isDev = import.meta.env.DEV;
+
+  const seedMeta = useLiveQuery(
+    () =>
+      db
+        .table("meta")
+        .where("key")
+        .anyOf(["seed.lastSeedStatus", "seed.lastSeedMessage"])
+        .toArray(),
+    []
+  );
+  const exerciseCount = useLiveQuery(() => db.table("exercises").count(), []);
+
+  const seedStatusMap = useMemo(
+    () => new Map((seedMeta ?? []).map((item) => [item.key, item.value])),
+    [seedMeta]
+  );
+  const seedLastStatus = seedStatusMap.get("seed.lastSeedStatus");
+  const seedLastMessage = seedStatusMap.get("seed.lastSeedMessage");
 
   const dismissToast = useCallback((toastId) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== toastId));
@@ -3167,6 +3243,19 @@ export default function App() {
     },
     [dismissToast]
   );
+
+  const handleToggleDebugPanel = useCallback((nextEnabled) => {
+    setDebugPanelEnabled(nextEnabled);
+    window.localStorage.setItem(
+      "ironai.debugPanelEnabled",
+      nextEnabled ? "true" : "false"
+    );
+  }, []);
+
+  const openMoreSection = useCallback((section) => {
+    setPendingMoreNavigation({ section });
+    setTab("more");
+  }, []);
 
   useEffect(() => {
     const timers = toastTimersRef.current;
@@ -3313,6 +3402,19 @@ export default function App() {
   return (
     <div className="app-shell">
       <main>
+        {(isDev || debugPanelEnabled) &&
+        seedLastStatus === "FAILURE" &&
+        (exerciseCount ?? 0) < SEED_MIN_COUNT ? (
+          <div className="db-health-banner" role="alert">
+            <div className="db-health-banner__copy">
+              <strong>Exercise seeding failed.</strong>
+              <span className="ui-muted">
+                {seedLastMessage ?? "Open debug tools for details."}
+              </span>
+            </div>
+            <Button onClick={() => openMoreSection("debug")}>Open debug</Button>
+          </div>
+        ) : null}
         {dbHealth.status === "error" && (
           <div className="db-health-banner" role="alert">
             <div className="db-health-banner__copy">
@@ -3400,6 +3502,9 @@ export default function App() {
             setThemeMode={setThemeMode}
             pendingNavigation={pendingMoreNavigation}
             onPendingNavigationConsumed={() => setPendingMoreNavigation(null)}
+            debugPanelEnabled={debugPanelEnabled}
+            onToggleDebugPanel={handleToggleDebugPanel}
+            onOpenDebugPanel={() => openMoreSection("debug")}
           />
         )}
         {!KNOWN_TABS.has(tab) && <NotFoundView onGoHome={() => setTab("workout")} />}

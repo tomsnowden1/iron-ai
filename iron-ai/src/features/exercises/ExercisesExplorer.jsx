@@ -89,7 +89,7 @@ export default function ExercisesExplorer({
   const [selectedEquipment, setSelectedEquipment] = useState("");
   const [selectedType, setSelectedType] = useState("");
   const [filterByActiveGym, setFilterByActiveGym] = useState(false);
-  const [coreOnly, setCoreOnly] = useState(true);
+  const [coreOnly, setCoreOnly] = useState(false);
   const [sortMode, setSortMode] = useState("az");
   const [detailExerciseId, setDetailExerciseId] = useState(null);
   const [historyExercise, setHistoryExercise] = useState(null);
@@ -227,7 +227,7 @@ export default function ExercisesExplorer({
     setSelectedEquipment("");
     setSelectedType("");
     setFilterByActiveGym(false);
-    setCoreOnly(true);
+    setCoreOnly(false);
     setSortMode("az");
   };
 
@@ -427,7 +427,9 @@ export default function ExercisesExplorer({
                   <div className="ui-row ui-row--between ui-row--wrap">
                     <div>
                       <div className="ui-strong">Core only</div>
-                      <div className="template-meta">Show exercises marked core.</div>
+                      <div className="template-meta">
+                        Hide extended exercises from the seeded library.
+                      </div>
                     </div>
                     <Button
                       variant={coreOnly ? "primary" : "secondary"}

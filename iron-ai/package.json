@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "npm run validate:seed && npm run generate:seed-payload",
     "build": "vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -12,13 +13,16 @@
     "test": "vitest",
     "test:run": "vitest run",
     "prepare": "git config core.hooksPath .githooks || true",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "validate:seed": "node scripts/validate-seed.mjs",
+    "generate:seed-payload": "node scripts/generate-seed-payload.mjs"
   },
   "dependencies": {
     "dexie-react-hooks": "^4.2.0",
     "lucide-react": "^0.562.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

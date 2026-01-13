@@ -2,6 +2,7 @@ import Dexie from "dexie";
 import starterExercises from "./data/starterExercises.json";
 import { EQUIPMENT_CATALOG } from "./equipment/catalog";
 import { inferExerciseEquipment } from "./equipment/inference";
+import { computeStableId } from "./seed/seedUtils";
 
 export const db = new Dexie("ironAI");
 const COACH_ACTIVE_GYM_KEY = "coach.activeGymId.v1";
@@ -367,6 +368,52 @@ db.version(8)
     });
   });
 
+/**
+ * v9 (NEW): stable exercise IDs for seed imports
+ */
+db.version(9)
+  .stores({
+    exercises:
+      "++id, &stableId, slug, name, default_sets, default_reps, muscle_group, video_url, is_custom, status, *aliases, *primaryMuscles, *secondaryMuscles, *equipment",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+    meta: "key",
+  })
+  .upgrade(async (tx) => {
+    const exercises = await tx.table("exercises").toArray();
+    const updated = await Promise.all(
+      exercises.map(async (exercise) => {
+        if (exercise.stableId) return exercise;
+        const stableId = await computeStableId({
+          externalId: exercise.externalId ?? exercise.sourceKey ?? null,
+          name: exercise.name,
+          equipment: exercise.equipment ?? [],
+          primaryMuscles: exercise.primaryMuscles ?? [],
+          pattern: exercise.pattern,
+          category: exercise.category,
+        });
+        return { ...exercise, stableId };
+      })
+    );
+    await tx.table("exercises").bulkPut(updated);
+  });
+
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
@@ -387,8 +434,8 @@ db.on("populate", async () => {
     createdAt: now,
     updatedAt: now,
   });
-  await db.table("exercises").bulkAdd(
-    starterExercises.map((ex) => {
+  const starterRecords = await Promise.all(
+    starterExercises.map(async (ex) => {
       const name = ex.name ?? "Exercise";
       const baseSlug = slugify(name);
       const primaryMuscles =
@@ -402,6 +449,14 @@ db.on("populate", async () => {
         (ex.video_url || ex.videoUrl
           ? { videoUrl: ex.video_url ?? ex.videoUrl }
           : {});
+      const stableId = await computeStableId({
+        externalId: ex.externalId ?? ex.sourceKey ?? null,
+        name,
+        equipment: ex.equipment ?? [],
+        primaryMuscles,
+        pattern: ex.pattern,
+        category: ex.category,
+      });
       return {
         ...ex,
         slug: ex.slug ?? (baseSlug || "exercise"),
@@ -419,6 +474,9 @@ db.on("populate", async () => {
           ex.youtubeSearchQuery ?? `${name ?? "exercise"} exercise form cues`,
         youtubeVideoId: ex.youtubeVideoId ?? null,
         media,
+        stableId,
+        source: ex.source ?? "starter",
+        sourceKey: ex.sourceKey ?? ex.externalId ?? null,
         is_custom: false,
         ...inferExerciseEquipment(ex),
         createdAt: now,
@@ -426,6 +484,7 @@ db.on("populate", async () => {
       };
     })
   );
+  await db.table("exercises").bulkAdd(starterRecords);
 });
 
 // --------------------
