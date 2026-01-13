@@ -1,17 +1,5 @@
 import { normalizeExerciseEquipment } from "../equipment/engine";
 
-const DEFAULT_INSTRUCTIONS = [
-  "Set up your starting position and brace your core.",
-  "Move through the full range of motion with control.",
-  "Return to the start position and repeat with steady form.",
-];
-
-const DEFAULT_MISTAKES = [
-  "Rushing the tempo or bouncing through reps.",
-  "Letting form break down near the end of the set.",
-  "Using momentum instead of controlled effort.",
-];
-
 export function getExercisePrimaryMuscles(exercise) {
   const primary = Array.isArray(exercise?.primaryMuscles)
     ? exercise.primaryMuscles.filter(Boolean)
@@ -44,23 +32,19 @@ export function getExerciseInstructions(exercise) {
   const steps = Array.isArray(exercise?.instructions)
     ? exercise.instructions.filter(Boolean)
     : [];
-  if (steps.length) return { steps, isFallback: false };
-  return { steps: DEFAULT_INSTRUCTIONS, isFallback: true };
+  return { steps, isFallback: false };
 }
 
 export function getExerciseCommonMistakes(exercise) {
   const mistakes = Array.isArray(exercise?.commonMistakes)
     ? exercise.commonMistakes.filter(Boolean)
     : [];
-  if (mistakes.length) return { mistakes, isFallback: false };
-  return { mistakes: DEFAULT_MISTAKES, isFallback: true };
+  return { mistakes, isFallback: false };
 }
 
 export function getExerciseGotchas(exercise) {
   const gotchas = Array.isArray(exercise?.gotchas) ? exercise.gotchas.filter(Boolean) : [];
-  if (gotchas.length) return { gotchas, isFallback: false };
-  const fallback = getExerciseCommonMistakes(exercise);
-  return { gotchas: fallback.mistakes, isFallback: fallback.isFallback };
+  return { gotchas, isFallback: false };
 }
 
 export function getExerciseVideoUrl(exercise) {
@@ -68,8 +52,8 @@ export function getExerciseVideoUrl(exercise) {
   return mediaUrl || exercise?.videoUrl || exercise?.video_url || "";
 }
 
-export function getNormalizedEquipment(exercise) {
-  return normalizeExerciseEquipment(exercise);
+export function getNormalizedEquipment(exercise, equipmentIdSet) {
+  return normalizeExerciseEquipment(exercise, equipmentIdSet);
 }
 
 export function getExerciseEquipment(exercise) {

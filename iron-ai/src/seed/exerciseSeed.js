@@ -1,6 +1,7 @@
 import starterExercises from "../data/starterExercises.json";
 import { db } from "../db";
 import { inferExerciseEquipment } from "../equipment/inference";
+import { buildExerciseLinks } from "./exerciseLinker";
 import {
   SEED_MIN_COUNT,
   SEED_VERSION,
@@ -28,13 +29,121 @@ const META_KEYS = {
   auditLog: "seed.auditLog",
   lastValidationReport: "seed.lastValidationReport",
   lastSourceUsed: "seed.lastSourceUsed",
+  lastRepairAt: "seed.lastRepairAt",
+  lastRepairStatus: "seed.lastRepairStatus",
+  lastRepairMessage: "seed.lastRepairMessage",
+  lastRepairStats: "seed.lastRepairStats",
+  lastLinkerAt: "seed.lastLinkerAt",
+  lastLinkerStats: "seed.lastLinkerStats",
 };
 
 const AUDIT_LOG_LIMIT = 20;
 
+const PLACEHOLDER_INSTRUCTIONS = new Set([
+  "Step 1: Perform the movement with control.",
+  "Set up your starting position and brace your core.",
+  "Move through the full range of motion with control.",
+  "Return to the start position and repeat with steady form.",
+]);
+
+const PLACEHOLDER_GOTCHAS = new Set([
+  "Rushing the tempo or bouncing through reps.",
+  "Letting form break down near the end of the set.",
+  "Using momentum instead of controlled effort.",
+]);
+
 function seedLog(level, message, meta = {}) {
   const logger = console[level] ?? console.info;
   logger(`[seed] ${message}`, meta);
+}
+
+function titleCase(value) {
+  return String(value ?? "")
+    .trim()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function sanitizeSeedList(list, placeholders) {
+  if (!Array.isArray(list)) return [];
+  const cleaned = list.filter((item) => item && !placeholders.has(item));
+  return cleaned;
+}
+
+function isPlaceholderList(list, placeholders) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  return list.every((item) => placeholders.has(item));
+}
+
+function buildEquipmentIndex(equipmentList = []) {
+  const nameToId = new Map();
+  const idSet = new Set();
+
+  equipmentList.forEach((item) => {
+    if (!item?.id) return;
+    idSet.add(item.id);
+    const idKey = normalizeString(item.id).toLowerCase();
+    if (idKey) nameToId.set(idKey, item.id);
+    const nameKey = normalizeString(item.name).toLowerCase();
+    if (nameKey) nameToId.set(nameKey, item.id);
+    (item.aliases ?? []).forEach((alias) => {
+      const aliasKey = normalizeString(alias).toLowerCase();
+      if (aliasKey) nameToId.set(aliasKey, item.id);
+    });
+  });
+
+  return { nameToId, idSet };
+}
+
+function withEquipmentAssignments(record) {
+  const hasRequired =
+    Array.isArray(record?.requiredEquipmentIds) && record.requiredEquipmentIds.length > 0;
+  const hasOptional = Array.isArray(record?.optionalEquipmentIds);
+  if (hasRequired && hasOptional) return record;
+  const inferred = inferExerciseEquipment(record);
+  return {
+    ...record,
+    requiredEquipmentIds: hasRequired ? record.requiredEquipmentIds : inferred.requiredEquipmentIds,
+    optionalEquipmentIds: hasOptional ? record.optionalEquipmentIds : inferred.optionalEquipmentIds,
+  };
+}
+
+async function resolveEquipmentIds(rawEquipment, equipmentTable) {
+  const equipmentList = await equipmentTable.toArray();
+  const { nameToId, idSet } = buildEquipmentIndex(equipmentList);
+  const ids = [];
+  const toCreate = [];
+
+  normalizeStringArray(rawEquipment).forEach((item) => {
+    const normalized = normalizeString(item).toLowerCase();
+    if (!normalized) return;
+    const existingId = nameToId.get(normalized);
+    if (existingId) {
+      ids.push(existingId);
+      return;
+    }
+    const slug = slugify(normalized) || normalized;
+    if (!slug) return;
+    if (!idSet.has(slug)) {
+      toCreate.push({
+        id: slug,
+        name: titleCase(normalized),
+        category: "accessory",
+        isPortable: true,
+        aliases: [normalized],
+      });
+      idSet.add(slug);
+    }
+    nameToId.set(normalized, slug);
+    ids.push(slug);
+  });
+
+  if (toCreate.length) {
+    await equipmentTable.bulkPut(toCreate);
+  }
+
+  return Array.from(new Set(ids));
 }
 
 async function readMeta(key) {
@@ -166,41 +275,58 @@ function mergeSeedExercise(existing, incoming, now) {
     return { merged: existing, changed: false, skipped: true };
   }
 
+  const sanitizedIncoming = {
+    ...incoming,
+    instructions: sanitizeSeedList(incoming.instructions, PLACEHOLDER_INSTRUCTIONS),
+    gotchas: sanitizeSeedList(incoming.gotchas, PLACEHOLDER_GOTCHAS),
+    commonMistakes: sanitizeSeedList(incoming.commonMistakes, PLACEHOLDER_GOTCHAS),
+  };
+
   const merged = { ...existing };
-  const setIfMissing = (key, value) => {
+  const setIfMissing = (key, value, placeholders) => {
     if (value == null) return;
     if (Array.isArray(value) && value.length === 0) return;
     if (typeof value === "string" && value.trim() === "") return;
     const current = merged[key];
     if (Array.isArray(current)) {
-      if (current.length === 0) merged[key] = value;
+      const currentIsPlaceholder = placeholders ? isPlaceholderList(current, placeholders) : false;
+      if (current.length === 0 || currentIsPlaceholder) merged[key] = value;
       return;
     }
     if (!current && current !== 0) merged[key] = value;
   };
 
-  setIfMissing("name", incoming.name);
-  setIfMissing("slug", incoming.slug);
-  setIfMissing("source", incoming.source);
-  setIfMissing("status", incoming.status);
-  setIfMissing("gotchas", incoming.gotchas);
-  setIfMissing("instructions", incoming.instructions);
-  setIfMissing("primaryMuscles", incoming.primaryMuscles);
-  setIfMissing("secondaryMuscles", incoming.secondaryMuscles);
-  setIfMissing("equipment", incoming.equipment);
-  setIfMissing("aliases", incoming.aliases);
-  setIfMissing("category", incoming.category);
-  setIfMissing("pattern", incoming.pattern);
-  setIfMissing("youtubeSearchQuery", incoming.youtubeSearchQuery);
-  if (!merged.youtubeVideoId && incoming.youtubeVideoId) {
-    merged.youtubeVideoId = incoming.youtubeVideoId;
+  setIfMissing("name", sanitizedIncoming.name);
+  setIfMissing("slug", sanitizedIncoming.slug);
+  if (!merged.source || merged.source === "seed") {
+    merged.source = sanitizedIncoming.source;
   }
-  if (!merged.media && incoming.media) {
-    merged.media = incoming.media;
+  setIfMissing("status", sanitizedIncoming.status);
+  setIfMissing("gotchas", sanitizedIncoming.gotchas, PLACEHOLDER_GOTCHAS);
+  setIfMissing("instructions", sanitizedIncoming.instructions, PLACEHOLDER_INSTRUCTIONS);
+  setIfMissing("commonMistakes", sanitizedIncoming.commonMistakes, PLACEHOLDER_GOTCHAS);
+  setIfMissing("primaryMuscles", sanitizedIncoming.primaryMuscles);
+  setIfMissing("secondaryMuscles", sanitizedIncoming.secondaryMuscles);
+  setIfMissing("equipment", sanitizedIncoming.equipment);
+  setIfMissing("aliases", sanitizedIncoming.aliases);
+  setIfMissing("category", sanitizedIncoming.category);
+  setIfMissing("pattern", sanitizedIncoming.pattern);
+  setIfMissing("progressions", sanitizedIncoming.progressions);
+  setIfMissing("regressions", sanitizedIncoming.regressions);
+  setIfMissing("youtubeSearchQuery", sanitizedIncoming.youtubeSearchQuery);
+  if (!merged.youtubeVideoId && sanitizedIncoming.youtubeVideoId) {
+    merged.youtubeVideoId = sanitizedIncoming.youtubeVideoId;
+  }
+  if (!merged.media && sanitizedIncoming.media) {
+    merged.media = sanitizedIncoming.media;
   }
   if (!merged.stableId) merged.stableId = incoming.stableId;
-  if (!merged.sourceKey && incoming.sourceKey) merged.sourceKey = incoming.sourceKey;
-  if (!merged.externalId && incoming.externalId) merged.externalId = incoming.externalId;
+  if (!merged.sourceKey && sanitizedIncoming.sourceKey) {
+    merged.sourceKey = sanitizedIncoming.sourceKey;
+  }
+  if (!merged.externalId && sanitizedIncoming.externalId) {
+    merged.externalId = sanitizedIncoming.externalId;
+  }
 
   merged.updatedAt = now;
   merged.createdAt = existing.createdAt ?? incoming.createdAt ?? now;
@@ -231,11 +357,18 @@ function normalizeSeedDefaults(record, now) {
     secondaryMuscles: isNonEmptyArray(record.secondaryMuscles)
       ? record.secondaryMuscles
       : [],
-    instructions: isNonEmptyArray(record.instructions) ? record.instructions : [],
-    commonMistakes: isNonEmptyArray(record.commonMistakes)
-      ? record.commonMistakes
-      : [],
-    gotchas: isNonEmptyArray(record.gotchas) ? record.gotchas : [],
+    instructions: sanitizeSeedList(
+      isNonEmptyArray(record.instructions) ? record.instructions : [],
+      PLACEHOLDER_INSTRUCTIONS
+    ),
+    commonMistakes: sanitizeSeedList(
+      isNonEmptyArray(record.commonMistakes) ? record.commonMistakes : [],
+      PLACEHOLDER_GOTCHAS
+    ),
+    gotchas: sanitizeSeedList(
+      isNonEmptyArray(record.gotchas) ? record.gotchas : [],
+      PLACEHOLDER_GOTCHAS
+    ),
     progressions: isNonEmptyArray(record.progressions) ? record.progressions : [],
     regressions: isNonEmptyArray(record.regressions) ? record.regressions : [],
     aliases: isNonEmptyArray(record.aliases) ? record.aliases : [],
@@ -272,7 +405,7 @@ async function ensureStarterExercises() {
         stableId,
         source: record.source ?? "starter",
         sourceKey: record.sourceKey ?? record.externalId ?? null,
-        ...inferExerciseEquipment(record),
+        ...withEquipmentAssignments(record),
       };
     })
   );
@@ -378,22 +511,36 @@ export async function importExercises({
     };
   }
 
-  const normalized = validation.normalized.map((record) => {
-    const cleaned = normalizeSeedDefaults(record, Date.now());
-    return {
-      ...cleaned,
-      source: record.source ?? "seed",
-      sourceKey: record.sourceKey ?? record.externalId ?? null,
-      externalId: record.externalId ?? null,
-      primaryMuscles: normalizeStringArray(record.primaryMuscles),
-      secondaryMuscles: normalizeStringArray(record.secondaryMuscles),
-      equipment: normalizeStringArray(record.equipment),
-      aliases: normalizeStringArray(record.aliases),
-      instructions: normalizeStringArray(record.instructions),
-      gotchas: normalizeStringArray(record.gotchas),
-      commonMistakes: normalizeStringArray(record.commonMistakes),
-    };
-  });
+  const normalized = await Promise.all(
+    validation.normalized.map(async (record) => {
+      const cleaned = normalizeSeedDefaults(record, Date.now());
+      const equipmentIds = await resolveEquipmentIds(
+        normalizeStringArray(record.equipment),
+        db.table("equipment")
+      );
+      const inferred = inferExerciseEquipment({ ...cleaned, equipment: equipmentIds });
+      const requiredEquipmentIds = equipmentIds.length
+        ? equipmentIds
+        : inferred.requiredEquipmentIds;
+      const optionalEquipmentIds = equipmentIds.length ? [] : inferred.optionalEquipmentIds;
+
+      return {
+        ...cleaned,
+        source: record.source ?? "free-exercise-db",
+        sourceKey: record.sourceKey ?? record.externalId ?? null,
+        externalId: record.externalId ?? null,
+        primaryMuscles: normalizeStringArray(record.primaryMuscles),
+        secondaryMuscles: normalizeStringArray(record.secondaryMuscles),
+        equipment: equipmentIds,
+        requiredEquipmentIds,
+        optionalEquipmentIds,
+        aliases: normalizeStringArray(record.aliases),
+        instructions: normalizeStringArray(cleaned.instructions),
+        gotchas: normalizeStringArray(cleaned.gotchas),
+        commonMistakes: normalizeStringArray(cleaned.commonMistakes),
+      };
+    })
+  );
 
   progress("hashing");
   const withStableIds = await Promise.all(
@@ -489,7 +636,7 @@ export async function importExercises({
             source: record.source ?? "seed",
             createdAt: record.createdAt ?? now,
             updatedAt: record.updatedAt ?? now,
-            ...inferExerciseEquipment(record),
+            ...withEquipmentAssignments(record),
           });
           return;
         }
@@ -507,7 +654,7 @@ export async function importExercises({
           updated += 1;
           toUpsert.push({
             ...merged,
-            ...inferExerciseEquipment(merged),
+            ...withEquipmentAssignments(merged),
           });
         } else {
           skipped += 1;
@@ -589,6 +736,8 @@ export async function importExercises({
     warnings,
   });
 
+  const linker = await recomputeExerciseLinks({ dryRun: false });
+
   return {
     status: "success",
     sourceUsed,
@@ -603,7 +752,304 @@ export async function importExercises({
     seedVersion: SEED_VERSION,
     seedHash,
     warnings,
+    linker,
   };
+}
+
+export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
+  const startedAt = Date.now();
+  const progress = (stage, detail = {}) => {
+    onProgress?.({ stage, startedAt, ...detail });
+  };
+  progress("fetching");
+
+  const fetchResult = await fetchSeedExercises();
+  if (!fetchResult.ok) {
+    const message =
+      fetchResult.errors?.map((error) => error.message).join(" | ") ||
+      fetchResult.error?.message ||
+      "Unable to load seed payload.";
+    seedLog("error", message, { errors: fetchResult.errors });
+    if (!dryRun) {
+      await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
+      await writeMeta(META_KEYS.lastRepairAt, Date.now());
+      await writeMeta(META_KEYS.lastRepairMessage, message);
+    }
+    return { status: "error", error: message };
+  }
+
+  const { payload } = fetchResult;
+  progress("validating");
+  const validation = validateSeedPayload(payload, { minCount: SEED_MIN_COUNT });
+  if (!validation.ok) {
+    const message =
+      validation.report.total < SEED_MIN_COUNT
+        ? `Seed payload must include at least ${SEED_MIN_COUNT} records (found ${validation.report.total}).`
+        : `Seed validation failed (${validation.report.invalidCount} invalid).`;
+    seedLog("error", message, { report: validation.report });
+    if (!dryRun) {
+      await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
+      await writeMeta(META_KEYS.lastRepairAt, Date.now());
+      await writeMeta(META_KEYS.lastRepairMessage, message);
+    }
+    return { status: "error", error: message, report: validation.report };
+  }
+
+  progress("normalizing");
+  const normalized = await Promise.all(
+    validation.normalized.map(async (record) => {
+      const cleaned = normalizeSeedDefaults(record, Date.now());
+      const equipmentIds = await resolveEquipmentIds(
+        normalizeStringArray(record.equipment),
+        db.table("equipment")
+      );
+      const inferred = inferExerciseEquipment({ ...cleaned, equipment: equipmentIds });
+      const requiredEquipmentIds = equipmentIds.length
+        ? equipmentIds
+        : inferred.requiredEquipmentIds;
+      const optionalEquipmentIds = equipmentIds.length ? [] : inferred.optionalEquipmentIds;
+
+      return {
+        ...cleaned,
+        source: record.source ?? "free-exercise-db",
+        sourceKey: record.sourceKey ?? record.externalId ?? null,
+        externalId: record.externalId ?? null,
+        primaryMuscles: normalizeStringArray(record.primaryMuscles),
+        secondaryMuscles: normalizeStringArray(record.secondaryMuscles),
+        equipment: equipmentIds,
+        requiredEquipmentIds,
+        optionalEquipmentIds,
+        aliases: normalizeStringArray(record.aliases),
+        instructions: normalizeStringArray(cleaned.instructions),
+        gotchas: normalizeStringArray(cleaned.gotchas),
+        commonMistakes: normalizeStringArray(cleaned.commonMistakes),
+      };
+    })
+  );
+
+  progress("hashing");
+  const withStableIds = await Promise.all(
+    normalized.map(async (record) => ({
+      ...record,
+      stableId: await computeStableId({
+        externalId: record.externalId,
+        name: record.name,
+        equipment: record.equipment,
+        primaryMuscles: record.primaryMuscles,
+        pattern: record.pattern,
+        category: record.category,
+      }),
+    }))
+  );
+
+  const dedupedMap = new Map();
+  withStableIds.forEach((record) => {
+    const existing = dedupedMap.get(record.stableId);
+    if (!existing) {
+      dedupedMap.set(record.stableId, record);
+      return;
+    }
+    const keep = scoreExercise(existing) >= scoreExercise(record) ? existing : record;
+    dedupedMap.set(record.stableId, keep);
+  });
+  const deduped = Array.from(dedupedMap.values());
+
+  if (dryRun) {
+    return {
+      status: "dry-run",
+      totalSeed: validation.report.total,
+      valid: validation.report.validCount,
+      invalid: validation.report.invalidCount,
+      totalNormalized: deduped.length,
+    };
+  }
+
+  const now = Date.now();
+  let updated = 0;
+  let skipped = 0;
+  let clearedPlaceholders = 0;
+
+  try {
+    await db.transaction("rw", db.table("exercises"), db.table("meta"), async () => {
+      const existingExercises = await db.table("exercises").toArray();
+      const existingByStableId = new Map(
+        existingExercises.map((exercise) => [exercise.stableId, exercise])
+      );
+      const existingBySourceKey = new Map(
+        existingExercises
+          .filter((exercise) => exercise.sourceKey)
+          .map((exercise) => [exercise.sourceKey, exercise])
+      );
+      const existingBySlug = new Map(
+        existingExercises
+          .filter((exercise) => exercise.slug)
+          .map((exercise) => [exercise.slug, exercise])
+      );
+
+      const toUpdate = [];
+
+      deduped.forEach((record) => {
+        const existing =
+          existingByStableId.get(record.stableId) ||
+          (record.sourceKey ? existingBySourceKey.get(record.sourceKey) : null) ||
+          (record.slug ? existingBySlug.get(record.slug) : null);
+
+        if (!existing) {
+          skipped += 1;
+          return;
+        }
+
+        const { merged, changed, skipped: skippedUpdate } = mergeSeedExercise(
+          existing,
+          record,
+          now
+        );
+        if (skippedUpdate) {
+          skipped += 1;
+          return;
+        }
+
+        const final = { ...merged };
+        let didChange = changed;
+
+        if (
+          isPlaceholderList(existing.instructions, PLACEHOLDER_INSTRUCTIONS) &&
+          !record.instructions?.length
+        ) {
+          final.instructions = [];
+          didChange = true;
+          clearedPlaceholders += 1;
+        }
+        if (
+          isPlaceholderList(existing.gotchas, PLACEHOLDER_GOTCHAS) &&
+          !record.gotchas?.length
+        ) {
+          final.gotchas = [];
+          didChange = true;
+          clearedPlaceholders += 1;
+        }
+        if (
+          isPlaceholderList(existing.commonMistakes, PLACEHOLDER_GOTCHAS) &&
+          !record.commonMistakes?.length
+        ) {
+          final.commonMistakes = [];
+          didChange = true;
+          clearedPlaceholders += 1;
+        }
+
+        if (didChange) {
+          updated += 1;
+          toUpdate.push(withEquipmentAssignments(final));
+        } else {
+          skipped += 1;
+        }
+      });
+
+      const batchSize = 500;
+      for (let i = 0; i < toUpdate.length; i += batchSize) {
+        await db.table("exercises").bulkPut(toUpdate.slice(i, i + batchSize));
+      }
+
+      await writeMeta(META_KEYS.lastRepairAt, now);
+      await writeMeta(META_KEYS.lastRepairStatus, "SUCCESS");
+      await writeMeta(
+        META_KEYS.lastRepairMessage,
+        `Repair updated ${updated} exercises (skipped ${skipped}).`
+      );
+      await writeMeta(META_KEYS.lastRepairStats, {
+        totalSeed: deduped.length,
+        updated,
+        skipped,
+        clearedPlaceholders,
+      });
+    });
+  } catch (error) {
+    const message = error?.message ?? "Seed repair failed.";
+    seedLog("error", message, { error });
+    await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
+    await writeMeta(META_KEYS.lastRepairAt, Date.now());
+    await writeMeta(META_KEYS.lastRepairMessage, message);
+    return { status: "error", error: message };
+  }
+
+  const linker = await recomputeExerciseLinks({ dryRun: false });
+
+  return {
+    status: "success",
+    updated,
+    skipped,
+    clearedPlaceholders,
+    linker,
+  };
+}
+
+export async function recomputeExerciseLinks({ dryRun = false } = {}) {
+  const now = Date.now();
+  const exercises = await db.table("exercises").toArray();
+  const linkMap = buildExerciseLinks(exercises);
+  const updates = [];
+  let updated = 0;
+  let skipped = 0;
+
+  exercises.forEach((exercise) => {
+    if (exercise?.is_custom || exercise?.source === "user") {
+      skipped += 1;
+      return;
+    }
+    const key = exercise.stableId || exercise.slug;
+    if (!key) {
+      skipped += 1;
+      return;
+    }
+    const links = linkMap.get(key);
+    if (!links) {
+      skipped += 1;
+      return;
+    }
+    const hasExisting =
+      (exercise.progressions?.length ?? 0) > 0 || (exercise.regressions?.length ?? 0) > 0;
+    if (hasExisting) {
+      skipped += 1;
+      return;
+    }
+
+    updated += 1;
+    updates.push({
+      ...exercise,
+      progressions: links.progressions,
+      regressions: links.regressions,
+      updatedAt: now,
+    });
+  });
+
+  if (dryRun) {
+    return { status: "dry-run", updated, skipped };
+  }
+
+  try {
+    await db.transaction("rw", db.table("exercises"), db.table("meta"), async () => {
+      if (updates.length) {
+        await db.table("exercises").bulkPut(updates);
+      }
+      await writeMeta(META_KEYS.lastLinkerAt, now);
+      await writeMeta(META_KEYS.lastLinkerStats, {
+        updated,
+        skipped,
+      });
+    });
+  } catch (error) {
+    const message = error?.message ?? "Linker failed.";
+    seedLog("error", message, { error });
+    await writeMeta(META_KEYS.lastLinkerAt, Date.now());
+    await writeMeta(META_KEYS.lastLinkerStats, {
+      updated: 0,
+      skipped,
+      error: message,
+    });
+    return { status: "error", error: message };
+  }
+
+  return { status: "success", updated, skipped };
 }
 
 export async function seedExercisesIfNeeded() {
