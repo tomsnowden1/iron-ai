@@ -1208,6 +1208,12 @@
     font-size: var(--text-xs);
   }
 
+  .equipment-pill--warning {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.24);
+    color: var(--color-destructive);
+  }
+
   .compat-item {
     display: flex;
     flex-direction: column;

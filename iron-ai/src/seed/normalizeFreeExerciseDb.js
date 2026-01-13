@@ -24,6 +24,7 @@ export function normalizeFreeExerciseRecord(record, now = Date.now()) {
     record?.title;
   const name = toString(rawName) || "Unnamed Exercise";
   const rawId = record?.id ?? record?.exerciseId ?? record?._id ?? "";
+  const sourceId = toString(rawId) || null;
   const baseSlug = slugify(name);
   const slug = rawId
     ? `${rawId}-${baseSlug || "exercise"}`
@@ -72,6 +73,9 @@ export function normalizeFreeExerciseRecord(record, now = Date.now()) {
     regressions,
     youtubeSearchQuery,
     youtubeVideoId,
+    sourceId,
+    externalId: sourceId,
+    sourceKey: sourceId,
     source: "free-exercise-db",
     is_custom: false,
     createdAt: now,

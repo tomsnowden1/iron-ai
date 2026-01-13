@@ -17,7 +17,7 @@ import {
   scoreExercise,
   slugify,
 } from "./seedUtils";
-import { validateSeedPayload } from "./seedValidation";
+import { normalizeSeedRecord, validateSeedPayload } from "./seedValidation";
 
 const META_KEYS = {
   version: "seed.version",
@@ -35,9 +35,16 @@ const META_KEYS = {
   lastRepairStats: "seed.lastRepairStats",
   lastLinkerAt: "seed.lastLinkerAt",
   lastLinkerStats: "seed.lastLinkerStats",
+  repairLastRunAt: "seed.repair.lastRunAt",
+  repairUpdatedCount: "seed.repair.updatedCount",
+  repairPlaceholderClearedCount: "seed.repair.placeholderClearedCount",
+  repairSampleUpdatedIds: "seed.repair.sampleUpdatedIds",
+  repairSeedHash: "seed.repair.seedHash",
+  repairVersion: "seed.repair.version",
 };
 
 const AUDIT_LOG_LIMIT = 20;
+const REPAIR_VERSION = "2026-01-14-repair-v2";
 
 const PLACEHOLDER_INSTRUCTIONS = new Set([
   "Step 1: Perform the movement with control.",
@@ -51,6 +58,10 @@ const PLACEHOLDER_GOTCHAS = new Set([
   "Letting form break down near the end of the set.",
   "Using momentum instead of controlled effort.",
 ]);
+
+const PLACEHOLDER_PRIMARY_MUSCLES = new Set(["full body"]);
+
+const PLACEHOLDER_SEED_NAME = /^Exercise\s+\d+$/i;
 
 function seedLog(level, message, meta = {}) {
   const logger = console[level] ?? console.info;
@@ -74,6 +85,18 @@ function sanitizeSeedList(list, placeholders) {
 function isPlaceholderList(list, placeholders) {
   if (!Array.isArray(list) || list.length === 0) return false;
   return list.every((item) => placeholders.has(item));
+}
+
+function normalizeMuscleList(list) {
+  return Array.from(
+    new Set(normalizeStringArray(list).map((item) => titleCase(item)))
+  );
+}
+
+function shouldClearPlaceholderMuscles(record, list) {
+  if (!Array.isArray(list) || list.length === 0) return false;
+  if (!PLACEHOLDER_SEED_NAME.test(record?.name ?? "")) return false;
+  return list.every((item) => PLACEHOLDER_PRIMARY_MUSCLES.has(String(item).toLowerCase()));
 }
 
 function buildEquipmentIndex(equipmentList = []) {
@@ -270,6 +293,39 @@ async function fetchSeedExercises() {
   return { ok: false, errors };
 }
 
+export async function loadSeedPayload() {
+  const result = await fetchSeedExercises();
+  if (!result.ok) {
+    const message =
+      result.errors?.map((error) => error.message).join(" | ") ||
+      result.error?.message ||
+      "Unable to load seed payload.";
+    return { status: "error", error: message };
+  }
+
+  return {
+    status: "success",
+    payload: Array.isArray(result.payload) ? result.payload : [],
+    sourceUsed: result.sourceUsed ?? "unknown",
+  };
+}
+
+export async function getSeedSamples({ limit = 1 } = {}) {
+  const result = await loadSeedPayload();
+  if (result.status !== "success") return result;
+  const sample = result.payload.slice(0, limit);
+  const normalizedSample = sample.map((record) =>
+    normalizeSeedDefaults(normalizeSeedRecord(record), Date.now())
+  );
+  return {
+    status: "success",
+    sourceUsed: result.sourceUsed,
+    total: result.payload.length,
+    sample,
+    normalizedSample,
+  };
+}
+
 function mergeSeedExercise(existing, incoming, now) {
   if (existing?.is_custom || existing?.source === "user" || existing?.isCustom) {
     return { merged: existing, changed: false, skipped: true };
@@ -280,6 +336,9 @@ function mergeSeedExercise(existing, incoming, now) {
     instructions: sanitizeSeedList(incoming.instructions, PLACEHOLDER_INSTRUCTIONS),
     gotchas: sanitizeSeedList(incoming.gotchas, PLACEHOLDER_GOTCHAS),
     commonMistakes: sanitizeSeedList(incoming.commonMistakes, PLACEHOLDER_GOTCHAS),
+    primaryMuscles: shouldClearPlaceholderMuscles(incoming, incoming.primaryMuscles)
+      ? []
+      : incoming.primaryMuscles,
   };
 
   const merged = { ...existing };
@@ -327,6 +386,9 @@ function mergeSeedExercise(existing, incoming, now) {
   if (!merged.externalId && sanitizedIncoming.externalId) {
     merged.externalId = sanitizedIncoming.externalId;
   }
+  if (!merged.sourceId && sanitizedIncoming.sourceId) {
+    merged.sourceId = sanitizedIncoming.sourceId;
+  }
 
   merged.updatedAt = now;
   merged.createdAt = existing.createdAt ?? incoming.createdAt ?? now;
@@ -339,11 +401,14 @@ function mergeSeedExercise(existing, incoming, now) {
 function normalizeSeedDefaults(record, now) {
   const name = normalizeString(record.name) || "Unnamed Exercise";
   const slug = record.slug || slugify(name) || "exercise";
-  const primaryMuscles = isNonEmptyArray(record.primaryMuscles)
+  const rawPrimary = isNonEmptyArray(record.primaryMuscles)
     ? record.primaryMuscles
     : record.muscle_group
       ? [record.muscle_group]
       : [];
+  const primaryMuscles = shouldClearPlaceholderMuscles(record, rawPrimary)
+    ? []
+    : rawPrimary;
   const media =
     record.media ??
     (record.video_url || record.videoUrl ? { videoUrl: record.video_url ?? record.videoUrl } :
@@ -378,6 +443,7 @@ function normalizeSeedDefaults(record, now) {
       record.youtubeSearchQuery ?? `${name ?? "exercise"} exercise form cues`,
     youtubeVideoId: record.youtubeVideoId ?? null,
     media,
+    sourceId: record.sourceId ?? record.externalId ?? null,
     is_custom: false,
     createdAt: record.createdAt ?? now,
     updatedAt: record.updatedAt ?? now,
@@ -529,8 +595,9 @@ export async function importExercises({
         source: record.source ?? "free-exercise-db",
         sourceKey: record.sourceKey ?? record.externalId ?? null,
         externalId: record.externalId ?? null,
-        primaryMuscles: normalizeStringArray(record.primaryMuscles),
-        secondaryMuscles: normalizeStringArray(record.secondaryMuscles),
+        sourceId: record.sourceId ?? record.externalId ?? null,
+        primaryMuscles: normalizeMuscleList(record.primaryMuscles),
+        secondaryMuscles: normalizeMuscleList(record.secondaryMuscles),
         equipment: equipmentIds,
         requiredEquipmentIds,
         optionalEquipmentIds,
@@ -756,7 +823,11 @@ export async function importExercises({
   };
 }
 
-export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
+export async function repairSeededExercises({
+  dryRun = false,
+  force = false,
+  onProgress,
+} = {}) {
   const startedAt = Date.now();
   const progress = (stage, detail = {}) => {
     onProgress?.({ stage, startedAt, ...detail });
@@ -774,6 +845,10 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
       await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
       await writeMeta(META_KEYS.lastRepairAt, Date.now());
       await writeMeta(META_KEYS.lastRepairMessage, message);
+      await writeMeta(META_KEYS.repairLastRunAt, Date.now());
+      await writeMeta(META_KEYS.repairUpdatedCount, 0);
+      await writeMeta(META_KEYS.repairPlaceholderClearedCount, 0);
+      await writeMeta(META_KEYS.repairSampleUpdatedIds, []);
     }
     return { status: "error", error: message };
   }
@@ -791,6 +866,10 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
       await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
       await writeMeta(META_KEYS.lastRepairAt, Date.now());
       await writeMeta(META_KEYS.lastRepairMessage, message);
+      await writeMeta(META_KEYS.repairLastRunAt, Date.now());
+      await writeMeta(META_KEYS.repairUpdatedCount, 0);
+      await writeMeta(META_KEYS.repairPlaceholderClearedCount, 0);
+      await writeMeta(META_KEYS.repairSampleUpdatedIds, []);
     }
     return { status: "error", error: message, report: validation.report };
   }
@@ -814,8 +893,9 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
         source: record.source ?? "free-exercise-db",
         sourceKey: record.sourceKey ?? record.externalId ?? null,
         externalId: record.externalId ?? null,
-        primaryMuscles: normalizeStringArray(record.primaryMuscles),
-        secondaryMuscles: normalizeStringArray(record.secondaryMuscles),
+        sourceId: record.sourceId ?? record.externalId ?? null,
+        primaryMuscles: normalizeMuscleList(record.primaryMuscles),
+        secondaryMuscles: normalizeMuscleList(record.secondaryMuscles),
         equipment: equipmentIds,
         requiredEquipmentIds,
         optionalEquipmentIds,
@@ -854,6 +934,8 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
   });
   const deduped = Array.from(dedupedMap.values());
 
+  const seedHash = await computeSeedHash(deduped);
+
   if (dryRun) {
     return {
       status: "dry-run",
@@ -861,13 +943,38 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
       valid: validation.report.validCount,
       invalid: validation.report.invalidCount,
       totalNormalized: deduped.length,
+      seedHash,
     };
+  }
+
+  const lastRepairHash = await readMeta(META_KEYS.repairSeedHash);
+  const lastRepairVersion = await readMeta(META_KEYS.repairVersion);
+  if (!force && lastRepairHash === seedHash && lastRepairVersion === REPAIR_VERSION) {
+    await writeMeta(META_KEYS.lastRepairAt, Date.now());
+    await writeMeta(META_KEYS.lastRepairStatus, "SKIPPED");
+    await writeMeta(META_KEYS.lastRepairMessage, "Seed repair skipped (up to date).");
+    await writeMeta(META_KEYS.lastRepairStats, {
+      totalSeed: deduped.length,
+      updated: 0,
+      skipped: deduped.length,
+      clearedPlaceholders: 0,
+      seedHash,
+      force,
+    });
+    await writeMeta(META_KEYS.repairLastRunAt, Date.now());
+    await writeMeta(META_KEYS.repairUpdatedCount, 0);
+    await writeMeta(META_KEYS.repairPlaceholderClearedCount, 0);
+    await writeMeta(META_KEYS.repairSampleUpdatedIds, []);
+    await writeMeta(META_KEYS.repairSeedHash, seedHash);
+    await writeMeta(META_KEYS.repairVersion, REPAIR_VERSION);
+    return { status: "skipped", seedHash };
   }
 
   const now = Date.now();
   let updated = 0;
   let skipped = 0;
   let clearedPlaceholders = 0;
+  const sampleUpdatedIds = [];
 
   try {
     await db.transaction("rw", db.table("exercises"), db.table("meta"), async () => {
@@ -875,10 +982,20 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
       const existingByStableId = new Map(
         existingExercises.map((exercise) => [exercise.stableId, exercise])
       );
+      const existingBySourceId = new Map(
+        existingExercises
+          .filter((exercise) => exercise.sourceId)
+          .map((exercise) => [exercise.sourceId, exercise])
+      );
       const existingBySourceKey = new Map(
         existingExercises
           .filter((exercise) => exercise.sourceKey)
           .map((exercise) => [exercise.sourceKey, exercise])
+      );
+      const existingByExternalId = new Map(
+        existingExercises
+          .filter((exercise) => exercise.externalId)
+          .map((exercise) => [exercise.externalId, exercise])
       );
       const existingBySlug = new Map(
         existingExercises
@@ -891,7 +1008,9 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
       deduped.forEach((record) => {
         const existing =
           existingByStableId.get(record.stableId) ||
+          (record.sourceId ? existingBySourceId.get(record.sourceId) : null) ||
           (record.sourceKey ? existingBySourceKey.get(record.sourceKey) : null) ||
+          (record.externalId ? existingByExternalId.get(record.externalId) : null) ||
           (record.slug ? existingBySlug.get(record.slug) : null);
 
         if (!existing) {
@@ -936,9 +1055,19 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
           didChange = true;
           clearedPlaceholders += 1;
         }
+        if (
+          shouldClearPlaceholderMuscles(existing, existing.primaryMuscles) &&
+          !record.primaryMuscles?.length
+        ) {
+          final.primaryMuscles = [];
+          didChange = true;
+        }
 
         if (didChange) {
           updated += 1;
+          if (sampleUpdatedIds.length < 10 && final.stableId) {
+            sampleUpdatedIds.push(final.stableId);
+          }
           toUpdate.push(withEquipmentAssignments(final));
         } else {
           skipped += 1;
@@ -961,7 +1090,16 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
         updated,
         skipped,
         clearedPlaceholders,
+        seedHash,
+        force,
+        sampleUpdatedIds,
       });
+      await writeMeta(META_KEYS.repairLastRunAt, now);
+      await writeMeta(META_KEYS.repairUpdatedCount, updated);
+      await writeMeta(META_KEYS.repairPlaceholderClearedCount, clearedPlaceholders);
+      await writeMeta(META_KEYS.repairSampleUpdatedIds, sampleUpdatedIds);
+      await writeMeta(META_KEYS.repairSeedHash, seedHash);
+      await writeMeta(META_KEYS.repairVersion, REPAIR_VERSION);
     });
   } catch (error) {
     const message = error?.message ?? "Seed repair failed.";
@@ -969,6 +1107,12 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
     await writeMeta(META_KEYS.lastRepairStatus, "FAILURE");
     await writeMeta(META_KEYS.lastRepairAt, Date.now());
     await writeMeta(META_KEYS.lastRepairMessage, message);
+    await writeMeta(META_KEYS.repairLastRunAt, Date.now());
+    await writeMeta(META_KEYS.repairUpdatedCount, 0);
+    await writeMeta(META_KEYS.repairPlaceholderClearedCount, 0);
+    await writeMeta(META_KEYS.repairSampleUpdatedIds, []);
+    await writeMeta(META_KEYS.repairSeedHash, seedHash);
+    await writeMeta(META_KEYS.repairVersion, REPAIR_VERSION);
     return { status: "error", error: message };
   }
 
@@ -979,6 +1123,8 @@ export async function repairSeedExercises({ dryRun = false, onProgress } = {}) {
     updated,
     skipped,
     clearedPlaceholders,
+    seedHash,
+    sampleUpdatedIds,
     linker,
   };
 }

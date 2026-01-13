@@ -29,6 +29,7 @@ import {
   getExerciseVideoUrl,
   getNormalizedEquipment,
 } from "../../exercises/data";
+import { normalizeString, slugify } from "../../seed/seedUtils";
 import {
   getExerciseHistory,
   getGymAvailabilityForExercise,
@@ -162,6 +163,7 @@ export default function ExerciseDetailView({
   const gotchasData = getExerciseGotchas(exercise);
   const videoUrl = getExerciseVideoUrl(exercise);
   const normalizedEquipment = getNormalizedEquipment(exercise, equipmentIdSet);
+  const rawEquipment = Array.isArray(exercise?.equipment) ? exercise.equipment : [];
   const youtubeSearchQuery =
     exercise?.youtubeSearchQuery ??
     `${exercise?.name ?? "exercise"} exercise form cues`;
@@ -388,9 +390,37 @@ export default function ExerciseDetailView({
   const optionalLabels = normalizedEquipment.optionalEquipmentIds
     .map((id) => equipmentMap.get(id)?.name ?? id)
     .filter(Boolean);
+  const missingEquipment = rawEquipment.filter((id) => !equipmentIdSet.has(id));
 
   const availableGyms = gymAvailability.filter((item) => item.isAvailable);
   const unavailableGyms = gymAvailability.filter((item) => !item.isAvailable);
+
+  const handleCreateMissingEquipment = async () => {
+    if (!missingEquipment.length) return;
+    const existingIds = new Set(equipmentMap.keys());
+    const toCreate = missingEquipment
+      .map((item) => normalizeString(item).toLowerCase())
+      .filter(Boolean)
+      .map((normalized) => {
+        const slug = slugify(normalized) || normalized;
+        if (!slug || existingIds.has(slug)) return null;
+        existingIds.add(slug);
+        return {
+          id: slug,
+          name: normalized
+            .split(/\s+/)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(" "),
+          category: "accessory",
+          isPortable: true,
+          aliases: [normalized],
+        };
+      })
+      .filter(Boolean);
+
+    if (!toCreate.length) return;
+    await db.table("equipment").bulkPut(toCreate);
+  };
 
   return (
     <div className="page">
@@ -464,7 +494,7 @@ export default function ExerciseDetailView({
               <div>
                 <div className="template-meta">Primary muscles</div>
                 <div className="ui-strong">
-                  {primaryMuscles.length ? primaryMuscles.join(", ") : "N/A"}
+                  {primaryMuscles.length ? primaryMuscles.join(", ") : "—"}
                 </div>
               </div>
               {secondaryMuscles.length ? (
@@ -485,7 +515,22 @@ export default function ExerciseDetailView({
                   ) : (
                     <span className="template-meta">None listed</span>
                   )}
+                  {missingEquipment.map((label) => (
+                    <span key={label} className="equipment-pill equipment-pill--warning">
+                      {label} (missing)
+                    </span>
+                  ))}
                 </div>
+                {missingEquipment.length ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    type="button"
+                    onClick={handleCreateMissingEquipment}
+                  >
+                    Create missing equipment
+                  </Button>
+                ) : null}
               </div>
               {optionalLabels.length ? (
                 <div>
