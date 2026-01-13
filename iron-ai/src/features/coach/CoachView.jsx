@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { useLiveQuery } from "dexie-react-hooks";
-
 import {
   Button,
   Card,
@@ -9,11 +7,12 @@ import {
   CardHeader,
   PageHeader,
 } from "../../components/ui";
-import { db } from "../../db";
 import { getCoachContextSnapshot } from "../../coach/context";
 import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
+import { getCoachAccessState } from "./coachAccess";
+import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 
 function createMessage(id, role, content) {
   return {
@@ -24,16 +23,19 @@ function createMessage(id, role, content) {
   };
 }
 
-function resolveErrorMessage(err, hasKey) {
-  if (!hasKey) return "Add your OpenAI API key in Settings to chat.";
+function resolveErrorMessage(err, accessState) {
+  if (!accessState?.canChat) return accessState?.message ?? "";
   if (err?.status === 401 || err?.status === 403) {
     return "That API key was rejected. Update it in Settings.";
   }
   if (err?.status === 429) {
-    return "You're sending requests too quickly. Please wait and try again.";
+    return "OpenAI rate limit hit. Please wait and try again.";
   }
   if (err?.status >= 500) {
     return "OpenAI is having trouble right now. Please try again soon.";
+  }
+  if (!err?.status) {
+    return "Network error. Check your connection and try again.";
   }
   return "Couldn't reach the coach. Check your connection and try again.";
 }
@@ -46,9 +48,8 @@ function summarizeProposalResult(result) {
 }
 
 export default function CoachView({ launchContext, onLaunchContextConsumed }) {
-  const settings = useLiveQuery(() => db.settings.get(1), []);
-  const apiKey = String(settings?.openai_api_key ?? "").trim();
-  const memoryEnabled = Boolean(settings?.coach_memory_enabled);
+  const { settings, apiKey, hasKey, keyStatus, coachMemoryEnabled } = useSettings();
+  const memoryEnabled = coachMemoryEnabled;
   const memory = useMemo(
     () => normalizeCoachMemory(settings?.coach_memory),
     [settings?.coach_memory]
@@ -82,7 +83,11 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   const listRef = useRef(null);
   const streamingIdRef = useRef(null);
 
-  const canSend = Boolean(apiKey) && input.trim().length > 0 && !sending;
+  const accessState = useMemo(
+    () => getCoachAccessState({ hasKey, keyStatus }),
+    [hasKey, keyStatus]
+  );
+  const canSend = accessState.canChat && input.trim().length > 0 && !sending;
 
   useEffect(() => {
     if (!launchContext) return;
@@ -151,8 +156,8 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
   const handleSend = async () => {
     const trimmed = input.trim();
     if (!trimmed || sending) return;
-    if (!apiKey) {
-      setError("Add your OpenAI API key in Settings to chat.");
+    if (!accessState.canChat) {
+      setError(accessState.message);
       return;
     }
 
@@ -200,6 +205,10 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
       dispatch({ type: "QUEUE_PROPOSALS", payload: result.proposals });
       dispatch({ type: "SET_DEBUG", payload: result.debug });
 
+      if (keyStatus !== "valid") {
+        void setOpenAIKeyStatus("valid");
+      }
+
       if (!streamedId) {
         const assistantId = (messageIdRef.current += 1);
         setMessages((prev) => [
@@ -218,7 +227,10 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
         onLaunchContextConsumed?.();
       }
     } catch (err) {
-      setError(resolveErrorMessage(err, Boolean(apiKey)));
+      if (err?.status === 401 || err?.status === 403) {
+        void setOpenAIKeyStatus("invalid");
+      }
+      setError(resolveErrorMessage(err, accessState));
       if (streamedId) {
         setMessages((prev) => prev.filter((msg) => msg.id !== streamedId));
       }
@@ -306,7 +318,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
             <div>
               <div className="ui-section-title">Coach chat</div>
               <div className="template-meta">
-                Context sharing is off by default. Enable it below if desired.
+                {accessState.message}
               </div>
             </div>
             <Button
@@ -411,12 +423,6 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
               </div>
             ) : null}
           </div>
-
-          {!apiKey ? (
-            <div className="template-meta">
-              Add your OpenAI API key in Settings to enable chat.
-            </div>
-          ) : null}
         </CardBody>
 
         <CardFooter className="coach-footer">
@@ -436,7 +442,7 @@ export default function CoachView({ launchContext, onLaunchContextConsumed }) {
                 if (error) setError("");
               }}
               onKeyDown={handleKeyDown}
-              disabled={!apiKey}
+              disabled={!accessState.canChat}
             />
             <Button
               variant="primary"

@@ -24,6 +24,14 @@
 - **Purpose**: local app settings.
 - **Primary key**: `id`
 - **Indexes**: `api_key`, `coach_persona`
+- **Fields**:
+  - `openai_api_key`: OpenAI key used for Coach chat.
+  - `openai_api_key_status`: `missing` | `unknown` | `valid` | `invalid`.
+  - `openai_api_key_last_tested_at`: timestamp of last key test.
+  - `coach_persona`: optional persona instructions for the coach.
+  - `coach_memory_enabled`: enables Coach Memory sharing.
+  - `coach_memory`: stored preferences (JSON).
+  - `api_key`: legacy/unused (kept for backward compatibility).
 
 ### logs
 - **Purpose**: legacy logging table (not currently used in UI).

@@ -5,7 +5,9 @@ questions. It does not yet include advanced training logic or personalized progr
 
 ## API Key Handling
 - You provide your own OpenAI API key in Settings.
-- The key is stored locally in IndexedDB (settings table) and never logged.
+- The key unlocks the AI Coach chat and tool-powered coaching responses.
+- The key is stored locally in IndexedDB (settings table), masked after saving, and never logged.
+- Use the “Test API Key” button in Settings to verify connectivity and update key status.
 - The app calls OpenAI directly from the browser; no backend is involved.
 
 ## Model

@@ -43,6 +43,14 @@ import { formatCoachMemory, getDefaultCoachMemory, normalizeCoachMemory } from "
 import { getEquipmentMap } from "./equipment/catalog";
 import { getMissingEquipmentForExercise } from "./equipment/engine";
 import { resolveActiveSpace } from "./workoutSpaces/logic";
+import {
+  clearOpenAIKey,
+  getOpenAIKeyMasked,
+  setOpenAIKey,
+  testOpenAIKey,
+  updateSettings,
+  useSettings,
+} from "./state/settingsStore";
 
 import {
   db,
@@ -2267,10 +2275,11 @@ function HistoryView() {
 }
 
 function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMode }) {
-  const [apiKey, setApiKey] = useState(settings?.api_key ?? "");
   const [persona, setPersona] = useState(settings?.coach_persona ?? "");
-  const [openAiKey, setOpenAiKey] = useState(settings?.openai_api_key ?? "");
-  const [showOpenAiKey, setShowOpenAiKey] = useState(false);
+  const [openAiKeyDraft, setOpenAiKeyDraft] = useState("");
+  const [openAiEditing, setOpenAiEditing] = useState(!settings?.openai_api_key);
+  const [openAiTesting, setOpenAiTesting] = useState(false);
+  const [openAiTestResult, setOpenAiTestResult] = useState(null);
   const [coachMemoryEnabled, setCoachMemoryEnabled] = useState(
     settings?.coach_memory_enabled ?? false
   );
@@ -2296,15 +2305,16 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [memoryEditOpen, setMemoryEditOpen] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
   const [memoryError, setMemoryError] = useState("");
-  const apiKeyId = useId();
   const personaId = useId();
   const appearanceId = useId();
   const openAiKeyId = useId();
   const memoryId = useId();
   const resolvedLabel = resolvedTheme === "dark" ? "Dark" : "Light";
-  const trimmedOpenAiKey = openAiKey.trim();
+  const trimmedOpenAiKey = openAiKeyDraft.trim();
   const looksLikeOpenAiKey =
     trimmedOpenAiKey.length === 0 || trimmedOpenAiKey.startsWith("sk-");
+  const maskedOpenAiKey = getOpenAIKeyMasked(settings?.openai_api_key);
+  const openAiKeyStatus = settings?.openai_api_key_status ?? "missing";
 
   useEffect(() => {
     if (memoryEditOpen) return;
@@ -2312,13 +2322,19 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     setCoachMemory(normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory()));
   }, [memoryEditOpen, settings]);
 
+  useEffect(() => {
+    if (settings?.openai_api_key) {
+      setOpenAiEditing(false);
+      setOpenAiKeyDraft("");
+    } else {
+      setOpenAiEditing(true);
+    }
+    setOpenAiTestResult(null);
+  }, [settings?.openai_api_key]);
+
   const saveSettings = async () => {
-    await db.settings.put({
-      ...(settings ?? {}),
-      id: 1,
-      api_key: apiKey,
+    await updateSettings({
       coach_persona: persona,
-      openai_api_key: trimmedOpenAiKey,
       coach_memory_enabled: coachMemoryEnabled,
       coach_memory: coachMemory,
       exercise_picker_auto_focus: exercisePickerAutoFocus,
@@ -2328,6 +2344,60 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
       long_press_done_adds_next: longPressDoneAddsNext,
     });
     onNotify?.("Saved locally ✅", { tone: "success" });
+  };
+
+  const handleSaveOpenAiKey = async () => {
+    if (!trimmedOpenAiKey) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Enter an OpenAI API key to save.",
+      });
+      return;
+    }
+    if (!looksLikeOpenAiKey) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: 'Keys usually start with \"sk-\". Check for typos.',
+      });
+      return;
+    }
+    await setOpenAIKey(trimmedOpenAiKey);
+    setOpenAiEditing(false);
+    setOpenAiKeyDraft("");
+    setOpenAiTestResult({
+      tone: "success",
+      message: "Key saved locally.",
+    });
+    onNotify?.("OpenAI key saved locally ✅", { tone: "success" });
+  };
+
+  const handleRemoveOpenAiKey = async () => {
+    if (!window.confirm("Remove the saved OpenAI API key from this device?")) return;
+    await clearOpenAIKey();
+    setOpenAiKeyDraft("");
+    setOpenAiEditing(true);
+    setOpenAiTestResult({
+      tone: "success",
+      message: "Key removed.",
+    });
+    onNotify?.("OpenAI key removed.", { tone: "success" });
+  };
+
+  const handleTestOpenAiKey = async () => {
+    if (!settings?.openai_api_key) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Save a key first, then run the test.",
+      });
+      return;
+    }
+    setOpenAiTesting(true);
+    const result = await testOpenAIKey();
+    setOpenAiTestResult({
+      tone: result.ok ? "success" : "error",
+      message: result.message,
+    });
+    setOpenAiTesting(false);
   };
 
   const handleEditMemory = () => {
@@ -2359,16 +2429,6 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   return (
     <Card>
       <CardBody className="ui-stack">
-        <div>
-          <Label htmlFor={apiKeyId}>API Key</Label>
-          <Input
-            id={apiKeyId}
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-          />
-        </div>
-
         <div>
           <Label htmlFor={personaId}>Coach persona</Label>
           <Input
@@ -2439,29 +2499,99 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
 
         <div>
           <Label htmlFor={openAiKeyId}>OpenAI API key</Label>
+          {openAiEditing ? (
+            <div className="ui-stack">
+              <Input
+                id={openAiKeyId}
+                type="password"
+                value={openAiKeyDraft}
+                onChange={(e) => setOpenAiKeyDraft(e.target.value)}
+                autoComplete="off"
+                className="flex-1"
+                placeholder="sk-..."
+              />
+              {!looksLikeOpenAiKey && trimmedOpenAiKey ? (
+                <div className="chat-error">Keys usually start with "sk-".</div>
+              ) : null}
+              <div className="ui-row ui-row--wrap">
+                <Button variant="primary" size="sm" type="button" onClick={handleSaveOpenAiKey}>
+                  Save key
+                </Button>
+                {settings?.openai_api_key ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => setOpenAiEditing(false)}
+                  >
+                    Cancel
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <div className="ui-stack">
+              <div className="ui-row ui-row--between ui-row--wrap">
+                <div>
+                  <div className="ui-strong">Saved key</div>
+                  <div className="template-meta">
+                    {maskedOpenAiKey ? maskedOpenAiKey : "No key saved yet."}
+                  </div>
+                </div>
+                <div className="ui-row ui-row--wrap">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    type="button"
+                    onClick={() => setOpenAiEditing(true)}
+                  >
+                    Replace key
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    type="button"
+                    onClick={handleRemoveOpenAiKey}
+                    disabled={!settings?.openai_api_key}
+                  >
+                    Remove key
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="template-meta">
+            Unlocks AI Coach chat and tool-powered coaching. Stored locally on this device.
+          </div>
+          <div className="template-meta">
+            Status:{" "}
+            {openAiKeyStatus === "valid"
+              ? "Verified"
+              : openAiKeyStatus === "invalid"
+                ? "Invalid"
+                : openAiKeyStatus === "missing"
+                  ? "Missing"
+                  : "Not tested"}
+          </div>
           <div className="ui-row ui-row--wrap">
-            <Input
-              id={openAiKeyId}
-              type={showOpenAiKey ? "text" : "password"}
-              value={openAiKey}
-              onChange={(e) => setOpenAiKey(e.target.value)}
-              autoComplete="off"
-              className="flex-1"
-            />
             <Button
               variant="secondary"
               size="sm"
               type="button"
-              onClick={() => setShowOpenAiKey((prev) => !prev)}
+              onClick={handleTestOpenAiKey}
+              loading={openAiTesting}
+              disabled={!settings?.openai_api_key}
             >
-              {showOpenAiKey ? "Hide" : "Reveal"}
+              Test API Key
             </Button>
           </div>
-          <div className="template-meta">
-            {looksLikeOpenAiKey
-              ? "Stored locally on this device. Required for Coach."
-              : 'Keys usually start with "sk-". Check for typos.'}
-          </div>
+          {openAiTestResult ? (
+            <div
+              className={openAiTestResult.tone === "error" ? "chat-error" : "template-meta"}
+            >
+              {openAiTestResult.message}
+            </div>
+          ) : null}
         </div>
 
         <div className="ui-row ui-row--between ui-row--wrap">
@@ -2695,10 +2825,10 @@ function SettingsView({
   setThemeMode,
   onBack,
 }) {
-  const settings = useLiveQuery(() => db.settings.get(1), []);
+  const { settings } = useSettings();
   const settingsKey = settings
-    ? `${settings.api_key ?? ""}::${settings.coach_persona ?? ""}::${
-        settings.openai_api_key ?? ""
+    ? `${settings.coach_persona ?? ""}::${settings.openai_api_key ?? ""}::${
+        settings.openai_api_key_status ?? ""
       }::${settings.coach_memory_enabled ?? ""}::${
         settings.exercise_picker_auto_focus ?? ""
       }::${settings.exercise_picker_filter_active_gym ?? ""}::${

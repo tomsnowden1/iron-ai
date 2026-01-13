@@ -1,4 +1,5 @@
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
 export const DEFAULT_COACH_MODEL = "gpt-4o-mini";
 
 async function parseError(response) {
@@ -130,4 +131,20 @@ export async function streamChatCompletion({
   }
 
   return { content: content.trim(), toolCalls };
+}
+
+export async function testOpenAIKey({ apiKey, signal } = {}) {
+  const response = await fetch(OPENAI_MODELS_URL, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseError(response);
+  }
+
+  return true;
 }
