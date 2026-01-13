@@ -22,6 +22,7 @@ import {
 import ExerciseDetailView from "./ExerciseDetailView";
 import ExerciseList from "./ExerciseList";
 import CollapsibleFilters from "./CollapsibleFilters";
+import CustomExerciseEditor from "./CustomExerciseEditor";
 
 function sortByName(a, b) {
   return String(a?.name ?? "").localeCompare(String(b?.name ?? ""));
@@ -84,6 +85,7 @@ export default function ExercisePickerView({
   const [selectedType, setSelectedType] = useState("");
   const [pickerTouched, setPickerTouched] = useState(false);
   const [detailExerciseId, setDetailExerciseId] = useState(null);
+  const [customEditorOpen, setCustomEditorOpen] = useState(false);
 
   const searchRef = useRef(null);
   const autoFocusAppliedRef = useRef(false);
@@ -358,6 +360,16 @@ export default function ExercisePickerView({
                   </button>
                 ) : null}
               </div>
+              <div className="exercise-editor__inline-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  type="button"
+                  onClick={() => setCustomEditorOpen(true)}
+                >
+                  + Custom exercise
+                </Button>
+              </div>
               <button
                 type="button"
                 className="filters-toggle"
@@ -542,6 +554,21 @@ export default function ExercisePickerView({
           )}
         </CardBody>
       </Card>
+
+      <CustomExerciseEditor
+        open={customEditorOpen}
+        exercise={null}
+        initialName={searchInput}
+        equipmentList={equipmentList}
+        allExercises={exercises}
+        onClose={() => setCustomEditorOpen(false)}
+        onSaved={(exerciseId) => {
+          setCustomEditorOpen(false);
+          if (exerciseId) {
+            handleSelect({ id: exerciseId });
+          }
+        }}
+      />
     </div>
   );
 }

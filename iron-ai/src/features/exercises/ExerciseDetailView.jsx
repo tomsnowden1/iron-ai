@@ -127,6 +127,7 @@ export default function ExerciseDetailView({
   onBack,
   onOpenExercise,
   onAddExercise,
+  onEditExercise,
   onLaunchCoach,
 }) {
   const exercise = useLiveQuery(
@@ -168,6 +169,7 @@ export default function ExerciseDetailView({
       ? exercise.youtubeVideoId.trim()
       : null;
   const stickyNote = exercise?.stickyNote?.trim() ?? "";
+  const isCustom = exercise?.source === "user" || exercise?.is_custom;
 
   const historyStats = useMemo(() => {
     const sessions = Array.isArray(history) ? history : [];
@@ -373,6 +375,15 @@ export default function ExerciseDetailView({
             {onAddExercise ? (
               <Button variant="primary" size="sm" onClick={() => onAddExercise(exercise.id)}>
                 Add to workout
+              </Button>
+            ) : null}
+            {isCustom && onEditExercise ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onEditExercise(exercise)}
+              >
+                Edit
               </Button>
             ) : null}
             {onLaunchCoach ? (

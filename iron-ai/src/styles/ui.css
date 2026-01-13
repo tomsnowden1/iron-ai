@@ -1632,6 +1632,9 @@
   }
 
   .exercise-row__title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     font-weight: 600;
     font-size: var(--text-sm);
   }
@@ -1654,6 +1657,113 @@
   .exercise-row__actions {
     display: flex;
     gap: var(--space-1);
+  }
+
+  .pill--custom {
+    background: rgba(99, 102, 241, 0.12);
+    border-color: rgba(99, 102, 241, 0.3);
+    color: #4f46e5;
+  }
+
+  .exercise-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    padding-bottom: var(--space-6);
+  }
+
+  .exercise-editor__section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .exercise-editor__field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .exercise-editor__pill-input {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .exercise-editor__pill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .exercise-editor__pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    border-radius: 999px;
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+    color: var(--color-text);
+    font-size: var(--text-xs);
+    padding: 4px 10px;
+  }
+
+  .exercise-editor__pill span {
+    font-weight: 700;
+  }
+
+  .exercise-editor__textarea {
+    min-height: 120px;
+    resize: vertical;
+  }
+
+  .exercise-editor__ai {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .exercise-editor__error {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.1);
+    color: #b91c1c;
+    font-size: var(--text-xs);
+  }
+
+  .exercise-editor__error button {
+    border: none;
+    background: transparent;
+    color: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .exercise-editor__actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--color-surface);
+    border-top: 1px solid var(--color-border-subtle);
+    padding: var(--space-3) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .exercise-editor__actions-row {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+
+  .exercise-editor__inline-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .template-item {

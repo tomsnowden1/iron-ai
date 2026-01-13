@@ -75,6 +75,7 @@ export default function ExerciseList({
           equipmentLabels.length ? equipmentLabels.join(", ") : null,
         ].filter(Boolean);
         const availability = formatAvailability(exercise, activeSpace, equipmentMap);
+        const isCustom = exercise?.source === "user" || exercise?.is_custom;
 
         return (
           <div key={exercise.id} className="exercise-row">
@@ -85,7 +86,8 @@ export default function ExerciseList({
             >
               <div className="exercise-row__main">
                 <div className="exercise-row__title">
-                  {exercise.name ?? "Unknown Exercise"}
+                  <span>{exercise.name ?? "Unknown Exercise"}</span>
+                  {isCustom ? <span className="pill pill--custom">Custom</span> : null}
                 </div>
                 {metaParts.length ? (
                   <div className="exercise-row__meta">
