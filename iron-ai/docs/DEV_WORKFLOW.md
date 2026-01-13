@@ -20,3 +20,8 @@ Pre-commit hook setup
 
 Notes
 - The pre-commit hook runs `npm run lint` and `npm run format`.
+
+Diagnostics
+- Enable via URL: append `?debug=1` to the app URL (ex: `http://localhost:5173/?debug=1`).
+- Or set localStorage: `localStorage.setItem("ironai.diagnosticsEnabled", "true")`.
+- Open the Diagnostics panel from **More → Diagnostics** (only visible when debug is enabled).
