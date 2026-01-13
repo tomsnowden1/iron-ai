@@ -5,12 +5,16 @@ import { db } from "../../db";
 import {
   importExercises,
   recomputeExerciseLinks,
-  repairSeedExercises,
+  getSeedSamples,
+  loadSeedPayload,
+  repairSeededExercises,
   SEED_MIN_COUNT,
   SEED_VERSION,
   STARTER_MIN_COUNT,
 } from "../../seed/exerciseSeed";
 import { getExercisePrimaryMuscles } from "../../exercises/data";
+import { computeStableId, normalizeString, slugify } from "../../seed/seedUtils";
+import { normalizeSeedRecord } from "../../seed/seedValidation";
 import { Button, Card, CardBody, Input, Label, PageHeader } from "../../components/ui";
 
 const META_KEYS = [
@@ -29,6 +33,12 @@ const META_KEYS = [
   "seed.lastRepairStats",
   "seed.lastLinkerAt",
   "seed.lastLinkerStats",
+  "seed.repair.lastRunAt",
+  "seed.repair.updatedCount",
+  "seed.repair.placeholderClearedCount",
+  "seed.repair.sampleUpdatedIds",
+  "seed.repair.seedHash",
+  "seed.repair.version",
 ];
 
 function useSeedMeta() {
@@ -54,6 +64,12 @@ function useSeedMeta() {
       lastRepairStats: map.get("seed.lastRepairStats") ?? null,
       lastLinkerAt: map.get("seed.lastLinkerAt") ?? null,
       lastLinkerStats: map.get("seed.lastLinkerStats") ?? null,
+      repairLastRunAt: map.get("seed.repair.lastRunAt") ?? null,
+      repairUpdatedCount: map.get("seed.repair.updatedCount") ?? null,
+      repairPlaceholderClearedCount: map.get("seed.repair.placeholderClearedCount") ?? null,
+      repairSampleUpdatedIds: map.get("seed.repair.sampleUpdatedIds") ?? [],
+      repairSeedHash: map.get("seed.repair.seedHash") ?? null,
+      repairVersion: map.get("seed.repair.version") ?? null,
     };
   }, [items]);
 }
@@ -102,6 +118,12 @@ export default function SeedDebugPanel({ onBack }) {
   const [linkerResult, setLinkerResult] = useState(null);
   const [linkerError, setLinkerError] = useState(null);
   const [resetText, setResetText] = useState("");
+  const [seedSample, setSeedSample] = useState(null);
+  const [seedSampleError, setSeedSampleError] = useState(null);
+  const [mismatchSample, setMismatchSample] = useState([]);
+  const [mismatchError, setMismatchError] = useState(null);
+  const [equipmentCreateResult, setEquipmentCreateResult] = useState(null);
+  const [equipmentCreateError, setEquipmentCreateError] = useState(null);
 
   const runImport = useCallback(
     async ({ dryRun = false, onlyIfChanged = false } = {}) => {
@@ -126,12 +148,13 @@ export default function SeedDebugPanel({ onBack }) {
     []
   );
 
-  const runRepair = useCallback(async ({ dryRun = false } = {}) => {
+  const runRepair = useCallback(async ({ dryRun = false, force = false } = {}) => {
     setRepairError(null);
     setRepairResult(null);
     setRepairProgress({ stage: "starting", startedAt: Date.now() });
-    const result = await repairSeedExercises({
+    const result = await repairSeededExercises({
       dryRun,
+      force,
       onProgress: (next) => setRepairProgress(next),
     });
     if (result.status === "error") {
@@ -164,6 +187,156 @@ export default function SeedDebugPanel({ onBack }) {
     await db.delete();
     window.location.reload();
   }, [resetText]);
+
+  const handleLoadSeedSample = useCallback(async () => {
+    setSeedSampleError(null);
+    setSeedSample(null);
+    const result = await getSeedSamples({ limit: 1 });
+    if (result.status !== "success") {
+      setSeedSampleError(result.error ?? "Unable to load seed sample.");
+      return;
+    }
+    setSeedSample(result);
+  }, []);
+
+  const handleLoadMismatches = useCallback(async () => {
+    setMismatchError(null);
+    setMismatchSample([]);
+    const payloadResult = await loadSeedPayload();
+    if (payloadResult.status !== "success") {
+      setMismatchError(payloadResult.error ?? "Unable to load seed payload.");
+      return;
+    }
+    const exercises = await db.table("exercises").toArray();
+    const bySourceKey = new Map(
+      exercises
+        .filter((ex) => ex.sourceKey)
+        .map((ex) => [ex.sourceKey, ex])
+    );
+    const byExternalId = new Map(
+      exercises
+        .filter((ex) => ex.externalId)
+        .map((ex) => [ex.externalId, ex])
+    );
+    const byStableId = new Map(
+      exercises
+        .filter((ex) => ex.stableId)
+        .map((ex) => [ex.stableId, ex])
+    );
+
+    const mismatches = [];
+    for (const record of payloadResult.payload) {
+      if (mismatches.length >= 5) break;
+      const normalized = normalizeSeedRecord(record);
+      const stableId = await computeStableId({
+        externalId: normalized.externalId,
+        name: normalized.name,
+        equipment: normalized.equipment,
+        primaryMuscles: normalized.primaryMuscles,
+        pattern: normalized.pattern,
+        category: normalized.category,
+      });
+      const cleaned = {
+        ...normalized,
+        stableId,
+        instructions: normalized.instructions ?? [],
+        gotchas: normalized.gotchas ?? [],
+        commonMistakes: normalized.commonMistakes ?? [],
+      };
+      const existing =
+        (cleaned.externalId ? byExternalId.get(cleaned.externalId) : null) ||
+        (cleaned.sourceKey ? bySourceKey.get(cleaned.sourceKey) : null) ||
+        (cleaned.stableId ? byStableId.get(cleaned.stableId) : null);
+      if (!existing) continue;
+
+      const diffs = [];
+      const compareList = (label, a, b) => {
+        const left = Array.isArray(a) ? a : [];
+        const right = Array.isArray(b) ? b : [];
+        if (left.join("|") !== right.join("|")) {
+          diffs.push({ field: label, expected: right, actual: left });
+        }
+      };
+      const compareValue = (label, a, b) => {
+        const left = a ?? null;
+        const right = b ?? null;
+        if (left !== right) {
+          diffs.push({ field: label, expected: right, actual: left });
+        }
+      };
+
+      compareList("instructions", existing.instructions, cleaned.instructions);
+      compareList("gotchas", existing.gotchas, cleaned.gotchas);
+      compareList("primaryMuscles", existing.primaryMuscles, cleaned.primaryMuscles);
+      compareList("equipment", existing.equipment, cleaned.equipment);
+      compareValue("category", existing.category, cleaned.category);
+      compareValue("pattern", existing.pattern, cleaned.pattern);
+      if (diffs.length) {
+        mismatches.push({
+          name: existing.name ?? cleaned.name ?? "Unknown exercise",
+          stableId: existing.stableId ?? null,
+          diffs,
+        });
+      }
+    }
+    setMismatchSample(mismatches);
+  }, []);
+
+  const handleCreateMissingEquipment = useCallback(async () => {
+    try {
+      setEquipmentCreateError(null);
+      setEquipmentCreateResult(null);
+      const exercises = await db.table("exercises").toArray();
+      const equipmentList = await db.table("equipment").toArray();
+      const lookup = new Map();
+      const idSet = new Set();
+      equipmentList.forEach((item) => {
+        if (!item?.id) return;
+        idSet.add(item.id);
+        const idKey = normalizeString(item.id).toLowerCase();
+        if (idKey) lookup.set(idKey, item.id);
+        const nameKey = normalizeString(item.name).toLowerCase();
+        if (nameKey) lookup.set(nameKey, item.id);
+        (item.aliases ?? []).forEach((alias) => {
+          const aliasKey = normalizeString(alias).toLowerCase();
+          if (aliasKey) lookup.set(aliasKey, item.id);
+        });
+      });
+
+      const toCreate = [];
+      exercises.forEach((exercise) => {
+        const equipment = Array.isArray(exercise?.equipment) ? exercise.equipment : [];
+        equipment.forEach((item) => {
+          const normalized = normalizeString(item).toLowerCase();
+          if (!normalized) return;
+          if (lookup.has(normalized)) return;
+          const slug = slugify(normalized) || normalized;
+          if (!slug || idSet.has(slug)) return;
+          idSet.add(slug);
+          lookup.set(normalized, slug);
+          toCreate.push({
+            id: slug,
+            name: normalized
+              .split(/\s+/)
+              .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+              .join(" "),
+            category: "accessory",
+            isPortable: true,
+            aliases: [normalized],
+          });
+        });
+      });
+
+      if (!toCreate.length) {
+        setEquipmentCreateResult({ created: 0 });
+        return;
+      }
+      await db.table("equipment").bulkPut(toCreate);
+      setEquipmentCreateResult({ created: toCreate.length });
+    } catch (error) {
+      setEquipmentCreateError(error?.message ?? "Failed to create equipment.");
+    }
+  }, []);
 
   const lastStats = meta.lastSeedStats ?? null;
   const lastReport = meta.lastValidationReport ?? null;
@@ -294,6 +467,9 @@ export default function SeedDebugPanel({ onBack }) {
             <Button variant="primary" size="sm" onClick={() => runRepair({})}>
               Repair seeded exercises
             </Button>
+            <Button variant="secondary" size="sm" onClick={() => runRepair({ force: true })}>
+              Force repair now
+            </Button>
           </div>
           {repairError ? <div className="template-meta">Repair error: {repairError}</div> : null}
           {repairResult && repairResult.status === "dry-run" ? (
@@ -306,6 +482,11 @@ export default function SeedDebugPanel({ onBack }) {
             <div className="template-meta">
               Updated {repairResult.updated ?? 0} exercises (cleared{" "}
               {repairResult.clearedPlaceholders ?? 0} placeholders).
+            </div>
+          ) : null}
+          {repairResult && repairResult.status === "skipped" ? (
+            <div className="template-meta">
+              Repair skipped (up to date). Seed hash: {repairResult.seedHash ?? "—"}
             </div>
           ) : null}
         </CardBody>
@@ -366,10 +547,116 @@ export default function SeedDebugPanel({ onBack }) {
               <div className="template-meta">
                 Cleared placeholders: {meta.lastRepairStats.clearedPlaceholders ?? 0}
               </div>
+              <div className="template-meta">Seed hash: {meta.lastRepairStats.seedHash ?? "—"}</div>
+              <div className="template-meta">Force: {meta.lastRepairStats.force ? "Yes" : "No"}</div>
+              {meta.lastRepairStats.sampleUpdatedIds?.length ? (
+                <div className="template-meta">
+                  Sample updated IDs: {meta.lastRepairStats.sampleUpdatedIds.join(", ")}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="template-meta">No repair stats recorded yet.</div>
           )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Repair meta</div>
+          <div className="template-meta">
+            Last run: {meta.repairLastRunAt ? new Date(meta.repairLastRunAt).toLocaleString() : "—"}
+          </div>
+          <div className="template-meta">Updated count: {meta.repairUpdatedCount ?? "—"}</div>
+          <div className="template-meta">
+            Placeholder cleared: {meta.repairPlaceholderClearedCount ?? "—"}
+          </div>
+          <div className="template-meta">Seed hash: {meta.repairSeedHash ?? "—"}</div>
+          <div className="template-meta">Repair version: {meta.repairVersion ?? "—"}</div>
+          {Array.isArray(meta.repairSampleUpdatedIds) && meta.repairSampleUpdatedIds.length ? (
+            <div className="template-meta">
+              Sample updated IDs: {meta.repairSampleUpdatedIds.join(", ")}
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Seed sample</div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={handleLoadSeedSample}>
+              View seed sample
+            </Button>
+          </div>
+          {seedSampleError ? (
+            <div className="template-meta">Seed sample error: {seedSampleError}</div>
+          ) : null}
+          {seedSample ? (
+            <div className="ui-stack">
+              <div className="template-meta">
+                Source: {seedSample.sourceUsed ?? "—"} · Total: {seedSample.total ?? 0}
+              </div>
+              <div className="template-meta">
+                Keys: {Object.keys(seedSample.sample?.[0] ?? {}).join(", ") || "—"}
+              </div>
+              <pre className="template-meta">{JSON.stringify(seedSample.sample?.[0] ?? {}, null, 2)}</pre>
+              <div className="template-meta">Normalized sample:</div>
+              <pre className="template-meta">
+                {JSON.stringify(seedSample.normalizedSample?.[0] ?? {}, null, 2)}
+              </pre>
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Seed mismatches (5)</div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={handleLoadMismatches}>
+              Show 5 mismatches
+            </Button>
+          </div>
+          {mismatchError ? (
+            <div className="template-meta">Mismatch error: {mismatchError}</div>
+          ) : null}
+          {mismatchSample.length ? (
+            mismatchSample.map((entry) => (
+              <div key={entry.stableId ?? entry.name} className="ui-stack">
+                <div className="ui-strong">
+                  {entry.name} {entry.stableId ? `(${entry.stableId})` : ""}
+                </div>
+                {entry.diffs.map((diff) => (
+                  <div key={diff.field} className="template-meta">
+                    {diff.field}: actual {JSON.stringify(diff.actual)} vs seed{" "}
+                    {JSON.stringify(diff.expected)}
+                  </div>
+                ))}
+              </div>
+            ))
+          ) : (
+            <div className="template-meta">No mismatches loaded.</div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody className="ui-stack">
+          <div className="ui-section-title">Equipment repair</div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={handleCreateMissingEquipment}>
+              Create missing equipment from exercises
+            </Button>
+          </div>
+          {equipmentCreateError ? (
+            <div className="template-meta">Equipment error: {equipmentCreateError}</div>
+          ) : null}
+          {equipmentCreateResult ? (
+            <div className="template-meta">
+              Created {equipmentCreateResult.created ?? 0} equipment entries.
+            </div>
+          ) : null}
         </CardBody>
       </Card>
 
