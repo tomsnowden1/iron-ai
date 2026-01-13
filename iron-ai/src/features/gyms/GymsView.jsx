@@ -661,8 +661,15 @@ function GymDetail({ spaceId, onBack, onEdit, onDuplicate, onLaunchCoach, onNoti
   );
 }
 
-export default function GymsView({ onBack, onLaunchCoach, onNotify }) {
-  const [view, setView] = useState({ type: "list", spaceId: null, mode: "create" });
+export default function GymsView({ onBack, onLaunchCoach, onNotify, initialView }) {
+  const [view, setView] = useState(
+    () => initialView ?? { type: "list", spaceId: null, mode: "create" }
+  );
+
+  useEffect(() => {
+    if (!initialView) return;
+    setView(initialView);
+  }, [initialView]);
 
   if (view.type === "list") {
     return (

@@ -2744,8 +2744,24 @@ function MoreView({
   themeMode,
   resolvedTheme,
   setThemeMode,
+  pendingNavigation,
+  onPendingNavigationConsumed,
 }) {
   const [section, setSection] = useState("home");
+  const [gymInitialView, setGymInitialView] = useState(null);
+
+  useEffect(() => {
+    if (!pendingNavigation) return;
+    setSection(pendingNavigation.section ?? "home");
+    setGymInitialView(pendingNavigation.gymView ?? null);
+    onPendingNavigationConsumed?.();
+  }, [pendingNavigation, onPendingNavigationConsumed]);
+
+  useEffect(() => {
+    if (section !== "gyms") return;
+    if (!gymInitialView) return;
+    setGymInitialView(null);
+  }, [gymInitialView, section]);
 
   if (section === "exercises") {
     return (
@@ -2760,7 +2776,13 @@ function MoreView({
   }
 
   if (section === "gyms") {
-    return <GymsView onBack={() => setSection("home")} onLaunchCoach={onLaunchCoach} />;
+    return (
+      <GymsView
+        onBack={() => setSection("home")}
+        onLaunchCoach={onLaunchCoach}
+        initialView={gymInitialView}
+      />
+    );
   }
 
   if (section === "settings") {
@@ -3107,6 +3129,7 @@ export default function App() {
   const [lastSummary, setLastSummary] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [coachLaunchContext, setCoachLaunchContext] = useState(null);
+  const [pendingMoreNavigation, setPendingMoreNavigation] = useState(null);
   const [exerciseSeedState, setExerciseSeedState] = useState({ status: "idle" });
   const [dbHealth, setDbHealth] = useState({ status: "idle" });
   const toastIdRef = useRef(0);
@@ -3325,6 +3348,16 @@ export default function App() {
           <CoachView
             launchContext={coachLaunchContext}
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
+            onNotify={notify}
+            onNavigateToGyms={(options = {}) => {
+              setPendingMoreNavigation({
+                section: "gyms",
+                gymView: options.create
+                  ? { type: "form", mode: "create", spaceId: null }
+                  : null,
+              });
+              setTab("more");
+            }}
           />
         )}
         {tab === "history" && <HistoryView />}
@@ -3365,6 +3398,8 @@ export default function App() {
             themeMode={themeMode}
             resolvedTheme={resolvedTheme}
             setThemeMode={setThemeMode}
+            pendingNavigation={pendingMoreNavigation}
+            onPendingNavigationConsumed={() => setPendingMoreNavigation(null)}
           />
         )}
         {!KNOWN_TABS.has(tab) && <NotFoundView onGoHome={() => setTab("workout")} />}
