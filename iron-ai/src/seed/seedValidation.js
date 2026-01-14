@@ -5,9 +5,9 @@ import { normalizeString, normalizeStringArray, slugify } from "./seedUtils.js";
 const exerciseSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
-  primaryMuscles: z.array(z.string().min(1)),
-  equipment: z.array(z.string().min(1)),
-  instructions: z.array(z.string().min(1)),
+  primaryMuscles: z.array(z.string().min(1)).min(1),
+  equipment: z.array(z.string().min(1)).min(1),
+  instructions: z.array(z.string().min(1)).optional(),
   aliases: z.array(z.string()).optional(),
   secondaryMuscles: z.array(z.string()).optional(),
   gotchas: z.array(z.string()).optional(),
@@ -29,6 +29,23 @@ const exerciseSchema = z.object({
   sourceKey: z.string().nullable().optional(),
   externalId: z.string().nullable().optional(),
 });
+
+function collectOptionalWarnings(record) {
+  const missing = [];
+  if (!record.instructions || record.instructions.length === 0) {
+    missing.push("instructions");
+  }
+  if (!record.gotchas || record.gotchas.length === 0) {
+    missing.push("gotchas");
+  }
+  const hasVideo =
+    (typeof record.youtubeVideoId === "string" && record.youtubeVideoId.trim()) ||
+    record.media?.videoUrl;
+  if (!hasVideo) {
+    missing.push("video");
+  }
+  return missing;
+}
 
 function normalizeSeedArray(value) {
   const list = Array.isArray(value) ? value : value ? [value] : [];
@@ -147,6 +164,8 @@ export function validateSeedPayload(payload, { minCount = 300 } = {}) {
     invalidCount: 0,
     invalidSamples: [],
     normalizedCount: 0,
+    warningCount: 0,
+    warningSamples: [],
     minCount,
   };
 
@@ -175,6 +194,17 @@ export function validateSeedPayload(payload, { minCount = 300 } = {}) {
     const result = exerciseSchema.safeParse(record);
     if (result.success) {
       report.validCount += 1;
+      const missingOptional = collectOptionalWarnings(record);
+      if (missingOptional.length) {
+        report.warningCount += 1;
+        if (report.warningSamples.length < 10) {
+          report.warningSamples.push({
+            index,
+            name: record.name || null,
+            missing: missingOptional,
+          });
+        }
+      }
       return;
     }
     report.invalidCount += 1;

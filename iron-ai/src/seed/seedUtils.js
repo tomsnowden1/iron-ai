@@ -49,6 +49,8 @@ export async function sha256Hex(value) {
 }
 
 export async function computeStableId({
+  source,
+  sourceId,
   externalId,
   name,
   equipment = [],
@@ -56,8 +58,11 @@ export async function computeStableId({
   pattern,
   category,
 }) {
-  const ext = normalizeString(externalId);
-  if (ext) return ext;
+  const normalizedSource = normalizeString(source).toLowerCase();
+  const sourceKey = normalizeString(sourceId || externalId);
+  if (sourceKey) {
+    return normalizedSource ? `${normalizedSource}:${sourceKey}` : sourceKey;
+  }
   const normalizedName = normalizeString(name).toLowerCase();
   const normalizedEquipment = normalizeStringArray(equipment)
     .map((item) => item.toLowerCase())

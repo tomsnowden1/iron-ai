@@ -1,0 +1,116 @@
+{
+  "status": "validated",
+  "generatedAt": "2026-01-13T15:24:54.566Z",
+  "reportPath": "src/seed/reports/latestExerciseImportReport.json",
+  "seedVersion": "2026-01-14-free-exercise-db-v3",
+  "seedVersionNumber": 3,
+  "counts": {
+    "total": 300,
+    "inserted": 0,
+    "updated": 0,
+    "skipped": 0,
+    "invalid": 0,
+    "warnings": 300,
+    "errors": 0
+  },
+  "samples": {
+    "inserted": [],
+    "updated": [],
+    "skipped": [],
+    "invalid": [],
+    "warnings": [
+      "Exercise 1",
+      "Exercise 2",
+      "Exercise 3",
+      "Exercise 4",
+      "Exercise 5"
+    ],
+    "errors": []
+  },
+  "warnings": {
+    "missingOptional": [
+      {
+        "index": 0,
+        "name": "Exercise 1",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 1,
+        "name": "Exercise 2",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 2,
+        "name": "Exercise 3",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 3,
+        "name": "Exercise 4",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 4,
+        "name": "Exercise 5",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 5,
+        "name": "Exercise 6",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 6,
+        "name": "Exercise 7",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 7,
+        "name": "Exercise 8",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 8,
+        "name": "Exercise 9",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      },
+      {
+        "index": 9,
+        "name": "Exercise 10",
+        "missing": [
+          "gotchas",
+          "video"
+        ]
+      }
+    ],
+    "fetch": []
+  },
+  "errors": []
+}

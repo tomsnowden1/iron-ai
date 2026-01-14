@@ -401,6 +401,8 @@ db.version(9)
       exercises.map(async (exercise) => {
         if (exercise.stableId) return exercise;
         const stableId = await computeStableId({
+          source: exercise.source,
+          sourceId: exercise.sourceId ?? exercise.externalId ?? exercise.sourceKey ?? null,
           externalId: exercise.externalId ?? exercise.sourceKey ?? null,
           name: exercise.name,
           equipment: exercise.equipment ?? [],
@@ -450,6 +452,8 @@ db.on("populate", async () => {
           ? { videoUrl: ex.video_url ?? ex.videoUrl }
           : {});
       const stableId = await computeStableId({
+        source: ex.source ?? "starter",
+        sourceId: ex.sourceId ?? ex.externalId ?? ex.sourceKey ?? null,
         externalId: ex.externalId ?? ex.sourceKey ?? null,
         name,
         equipment: ex.equipment ?? [],
