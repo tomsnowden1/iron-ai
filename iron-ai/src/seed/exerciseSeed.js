@@ -5,6 +5,7 @@ import { buildExerciseLinks } from "./exerciseLinker";
 import {
   SEED_MIN_COUNT,
   SEED_VERSION,
+  SEED_VERSION_NUMBER,
   STARTER_MIN_COUNT,
 } from "./seedConstants";
 import {
@@ -21,6 +22,7 @@ import { normalizeSeedRecord, validateSeedPayload } from "./seedValidation";
 
 const META_KEYS = {
   version: "seed.version",
+  versionNumber: "seed.versionNumber",
   hash: "seed.hash",
   lastSeedAt: "seed.lastSeedAt",
   lastSeedStatus: "seed.lastSeedStatus",
@@ -29,6 +31,7 @@ const META_KEYS = {
   auditLog: "seed.auditLog",
   lastValidationReport: "seed.lastValidationReport",
   lastSourceUsed: "seed.lastSourceUsed",
+  lastImportReport: "seed.lastImportReport",
   lastRepairAt: "seed.lastRepairAt",
   lastRepairStatus: "seed.lastRepairStatus",
   lastRepairMessage: "seed.lastRepairMessage",
@@ -45,6 +48,7 @@ const META_KEYS = {
 
 const AUDIT_LOG_LIMIT = 20;
 const REPAIR_VERSION = "2026-01-14-repair-v2";
+const REPORT_PATH = "src/seed/reports/latestExerciseImportReport.json";
 
 const PLACEHOLDER_INSTRUCTIONS = new Set([
   "Step 1: Perform the movement with control.",
@@ -91,6 +95,44 @@ function normalizeMuscleList(list) {
   return Array.from(
     new Set(normalizeStringArray(list).map((item) => titleCase(item)))
   );
+}
+
+function buildSourceStableKey(record) {
+  const key = normalizeString(record?.sourceId ?? record?.externalId ?? record?.sourceKey);
+  if (!key) return null;
+  const source = normalizeString(record?.source).toLowerCase();
+  return source ? `${source}:${key}` : key;
+}
+
+function getRecordSampleId(record) {
+  return (
+    record?.stableId ??
+    record?.sourceId ??
+    record?.externalId ??
+    record?.sourceKey ??
+    record?.name ??
+    null
+  );
+}
+
+function getSampleList(items, limit = 5) {
+  return items.filter(Boolean).slice(0, limit);
+}
+
+async function writeImportReportArtifact(report) {
+  if (typeof process === "undefined" || !process.versions?.node) {
+    return { ok: false, error: new Error("Filesystem report writing unavailable.") };
+  }
+  const fsModule = await import("fs");
+  const pathModule = await import("path");
+  try {
+    const absolute = pathModule.resolve(process.cwd(), REPORT_PATH);
+    await fsModule.promises.mkdir(pathModule.dirname(absolute), { recursive: true });
+    await fsModule.promises.writeFile(absolute, JSON.stringify(report, null, 2));
+    return { ok: true, path: REPORT_PATH };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 function shouldClearPlaceholderMuscles(record, list) {
@@ -190,6 +232,7 @@ async function getSeedMetaSnapshot() {
   const map = new Map(items.map((item) => [item.key, item.value]));
   return {
     seedVersion: map.get(META_KEYS.version) ?? null,
+    seedVersionNumber: map.get(META_KEYS.versionNumber) ?? null,
     seedHash: map.get(META_KEYS.hash) ?? null,
     lastSeedAt: map.get(META_KEYS.lastSeedAt) ?? null,
     lastSeedStatus: map.get(META_KEYS.lastSeedStatus) ?? null,
@@ -197,6 +240,7 @@ async function getSeedMetaSnapshot() {
     lastSeedStats: map.get(META_KEYS.lastSeedStats) ?? null,
     lastValidationReport: map.get(META_KEYS.lastValidationReport) ?? null,
     lastSourceUsed: map.get(META_KEYS.lastSourceUsed) ?? null,
+    lastImportReport: map.get(META_KEYS.lastImportReport) ?? null,
     auditLog: map.get(META_KEYS.auditLog) ?? [],
   };
 }
@@ -379,7 +423,9 @@ function mergeSeedExercise(existing, incoming, now) {
   if (!merged.media && sanitizedIncoming.media) {
     merged.media = sanitizedIncoming.media;
   }
-  if (!merged.stableId) merged.stableId = incoming.stableId;
+  if (!merged.stableId || merged.stableId !== incoming.stableId) {
+    merged.stableId = incoming.stableId;
+  }
   if (!merged.sourceKey && sanitizedIncoming.sourceKey) {
     merged.sourceKey = sanitizedIncoming.sourceKey;
   }
@@ -450,6 +496,58 @@ function normalizeSeedDefaults(record, now) {
   };
 }
 
+function buildImportReport({
+  status,
+  sourceUsed,
+  seedHash = null,
+  validationReport,
+  insertedIds = [],
+  updatedIds = [],
+  skippedIds = [],
+  errors = [],
+  fetchWarnings = [],
+}) {
+  const invalidSamples = validationReport?.invalidSamples ?? [];
+  const warningSamples = validationReport?.warningSamples ?? [];
+  const warningCount = (validationReport?.warningCount ?? 0) + fetchWarnings.length;
+
+  return {
+    status,
+    generatedAt: new Date().toISOString(),
+    reportPath: REPORT_PATH,
+    seedVersion: SEED_VERSION,
+    seedVersionNumber: SEED_VERSION_NUMBER,
+    seedHash,
+    sourceUsed,
+    counts: {
+      total: validationReport?.total ?? 0,
+      inserted: insertedIds.length,
+      updated: updatedIds.length,
+      skipped: skippedIds.length,
+      invalid: validationReport?.invalidCount ?? 0,
+      warnings: warningCount,
+      errors: errors.length,
+    },
+    samples: {
+      inserted: getSampleList(insertedIds),
+      updated: getSampleList(updatedIds),
+      skipped: getSampleList(skippedIds),
+      invalid: getSampleList(
+        invalidSamples.map((sample) => sample.name ?? `index:${sample.index}`)
+      ),
+      warnings: getSampleList(
+        warningSamples.map((sample) => sample.name ?? `index:${sample.index}`)
+      ),
+      errors: getSampleList(errors.map((error) => error.code ?? error.message ?? "error")),
+    },
+    warnings: {
+      missingOptional: warningSamples,
+      fetch: fetchWarnings,
+    },
+    errors,
+  };
+}
+
 async function ensureStarterExercises() {
   const count = await db.table("exercises").count();
   if (count > 0) return { status: "skipped", count };
@@ -459,6 +557,8 @@ async function ensureStarterExercises() {
     starterExercises.map(async (ex) => {
       const record = normalizeSeedDefaults(ex, now);
       const stableId = await computeStableId({
+        source: record.source,
+        sourceId: record.sourceId ?? record.externalId ?? record.sourceKey ?? null,
         externalId: record.externalId,
         name: record.name,
         equipment: record.equipment,
@@ -477,8 +577,10 @@ async function ensureStarterExercises() {
   );
 
   await db.table("exercises").bulkAdd(normalized);
+  const insertedIds = normalized.map((record) => getRecordSampleId(record));
   await writeMeta(META_KEYS.lastSeedStatus, "STARTER_ONLY");
   await writeMeta(META_KEYS.lastSeedAt, now);
+  await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
   await writeMeta(
     META_KEYS.lastSeedMessage,
     `Inserted ${normalized.length} starter exercises.`
@@ -496,6 +598,25 @@ async function ensureStarterExercises() {
     stats: { totalSeed: normalized.length, inserted: normalized.length },
     sourceUsed: "starter",
     seedVersion: SEED_VERSION,
+  });
+  const report = buildImportReport({
+    status: "starter-only",
+    sourceUsed: "starter",
+    seedHash: null,
+    validationReport: {
+      total: normalized.length,
+      invalidCount: 0,
+      warningCount: 0,
+      warningSamples: [],
+      invalidSamples: [],
+    },
+    insertedIds,
+  });
+  const reportResult = await writeImportReportArtifact(report);
+  await writeMeta(META_KEYS.lastImportReport, {
+    ...report,
+    reportPath: reportResult.ok ? reportResult.path : REPORT_PATH,
+    reportWriteError: reportResult.ok ? null : reportResult.error?.message,
   });
   return { status: "seeded", count: normalized.length };
 }
@@ -529,10 +650,24 @@ export async function importExercises({
       "Unable to load seed payload.";
     seedLog("error", message, { errors: fetchResult.errors });
     if (!dryRun) {
+      const report = buildImportReport({
+        status: "error",
+        sourceUsed: "none",
+        seedHash: null,
+        validationReport: null,
+        errors: fetchResult.errors ?? [fetchResult.error].filter(Boolean),
+      });
+      const reportResult = await writeImportReportArtifact(report);
       await writeMeta(META_KEYS.lastSeedStatus, "FAILURE");
       await writeMeta(META_KEYS.lastSeedAt, Date.now());
       await writeMeta(META_KEYS.lastSeedMessage, message);
+      await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
       await writeMeta(META_KEYS.lastSourceUsed, "none");
+      await writeMeta(META_KEYS.lastImportReport, {
+        ...report,
+        reportPath: reportResult.ok ? reportResult.path : REPORT_PATH,
+        reportWriteError: reportResult.ok ? null : reportResult.error?.message,
+      });
       await appendAuditLog({
         timestamp: Date.now(),
         status: "FAILURE",
@@ -555,11 +690,30 @@ export async function importExercises({
         : `Seed validation failed (${validation.report.invalidCount} invalid).`;
     seedLog("error", message, { report: validation.report });
     if (!dryRun) {
+      const report = buildImportReport({
+        status: "error",
+        sourceUsed,
+        seedHash: null,
+        validationReport: validation.report,
+        errors: [
+          {
+            code: "SEED_VALIDATION_FAILED",
+            message,
+          },
+        ],
+      });
+      const reportResult = await writeImportReportArtifact(report);
       await writeMeta(META_KEYS.lastSeedStatus, "FAILURE");
       await writeMeta(META_KEYS.lastSeedAt, Date.now());
       await writeMeta(META_KEYS.lastSeedMessage, message);
+      await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
       await writeMeta(META_KEYS.lastValidationReport, validation.report);
       await writeMeta(META_KEYS.lastSourceUsed, sourceUsed);
+      await writeMeta(META_KEYS.lastImportReport, {
+        ...report,
+        reportPath: reportResult.ok ? reportResult.path : REPORT_PATH,
+        reportWriteError: reportResult.ok ? null : reportResult.error?.message,
+      });
       await appendAuditLog({
         timestamp: Date.now(),
         status: "FAILURE",
@@ -614,6 +768,8 @@ export async function importExercises({
     normalized.map(async (record) => ({
       ...record,
       stableId: await computeStableId({
+        source: record.source,
+        sourceId: record.sourceId ?? record.externalId ?? record.sourceKey ?? null,
         externalId: record.externalId,
         name: record.name,
         equipment: record.equipment,
@@ -668,8 +824,10 @@ export async function importExercises({
       totalSeed: validation.report.total,
       valid: validation.report.validCount,
       invalid: validation.report.invalidCount,
+      warnings: validation.report.warningCount,
       duplicatesCollapsed,
       seedVersion: SEED_VERSION,
+      seedVersionNumber: SEED_VERSION_NUMBER,
       seedHash,
       report: validation.report,
       warnings,
@@ -682,22 +840,45 @@ export async function importExercises({
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
+  const insertedIds = [];
+  const updatedIds = [];
+  const skippedIds = [];
 
   try {
     await db.transaction("rw", db.table("exercises"), db.table("meta"), async () => {
-      const stableIds = deduped.map((record) => record.stableId).filter(Boolean);
-      const existingExercises = stableIds.length
-        ? await db.table("exercises").where("stableId").anyOf(stableIds).toArray()
-        : [];
-      const existingMap = new Map(
-        existingExercises.map((exercise) => [exercise.stableId, exercise])
+      const existingExercises = await db.table("exercises").toArray();
+      const existingByStableId = new Map(
+        existingExercises
+          .filter((exercise) => exercise.stableId)
+          .map((exercise) => [exercise.stableId, exercise])
+      );
+      const existingBySourceStableKey = new Map(
+        existingExercises
+          .map((exercise) => [buildSourceStableKey(exercise), exercise])
+          .filter(([key]) => key)
+      );
+      const existingBySourceId = new Map(
+        existingExercises
+          .filter((exercise) => exercise.sourceId)
+          .map((exercise) => [exercise.sourceId, exercise])
+      );
+      const existingByExternalId = new Map(
+        existingExercises
+          .filter((exercise) => exercise.externalId)
+          .map((exercise) => [exercise.externalId, exercise])
       );
 
       const toUpsert = [];
       deduped.forEach((record) => {
-        const existing = existingMap.get(record.stableId);
+        const sourceStableKey = buildSourceStableKey(record);
+        const existing =
+          existingByStableId.get(record.stableId) ||
+          (sourceStableKey ? existingBySourceStableKey.get(sourceStableKey) : null) ||
+          (record.sourceId ? existingBySourceId.get(record.sourceId) : null) ||
+          (record.externalId ? existingByExternalId.get(record.externalId) : null);
         if (!existing) {
           inserted += 1;
+          insertedIds.push(getRecordSampleId(record));
           toUpsert.push({
             ...record,
             source: record.source ?? "seed",
@@ -715,16 +896,19 @@ export async function importExercises({
         );
         if (skippedUpdate) {
           skipped += 1;
+          skippedIds.push(getRecordSampleId(existing));
           return;
         }
         if (changed) {
           updated += 1;
+          updatedIds.push(getRecordSampleId(existing));
           toUpsert.push({
             ...merged,
             ...withEquipmentAssignments(merged),
           });
         } else {
           skipped += 1;
+          skippedIds.push(getRecordSampleId(existing));
         }
       });
 
@@ -737,6 +921,7 @@ export async function importExercises({
       }
 
       await writeMeta(META_KEYS.version, SEED_VERSION);
+      await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
       await writeMeta(META_KEYS.hash, seedHash);
       await writeMeta(META_KEYS.lastSeedAt, now);
       await writeMeta(META_KEYS.lastSeedStatus, "SUCCESS");
@@ -774,11 +959,34 @@ export async function importExercises({
   } catch (error) {
     const message = error?.message ?? "Seed import failed.";
     seedLog("error", message, { error });
+    const report = buildImportReport({
+      status: "error",
+      sourceUsed,
+      seedHash,
+      validationReport: validation.report,
+      insertedIds,
+      updatedIds,
+      skippedIds,
+      errors: [
+        {
+          code: "SEED_IMPORT_FAILED",
+          message,
+        },
+      ],
+      fetchWarnings: warnings ?? [],
+    });
+    const reportResult = await writeImportReportArtifact(report);
     await writeMeta(META_KEYS.lastSeedStatus, "FAILURE");
     await writeMeta(META_KEYS.lastSeedAt, Date.now());
     await writeMeta(META_KEYS.lastSeedMessage, message);
+    await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
     await writeMeta(META_KEYS.lastValidationReport, validation.report);
     await writeMeta(META_KEYS.lastSourceUsed, sourceUsed);
+    await writeMeta(META_KEYS.lastImportReport, {
+      ...report,
+      reportPath: reportResult.ok ? reportResult.path : REPORT_PATH,
+      reportWriteError: reportResult.ok ? null : reportResult.error?.message,
+    });
     await appendAuditLog({
       timestamp: Date.now(),
       status: "FAILURE",
@@ -804,6 +1012,23 @@ export async function importExercises({
   });
 
   const linker = await recomputeExerciseLinks({ dryRun: false });
+  const report = buildImportReport({
+    status: "success",
+    sourceUsed,
+    seedHash,
+    validationReport: validation.report,
+    insertedIds,
+    updatedIds,
+    skippedIds,
+    errors: [],
+    fetchWarnings: warnings ?? [],
+  });
+  const reportResult = await writeImportReportArtifact(report);
+  await writeMeta(META_KEYS.lastImportReport, {
+    ...report,
+    reportPath: reportResult.ok ? reportResult.path : REPORT_PATH,
+    reportWriteError: reportResult.ok ? null : reportResult.error?.message,
+  });
 
   return {
     status: "success",
@@ -817,6 +1042,7 @@ export async function importExercises({
     duplicatesCollapsed,
     durationMs,
     seedVersion: SEED_VERSION,
+    seedVersionNumber: SEED_VERSION_NUMBER,
     seedHash,
     warnings,
     linker,
@@ -912,6 +1138,8 @@ export async function repairSeededExercises({
     normalized.map(async (record) => ({
       ...record,
       stableId: await computeStableId({
+        source: record.source,
+        sourceId: record.sourceId ?? record.externalId ?? record.sourceKey ?? null,
         externalId: record.externalId,
         name: record.name,
         equipment: record.equipment,
@@ -1259,6 +1487,7 @@ export async function getSeedDiagnostics() {
     seededCount,
     customCount,
     seedVersion: SEED_VERSION,
+    seedVersionNumber: meta.seedVersionNumber ?? SEED_VERSION_NUMBER,
     seedMinCount: SEED_MIN_COUNT,
     starterMinCount: STARTER_MIN_COUNT,
   };
@@ -1266,6 +1495,7 @@ export async function getSeedDiagnostics() {
 
 export {
   SEED_VERSION,
+  SEED_VERSION_NUMBER,
   SEED_MIN_COUNT,
   STARTER_MIN_COUNT,
   getSeedMetaSnapshot,

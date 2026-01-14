@@ -10,6 +10,7 @@ import {
   repairSeededExercises,
   SEED_MIN_COUNT,
   SEED_VERSION,
+  SEED_VERSION_NUMBER,
   STARTER_MIN_COUNT,
 } from "../../seed/exerciseSeed";
 import { getExercisePrimaryMuscles } from "../../exercises/data";
@@ -19,12 +20,14 @@ import { Button, Card, CardBody, Input, Label, PageHeader } from "../../componen
 
 const META_KEYS = [
   "seed.version",
+  "seed.versionNumber",
   "seed.hash",
   "seed.lastSeedAt",
   "seed.lastSeedStatus",
   "seed.lastSeedMessage",
   "seed.lastSeedStats",
   "seed.lastValidationReport",
+  "seed.lastImportReport",
   "seed.auditLog",
   "seed.lastSourceUsed",
   "seed.lastRepairAt",
@@ -50,12 +53,14 @@ function useSeedMeta() {
     const map = new Map((items ?? []).map((item) => [item.key, item.value]));
     return {
       seedVersion: map.get("seed.version") ?? null,
+      seedVersionNumber: map.get("seed.versionNumber") ?? null,
       seedHash: map.get("seed.hash") ?? null,
       lastSeedAt: map.get("seed.lastSeedAt") ?? null,
       lastSeedStatus: map.get("seed.lastSeedStatus") ?? null,
       lastSeedMessage: map.get("seed.lastSeedMessage") ?? null,
       lastSeedStats: map.get("seed.lastSeedStats") ?? null,
       lastValidationReport: map.get("seed.lastValidationReport") ?? null,
+      lastImportReport: map.get("seed.lastImportReport") ?? null,
       auditLog: map.get("seed.auditLog") ?? [],
       lastSourceUsed: map.get("seed.lastSourceUsed") ?? null,
       lastRepairAt: map.get("seed.lastRepairAt") ?? null,
@@ -229,6 +234,8 @@ export default function SeedDebugPanel({ onBack }) {
       if (mismatches.length >= 5) break;
       const normalized = normalizeSeedRecord(record);
       const stableId = await computeStableId({
+        source: normalized.source,
+        sourceId: normalized.sourceId ?? normalized.externalId ?? normalized.sourceKey ?? null,
         externalId: normalized.externalId,
         name: normalized.name,
         equipment: normalized.equipment,
@@ -413,10 +420,26 @@ export default function SeedDebugPanel({ onBack }) {
         <CardBody className="ui-stack">
           <div className="ui-section-title">Seed status</div>
           <div className="template-meta">Version: {meta.seedVersion ?? "—"}</div>
+          <div className="template-meta">
+            Version number: {meta.seedVersionNumber ?? SEED_VERSION_NUMBER}
+          </div>
           <div className="template-meta">Hash: {meta.seedHash ?? "—"}</div>
           <div className="template-meta">Last status: {meta.lastSeedStatus ?? "—"}</div>
           <div className="template-meta">Last message: {meta.lastSeedMessage ?? "—"}</div>
           <div className="template-meta">Last source: {meta.lastSourceUsed ?? "—"}</div>
+          <div className="template-meta">
+            Report: {meta.lastImportReport?.reportPath ?? "—"}
+          </div>
+          {meta.lastImportReport?.counts ? (
+            <div className="template-meta">
+              Report summary: {meta.lastImportReport.counts.total ?? 0} total ·{" "}
+              {meta.lastImportReport.counts.inserted ?? 0} inserted ·{" "}
+              {meta.lastImportReport.counts.updated ?? 0} updated ·{" "}
+              {meta.lastImportReport.counts.skipped ?? 0} skipped ·{" "}
+              {meta.lastImportReport.counts.invalid ?? 0} invalid ·{" "}
+              {meta.lastImportReport.counts.warnings ?? 0} warnings
+            </div>
+          ) : null}
           <div className="template-meta">Min count: {SEED_MIN_COUNT}</div>
         </CardBody>
       </Card>
