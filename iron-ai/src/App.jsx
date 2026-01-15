@@ -3500,6 +3500,7 @@ export default function App() {
               });
               setTab("more");
             }}
+            diagnosticsEnabled={diagnosticsEnabled}
           />
         )}
         {tab === "history" && <HistoryView />}

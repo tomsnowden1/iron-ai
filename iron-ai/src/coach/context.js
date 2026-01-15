@@ -12,6 +12,7 @@ import { getEquipmentMap } from "../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../equipment/engine";
 import { isSpaceExpired } from "../workoutSpaces/logic";
 import { summarizeCoachMemory } from "./memory";
+import { buildCoachContextContract } from "./contract";
 
 const DEFAULT_SESSION_LIMIT = 5;
 const MAX_SESSION_LIMIT = 20;
@@ -22,6 +23,13 @@ const MAX_MISSING_EXERCISES = 20;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function nowMs() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
 }
 
 function toDateLabel(dateValue) {
@@ -150,6 +158,11 @@ function sizeOfSnapshot(snapshot) {
   }
 }
 
+function resolveSnapshotBytes(snapshot) {
+  const size = sizeOfSnapshot(snapshot);
+  return Number.isFinite(size) ? size : 0;
+}
+
 function truncateSnapshot(snapshot, maxBytes) {
   const meta = { truncated: false, omitted: [] };
   let working = snapshot;
@@ -217,6 +230,7 @@ function resolveCoachActiveSpace(spaces, activeGymId) {
 }
 
 export async function getCoachContextSnapshot(options = {}) {
+  const startedAt = nowMs();
   const {
     scopes = {},
     sessionLimit = DEFAULT_SESSION_LIMIT,
@@ -388,14 +402,23 @@ export async function getCoachContextSnapshot(options = {}) {
   const size = sizeOfSnapshot(snapshot);
   const truncatedResult = size > maxBytes ? truncateSnapshot(snapshot, maxBytes) : null;
 
+  let meta = { sizeBytes: size, truncated: false, omitted: [] };
+  let finalSnapshot = snapshot;
+
   if (truncatedResult) {
-    const meta = { sizeBytes: size, truncated: true, omitted: truncatedResult.meta.omitted };
-    return {
-      snapshot: { ...truncatedResult.snapshot, meta },
-      meta,
-    };
+    meta = { sizeBytes: size, truncated: true, omitted: truncatedResult.meta.omitted };
+    finalSnapshot = truncatedResult.snapshot;
   }
 
-  const meta = { sizeBytes: size, truncated: false, omitted: [] };
-  return { snapshot: { ...snapshot, meta }, meta };
+  finalSnapshot = { ...finalSnapshot, meta };
+
+  const contextBytes = resolveSnapshotBytes(finalSnapshot);
+  const buildMs = Math.max(0, Math.round(nowMs() - startedAt));
+  const contract = buildCoachContextContract({
+    snapshot: finalSnapshot,
+    contextBytes,
+    buildMs,
+  });
+
+  return { snapshot: finalSnapshot, meta, contract };
 }

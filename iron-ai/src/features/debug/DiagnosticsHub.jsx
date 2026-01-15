@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import { db } from "../../db";
+import { COACH_PAYLOAD_META_KEYS } from "../../coach/telemetry";
 import { SEED_VERSION } from "../../seed/seedConstants";
 import { Button, Card, CardBody, CardFooter, PageHeader } from "../../components/ui";
 
@@ -12,6 +13,9 @@ const META_KEYS = [
   "seed.lastSeedMessage",
   "migration.version",
   "migration.lastMigrationAt",
+  COACH_PAYLOAD_META_KEYS.lastBuiltAt,
+  COACH_PAYLOAD_META_KEYS.lastFingerprint,
+  COACH_PAYLOAD_META_KEYS.counts,
 ];
 
 function formatTimestamp(value) {
@@ -36,6 +40,9 @@ function useMetaSnapshot() {
       seedLastMessage: map.get("seed.lastSeedMessage") ?? null,
       migrationVersion: map.get("migration.version") ?? null,
       migrationLastAt: map.get("migration.lastMigrationAt") ?? null,
+      coachPayloadBuiltAt: map.get(COACH_PAYLOAD_META_KEYS.lastBuiltAt) ?? null,
+      coachPayloadFingerprint: map.get(COACH_PAYLOAD_META_KEYS.lastFingerprint) ?? null,
+      coachPayloadCounts: map.get(COACH_PAYLOAD_META_KEYS.counts) ?? null,
     };
   }, [items]);
 }
@@ -75,6 +82,8 @@ export default function DiagnosticsHub({ onBack }) {
     if (exerciseCount == null || customExerciseCount == null) return null;
     return Math.max(0, exerciseCount - customExerciseCount);
   }, [exerciseCount, customExerciseCount]);
+  const coachPayloadCounts = meta.coachPayloadCounts ?? null;
+  const coachPayloadFingerprint = meta.coachPayloadFingerprint ?? null;
 
   const runIntegrityChecks = useCallback(async () => {
     setIntegrityStatus("running");
@@ -168,6 +177,13 @@ export default function DiagnosticsHub({ onBack }) {
         workouts: workoutCount,
         coachSessions: coachSessionCount,
       },
+      coach: {
+        payload: {
+          lastBuiltAt: meta.coachPayloadBuiltAt,
+          fingerprint: meta.coachPayloadFingerprint,
+          counts: meta.coachPayloadCounts,
+        },
+      },
       seed: {
         version: meta.seedVersion,
         lastStatus: meta.seedLastStatus,
@@ -185,6 +201,9 @@ export default function DiagnosticsHub({ onBack }) {
       gymCount,
       integrityReport,
       libraryExerciseCount,
+      meta.coachPayloadBuiltAt,
+      meta.coachPayloadCounts,
+      meta.coachPayloadFingerprint,
       meta.migrationLastAt,
       meta.migrationVersion,
       meta.seedLastMessage,
@@ -267,6 +286,45 @@ export default function DiagnosticsHub({ onBack }) {
             <div className="template-meta">Workouts: {workoutCount ?? "—"}</div>
             <div className="template-meta">
               Coach sessions: {coachSessionCount ?? "—"}
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardBody className="ui-stack">
+            <div className="ui-strong">Coach payload</div>
+            <div className="template-meta">
+              Last build: {formatTimestamp(meta.coachPayloadBuiltAt)}
+            </div>
+            <div className="template-meta">
+              Fingerprint: {coachPayloadFingerprint?.hash ?? "—"}
+            </div>
+            <div className="template-meta">
+              Context bytes: {coachPayloadFingerprint?.contextBytes ?? "—"}
+            </div>
+            <div className="template-meta">
+              Gym: {coachPayloadCounts?.activeGymName ?? "—"}
+            </div>
+            <div className="template-meta">
+              Equipment: {coachPayloadCounts?.equipmentCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Recent workouts: {coachPayloadCounts?.recentWorkoutsCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Last workout: {formatTimestamp(coachPayloadCounts?.lastWorkoutDate)}
+            </div>
+            <div className="template-meta">
+              Templates: {coachPayloadCounts?.templatesCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Custom exercises: {coachPayloadCounts?.customExercisesCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Library exercises: {coachPayloadCounts?.exerciseLibraryCount ?? "—"}
+            </div>
+            <div className="template-meta">
+              Build ms: {coachPayloadCounts?.buildMs ?? "—"}
             </div>
           </CardBody>
         </Card>

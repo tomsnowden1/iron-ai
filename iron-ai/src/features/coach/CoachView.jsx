@@ -62,11 +62,24 @@ function formatEquipmentCount(space) {
   return `${count} equipment`;
 }
 
+function formatCount(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return value;
+}
+
+function formatDateLabel(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString();
+}
+
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
   onNotify,
   onNavigateToGyms,
+  diagnosticsEnabled,
 }) {
   const { settings, apiKey, hasKey, keyStatus, coachMemoryEnabled } = useSettings();
   const memoryEnabled = coachMemoryEnabled;
@@ -90,6 +103,8 @@ export default function CoachView({
   const [contextPreview, setContextPreview] = useState(null);
   const [contextMeta, setContextMeta] = useState(null);
   const [contextLoading, setContextLoading] = useState(false);
+  const [contextContract, setContextContract] = useState(null);
+  const [payloadFingerprint, setPayloadFingerprint] = useState(null);
   const [gymPickerOpen, setGymPickerOpen] = useState(false);
   const [activeGymId, setActiveGymId] = useState(null);
   const [coachGymLoaded, setCoachGymLoaded] = useState(false);
@@ -117,6 +132,7 @@ export default function CoachView({
     [hasKey, keyStatus]
   );
   const canSend = accessState.canChat && input.trim().length > 0 && !sending;
+  const debugEnabled = import.meta.env.DEV || diagnosticsEnabled;
 
   useEffect(() => {
     let cancelled = false;
@@ -187,6 +203,8 @@ export default function CoachView({
     if (!contextEnabled) {
       setContextPreview(null);
       setContextMeta(null);
+      setContextContract(null);
+      setPayloadFingerprint(null);
     }
   }, [contextEnabled]);
 
@@ -201,21 +219,36 @@ export default function CoachView({
       : "No gym selected"
     : "None";
   const gymEquipmentLabel = selectedGym ? formatEquipmentCount(selectedGym) : "— equipment";
+  const trustBadgeEnabled =
+    Boolean(contextContract) && (contextEnabled || Boolean(pendingLaunchContext));
+  const trustSummary = trustBadgeEnabled
+    ? `${formatCount(contextContract.recentWorkoutsCount)} workouts, ${formatCount(
+        contextContract.templatesCount
+      )} templates`
+    : "";
+  const lastWorkoutLabel = trustBadgeEnabled
+    ? formatDateLabel(contextContract.lastWorkoutDate)
+    : "—";
+  const debugContract = contextContract ?? state.debug?.contextContract ?? null;
+  const debugPayloadFingerprint =
+    payloadFingerprint ?? state.debug?.payloadFingerprint ?? null;
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
     setContextLoading(true);
     try {
-      const { snapshot, meta } = await getCoachContextSnapshot({
+      const { snapshot, meta, contract } = await getCoachContextSnapshot({
         scopes: contextScopes,
         memorySummary: memoryEnabled ? memory : null,
         activeGymId,
       });
       setContextPreview(snapshot);
       setContextMeta(meta);
+      setContextContract(contract ?? null);
     } catch {
       setContextPreview({ error: "Unable to build preview right now." });
       setContextMeta(null);
+      setContextContract(null);
     } finally {
       setContextLoading(false);
     }
@@ -290,6 +323,25 @@ export default function CoachView({
       dispatch({ type: "ADD_TOOL_EVENTS", payload: result.toolEvents });
       dispatch({ type: "QUEUE_PROPOSALS", payload: result.proposals });
       dispatch({ type: "SET_DEBUG", payload: result.debug });
+      setContextContract(result.contextContract ?? null);
+      setPayloadFingerprint(result.payloadFingerprint ?? null);
+
+      if (result.payloadFingerprint || result.contextContract) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === userId
+              ? {
+                  ...msg,
+                  meta: {
+                    ...(msg.meta ?? {}),
+                    payloadFingerprint: result.payloadFingerprint ?? null,
+                    contextContract: result.contextContract ?? null,
+                  },
+                }
+              : msg
+          )
+        );
+      }
 
       if (keyStatus !== "valid") {
         void setOpenAIKeyStatus("valid");
@@ -464,6 +516,56 @@ export default function CoachView({
               {contextPanelOpen ? "Hide context" : "Context"}
             </Button>
           </div>
+          {trustBadgeEnabled ? (
+            <details className="coach-trust">
+              <summary className="coach-trust__summary">
+                <span className="coach-trust__label">Coach is using your data</span>
+                <span className="coach-trust__counts">{trustSummary}</span>
+              </summary>
+              <div className="coach-trust__details">
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Gym</div>
+                  <div className="coach-trust__item-value">
+                    {contextContract.activeGymName ?? "None"}
+                  </div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Equipment</div>
+                  <div className="coach-trust__item-value">
+                    {formatCount(contextContract.equipmentCount)}
+                  </div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Recent workouts</div>
+                  <div className="coach-trust__item-value">
+                    {formatCount(contextContract.recentWorkoutsCount)}
+                  </div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Last workout</div>
+                  <div className="coach-trust__item-value">{lastWorkoutLabel}</div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Templates</div>
+                  <div className="coach-trust__item-value">
+                    {formatCount(contextContract.templatesCount)}
+                  </div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Custom exercises</div>
+                  <div className="coach-trust__item-value">
+                    {formatCount(contextContract.customExercisesCount)}
+                  </div>
+                </div>
+                <div className="coach-trust__item">
+                  <div className="coach-trust__item-label">Library exercises</div>
+                  <div className="coach-trust__item-value">
+                    {formatCount(contextContract.exerciseLibraryCount)}
+                  </div>
+                </div>
+              </div>
+            </details>
+          ) : null}
         </CardHeader>
 
         {contextPanelOpen ? (
@@ -649,7 +751,7 @@ export default function CoachView({
         </Card>
       ) : null}
 
-      {import.meta.env.DEV ? (
+      {debugEnabled ? (
         <Card className="dev-panel">
           <CardHeader>
             <div className="ui-section-title">Coach debug</div>
@@ -683,6 +785,30 @@ export default function CoachView({
             <div>
               <span className="ui-muted">Allowed tools:</span>{" "}
               {state.debug?.allowedTools?.length ? state.debug.allowedTools.join(", ") : "—"}
+            </div>
+            <div>
+              <span className="ui-muted">Payload fingerprint:</span>{" "}
+              {debugPayloadFingerprint
+                ? `${debugPayloadFingerprint.hash} (${formatCount(
+                    debugPayloadFingerprint.contextBytes
+                  )} bytes)`
+                : "—"}
+            </div>
+            <div className="coach-debug__block">
+              <div className="ui-muted">Context contract</div>
+              <pre className="coach-debug__payload">
+                {JSON.stringify(debugContract ?? { notice: "No contract yet." }, null, 2)}
+              </pre>
+            </div>
+            <div className="coach-debug__block">
+              <div className="ui-muted">Fingerprint details</div>
+              <pre className="coach-debug__payload">
+                {JSON.stringify(
+                  debugPayloadFingerprint ?? { notice: "No fingerprint yet." },
+                  null,
+                  2
+                )}
+              </pre>
             </div>
           </CardBody>
         </Card>

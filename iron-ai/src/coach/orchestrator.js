@@ -8,8 +8,10 @@ import {
 } from "./tools";
 import { getCoachContextSnapshot } from "./context";
 import { summarizeCoachMemory } from "./memory";
+import { recordCoachPayloadTelemetry } from "./telemetry";
 
 const MAX_TOOL_LOOPS = 2;
+const COACH_TEMPERATURE = 0.2;
 
 const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -61,6 +63,39 @@ function buildSystemMessages({ contextSnapshot, memorySummary }) {
     });
   }
   return messages;
+}
+
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function hashStringFNV1a(input) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function buildPayloadFingerprint({ model, messages, tools }, contextBytes) {
+  const payload = {
+    model,
+    messages,
+    tools,
+    temperature: COACH_TEMPERATURE,
+    stream: true,
+  };
+  const hash = hashStringFNV1a(safeStringify(payload));
+  return {
+    algorithm: "fnv1a32",
+    hash,
+    contextBytes: Number.isFinite(contextBytes) ? contextBytes : 0,
+  };
 }
 
 function safeParseJSON(value) {
@@ -126,15 +161,19 @@ export async function runCoachTurn({
     model: DEFAULT_COACH_MODEL,
     toolCalls: [],
     contextMeta: null,
+    contextContract: null,
     allowedTools: Array.from(allowedTools),
+    payloadFingerprint: null,
+    payloadBuiltAt: null,
   };
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
 
   let contextSnapshot = null;
+  let contextContract = null;
   if (contextConfig?.enabled) {
     // TODO: Extend context snapshot sources (planner, long-term stats) as needed.
-    const { snapshot, meta } = await getCoachContextSnapshot({
+    const { snapshot, meta, contract } = await getCoachContextSnapshot({
       scopes: contextConfig.scopes,
       sessionLimit: contextConfig.sessionLimit,
       templateLimit: contextConfig.templateLimit,
@@ -143,7 +182,9 @@ export async function runCoachTurn({
       activeGymId,
     });
     contextSnapshot = snapshot;
+    contextContract = contract ?? null;
     debug.contextMeta = meta;
+    debug.contextContract = contextContract;
   }
 
   let loop = 0;
@@ -154,11 +195,32 @@ export async function runCoachTurn({
   ];
   debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
 
+  let payloadFingerprint = null;
+  let payloadBuiltAt = null;
   let finalAssistant = null;
   let pendingToolMessages = [];
 
   while (loop < MAX_TOOL_LOOPS) {
     loop += 1;
+    if (!payloadFingerprint) {
+      const contextBytes = contextContract?.contextBytes ?? 0;
+      payloadFingerprint = buildPayloadFingerprint(
+        {
+          model: DEFAULT_COACH_MODEL,
+          messages: conversation,
+          tools,
+        },
+        contextBytes
+      );
+      payloadBuiltAt = Date.now();
+      debug.payloadFingerprint = payloadFingerprint;
+      debug.payloadBuiltAt = payloadBuiltAt;
+      await recordCoachPayloadTelemetry({
+        fingerprint: payloadFingerprint,
+        contract: contextContract,
+        builtAt: payloadBuiltAt,
+      });
+    }
     const streamResult = await streamChatCompletion({
       apiKey,
       model: DEFAULT_COACH_MODEL,
@@ -306,6 +368,9 @@ export async function runCoachTurn({
     proposals,
     pendingToolMessages,
     debug,
+    contextContract,
+    payloadFingerprint,
+    payloadBuiltAt,
   };
 }
 
