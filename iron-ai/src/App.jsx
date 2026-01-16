@@ -22,6 +22,7 @@ import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
 import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
+import SeedDebugMiniPanel from "./features/debug/SeedDebugMiniPanel";
 import SeedDebugPanel from "./features/debug/SeedDebugPanel";
 import DiagnosticsHub from "./features/debug/DiagnosticsHub";
 import GymsView from "./features/gyms/GymsView";
@@ -3220,6 +3221,13 @@ export default function App() {
       window.localStorage.getItem("ironai.diagnosticsEnabled") === "true"
     );
   });
+  const [seedDebugEnabled, setSeedDebugEnabled] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return (
+      params.get("debug") === "1" ||
+      window.localStorage.getItem("debugSeed") === "1"
+    );
+  });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -3300,7 +3308,9 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("debug") === "1") {
       window.localStorage.setItem("ironai.diagnosticsEnabled", "true");
+      window.localStorage.setItem("debugSeed", "1");
       setDiagnosticsEnabled(true);
+      setSeedDebugEnabled(true);
     }
   }, []);
 
@@ -3368,7 +3378,9 @@ export default function App() {
     const runSeed = async () => {
       setExerciseSeedState({ status: "loading" });
       const result = await seedExercisesIfNeeded();
-      await repairSeededExercises({ force: false });
+      if (result?.status === "success" || result?.status === "fallback") {
+        await repairSeededExercises({ force: false });
+      }
       if (cancelled) return;
       setExerciseSeedState({
         status: result?.status ?? "error",
@@ -3567,6 +3579,7 @@ export default function App() {
           ))}
         </div>
       </nav>
+      {seedDebugEnabled ? <SeedDebugMiniPanel /> : null}
     </div>
   );
 }

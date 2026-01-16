@@ -28,6 +28,7 @@ const META_KEYS = {
   lastSeedStatus: "seed.lastSeedStatus",
   lastSeedMessage: "seed.lastSeedMessage",
   lastSeedStats: "seed.lastSeedStats",
+  lastImportMs: "seed.lastImportMs",
   auditLog: "seed.auditLog",
   lastValidationReport: "seed.lastValidationReport",
   lastSourceUsed: "seed.lastSourceUsed",
@@ -49,6 +50,8 @@ const META_KEYS = {
 const AUDIT_LOG_LIMIT = 20;
 const REPAIR_VERSION = "2026-01-14-repair-v2";
 const REPORT_PATH = "src/seed/reports/latestExerciseImportReport.json";
+const SEED_DATA_VERSION = "2026-01-16-inapp-300-v1";
+const SEED_FILE_PATH = "seed/exercises.inapp.300.json";
 
 const PLACEHOLDER_INSTRUCTIONS = new Set([
   "Step 1: Perform the movement with control.",
@@ -238,6 +241,7 @@ async function getSeedMetaSnapshot() {
     lastSeedStatus: map.get(META_KEYS.lastSeedStatus) ?? null,
     lastSeedMessage: map.get(META_KEYS.lastSeedMessage) ?? null,
     lastSeedStats: map.get(META_KEYS.lastSeedStats) ?? null,
+    lastImportMs: map.get(META_KEYS.lastImportMs) ?? null,
     lastValidationReport: map.get(META_KEYS.lastValidationReport) ?? null,
     lastSourceUsed: map.get(META_KEYS.lastSourceUsed) ?? null,
     lastImportReport: map.get(META_KEYS.lastImportReport) ?? null,
@@ -285,10 +289,9 @@ async function fetchSeedJson(url, label, retries = 2) {
 async function fetchSeedExercises() {
   const baseUrl = import.meta.env.BASE_URL ?? "/";
   const urls = [
-    { label: "public", url: new URL(`${baseUrl}seed/exercises.json`, window.location.origin) },
     {
-      label: "public-min",
-      url: new URL(`${baseUrl}seed/exercises.min.json`, window.location.origin),
+      label: "public-inapp",
+      url: new URL(`${baseUrl}${SEED_FILE_PATH}`, window.location.origin),
     },
   ];
 
@@ -307,31 +310,6 @@ async function fetchSeedExercises() {
       };
     }
     if (result.error) errors.push(result.error);
-  }
-
-  try {
-    const bundled = await import("../data/exercisesSeedPayload.js");
-    if (bundled?.default) {
-      warnings.push("Using bundled seed payload fallback.");
-      return {
-        ok: true,
-        payload: bundled.default,
-        sourceUsed: "bundled",
-        warnings,
-      };
-    }
-    errors.push({
-      code: "BUNDLED_EMPTY",
-      message: "Bundled seed payload is empty or missing.",
-      source: "bundled",
-    });
-  } catch (error) {
-    errors.push({
-      code: "BUNDLED_IMPORT_ERROR",
-      message: `Failed to load bundled seed payload: ${error?.message ?? "Unknown"}`,
-      source: "bundled",
-      error,
-    });
   }
 
   return { ok: false, errors };
@@ -515,7 +493,7 @@ function buildImportReport({
     status,
     generatedAt: new Date().toISOString(),
     reportPath: REPORT_PATH,
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
     seedVersionNumber: SEED_VERSION_NUMBER,
     seedHash,
     sourceUsed,
@@ -548,7 +526,7 @@ function buildImportReport({
   };
 }
 
-async function ensureStarterExercises() {
+async function ensureStarterExercises({ reason = "missing-seed-file" } = {}) {
   const count = await db.table("exercises").count();
   if (count > 0) return { status: "skipped", count };
 
@@ -578,26 +556,29 @@ async function ensureStarterExercises() {
 
   await db.table("exercises").bulkAdd(normalized);
   const insertedIds = normalized.map((record) => getRecordSampleId(record));
-  await writeMeta(META_KEYS.lastSeedStatus, "STARTER_ONLY");
+  await writeMeta(META_KEYS.lastSeedStatus, "FALLBACK_STARTER");
   await writeMeta(META_KEYS.lastSeedAt, now);
+  await writeMeta(META_KEYS.version, SEED_DATA_VERSION);
   await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
+  await writeMeta(META_KEYS.lastImportMs, 0);
   await writeMeta(
     META_KEYS.lastSeedMessage,
-    `Inserted ${normalized.length} starter exercises.`
+    `Seed file missing (${reason}). Inserted ${normalized.length} starter exercises.`
   );
   await writeMeta(META_KEYS.lastSeedStats, {
     totalSeed: normalized.length,
     inserted: normalized.length,
     updated: 0,
     skipped: 0,
+    importMs: 0,
   });
   await appendAuditLog({
     timestamp: now,
-    status: "STARTER_ONLY",
-    message: `Inserted ${normalized.length} starter exercises.`,
+    status: "FALLBACK_STARTER",
+    message: `Seed file missing (${reason}). Inserted ${normalized.length} starter exercises.`,
     stats: { totalSeed: normalized.length, inserted: normalized.length },
     sourceUsed: "starter",
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
   });
   const report = buildImportReport({
     status: "starter-only",
@@ -641,7 +622,7 @@ export async function importExercises({
     const has404 = fetchResult.errors?.some((error) => error.code === "HTTP_404");
     const prodMissingSeed =
       import.meta.env.PROD && has404
-        ? "PROD_MISSING_SEED_FILE: Seed file not found at /seed/exercises.json."
+        ? `PROD_MISSING_SEED_FILE: Seed file not found at /${SEED_FILE_PATH}.`
         : null;
     const message =
       prodMissingSeed ||
@@ -674,10 +655,15 @@ export async function importExercises({
         message,
         stats: null,
         sourceUsed: "none",
-        seedVersion: SEED_VERSION,
+        seedVersion: SEED_DATA_VERSION,
       });
     }
-    return { status: "error", error: message, sourceUsed: "none" };
+    return {
+      status: "error",
+      error: message,
+      sourceUsed: "none",
+      missingSeedFile: has404,
+    };
   }
 
   const { payload, sourceUsed, warnings } = fetchResult;
@@ -720,7 +706,7 @@ export async function importExercises({
         message,
         stats: validation.report,
         sourceUsed,
-        seedVersion: SEED_VERSION,
+        seedVersion: SEED_DATA_VERSION,
       });
     }
     return {
@@ -800,10 +786,11 @@ export async function importExercises({
     });
   }
 
+  const meta = await getSeedMetaSnapshot();
+  const allowUpdates = meta.seedVersion !== SEED_DATA_VERSION;
   if (onlyIfChanged) {
-    const meta = await getSeedMetaSnapshot();
     if (
-      meta.seedVersion === SEED_VERSION &&
+      meta.seedVersion === SEED_DATA_VERSION &&
       meta.seedHash === seedHash &&
       meta.lastSeedStatus === "SUCCESS"
     ) {
@@ -811,7 +798,7 @@ export async function importExercises({
         status: "skipped",
         reason: "Seed hash/version unchanged.",
         sourceUsed,
-        seedVersion: SEED_VERSION,
+        seedVersion: SEED_DATA_VERSION,
         seedHash,
       };
     }
@@ -826,7 +813,7 @@ export async function importExercises({
       invalid: validation.report.invalidCount,
       warnings: validation.report.warningCount,
       duplicatesCollapsed,
-      seedVersion: SEED_VERSION,
+      seedVersion: SEED_DATA_VERSION,
       seedVersionNumber: SEED_VERSION_NUMBER,
       seedHash,
       report: validation.report,
@@ -867,6 +854,11 @@ export async function importExercises({
           .filter((exercise) => exercise.externalId)
           .map((exercise) => [exercise.externalId, exercise])
       );
+      const existingBySlug = new Map(
+        existingExercises
+          .filter((exercise) => exercise.slug)
+          .map((exercise) => [exercise.slug, exercise])
+      );
 
       const toUpsert = [];
       deduped.forEach((record) => {
@@ -875,7 +867,8 @@ export async function importExercises({
           existingByStableId.get(record.stableId) ||
           (sourceStableKey ? existingBySourceStableKey.get(sourceStableKey) : null) ||
           (record.sourceId ? existingBySourceId.get(record.sourceId) : null) ||
-          (record.externalId ? existingByExternalId.get(record.externalId) : null);
+          (record.externalId ? existingByExternalId.get(record.externalId) : null) ||
+          (record.slug ? existingBySlug.get(record.slug) : null);
         if (!existing) {
           inserted += 1;
           insertedIds.push(getRecordSampleId(record));
@@ -886,6 +879,12 @@ export async function importExercises({
             updatedAt: record.updatedAt ?? now,
             ...withEquipmentAssignments(record),
           });
+          return;
+        }
+
+        if (!allowUpdates) {
+          skipped += 1;
+          skippedIds.push(getRecordSampleId(existing));
           return;
         }
 
@@ -920,7 +919,7 @@ export async function importExercises({
         await db.table("exercises").bulkPut(toUpsert.slice(i, i + batchSize));
       }
 
-      await writeMeta(META_KEYS.version, SEED_VERSION);
+      await writeMeta(META_KEYS.version, SEED_DATA_VERSION);
       await writeMeta(META_KEYS.versionNumber, SEED_VERSION_NUMBER);
       await writeMeta(META_KEYS.hash, seedHash);
       await writeMeta(META_KEYS.lastSeedAt, now);
@@ -937,7 +936,9 @@ export async function importExercises({
         updated,
         skipped,
         duplicatesCollapsed,
+        importMs: Date.now() - startedAt,
       });
+      await writeMeta(META_KEYS.lastImportMs, Date.now() - startedAt);
       await writeMeta(META_KEYS.lastValidationReport, validation.report);
       await writeMeta(META_KEYS.lastSourceUsed, sourceUsed);
       await appendAuditLog({
@@ -952,7 +953,7 @@ export async function importExercises({
           duplicatesCollapsed,
         },
         sourceUsed,
-        seedVersion: SEED_VERSION,
+        seedVersion: SEED_DATA_VERSION,
         seedHash,
       });
     });
@@ -993,7 +994,7 @@ export async function importExercises({
       message,
       stats: validation.report,
       sourceUsed,
-      seedVersion: SEED_VERSION,
+      seedVersion: SEED_DATA_VERSION,
     });
     return { status: "error", error: message, sourceUsed };
   }
@@ -1001,7 +1002,7 @@ export async function importExercises({
   const durationMs = Date.now() - startedAt;
   seedLog("info", "Seed import complete", {
     sourceUsed,
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
     seedHash,
     inserted,
     updated,
@@ -1010,6 +1011,9 @@ export async function importExercises({
     durationMs,
     warnings,
   });
+  console.info(
+    `[seed] version=${SEED_DATA_VERSION} inserted=${inserted} updated=${updated} total=${deduped.length} ms=${durationMs}`
+  );
 
   const linker = await recomputeExerciseLinks({ dryRun: false });
   const report = buildImportReport({
@@ -1041,7 +1045,7 @@ export async function importExercises({
     skipped,
     duplicatesCollapsed,
     durationMs,
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
     seedVersionNumber: SEED_VERSION_NUMBER,
     seedHash,
     warnings,
@@ -1427,29 +1431,10 @@ export async function recomputeExerciseLinks({ dryRun = false } = {}) {
 }
 
 export async function seedExercisesIfNeeded() {
-  const now = Date.now();
-  await ensureStarterExercises();
-
   const meta = await getSeedMetaSnapshot();
   const exerciseCount = await db.table("exercises").count();
-  if (!meta.lastSeedStatus && exerciseCount > 0 && exerciseCount <= STARTER_MIN_COUNT) {
-    await writeMeta(META_KEYS.lastSeedStatus, "STARTER_ONLY");
-    await writeMeta(META_KEYS.lastSeedAt, now);
-    await writeMeta(
-      META_KEYS.lastSeedMessage,
-      `Starter exercises only (${exerciseCount}).`
-    );
-    await appendAuditLog({
-      timestamp: now,
-      status: "STARTER_ONLY",
-      message: `Starter exercises only (${exerciseCount}).`,
-      stats: { totalSeed: exerciseCount, inserted: 0, updated: 0, skipped: 0 },
-      sourceUsed: "starter",
-      seedVersion: SEED_VERSION,
-    });
-  }
   const shouldAttempt =
-    meta.seedVersion !== SEED_VERSION ||
+    meta.seedVersion !== SEED_DATA_VERSION ||
     !meta.seedHash ||
     meta.lastSeedStatus === "FAILURE" ||
     exerciseCount < SEED_MIN_COUNT;
@@ -1463,11 +1448,22 @@ export async function seedExercisesIfNeeded() {
   }
 
   seedLog("info", "Seed import starting...", {
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
     lastSeedStatus: meta.lastSeedStatus,
   });
 
   const result = await importExercises({ dryRun: false });
+  if (result.status === "error" && result.missingSeedFile) {
+    const fallback = await ensureStarterExercises({ reason: "seed-file-missing" });
+    if (fallback.status === "seeded") {
+      seedLog("warn", "Seed file missing. Starter fallback used.", {
+        seedVersion: SEED_DATA_VERSION,
+        seedFile: SEED_FILE_PATH,
+        fallbackCount: fallback.count,
+      });
+      return { status: "fallback", error: result.error, fallbackCount: fallback.count };
+    }
+  }
   return result;
 }
 
@@ -1486,7 +1482,7 @@ export async function getSeedDiagnostics() {
     exerciseCount,
     seededCount,
     customCount,
-    seedVersion: SEED_VERSION,
+    seedVersion: SEED_DATA_VERSION,
     seedVersionNumber: meta.seedVersionNumber ?? SEED_VERSION_NUMBER,
     seedMinCount: SEED_MIN_COUNT,
     starterMinCount: STARTER_MIN_COUNT,
@@ -1494,6 +1490,7 @@ export async function getSeedDiagnostics() {
 }
 
 export {
+  SEED_DATA_VERSION,
   SEED_VERSION,
   SEED_VERSION_NUMBER,
   SEED_MIN_COUNT,
