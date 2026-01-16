@@ -15,7 +15,10 @@
     "prepare": "git config core.hooksPath .githooks || true",
     "preview": "vite preview",
     "validate:seed": "node scripts/validate-seed.mjs",
-    "generate:seed-payload": "node scripts/generate-seed-payload.mjs"
+    "generate:seed-payload": "node scripts/generate-seed-payload.mjs",
+    "seed:freeex": "node scripts/free-exercise-db.seed.mjs",
+    "seed:freeex:images": "node scripts/free-exercise-db.seed.mjs --images",
+    "seed:validate": "node scripts/validate-seed.mjs --inapp"
   },
   "dependencies": {
     "dexie-react-hooks": "^4.2.0",
