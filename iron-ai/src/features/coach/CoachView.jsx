@@ -13,17 +13,20 @@ import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
+import { ActionDraftKinds } from "../../coach/actionDraftContract";
+import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import { getCoachActiveGymMeta, listWorkoutSpaces, setCoachActiveGymMeta } from "../../db";
 import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
 import BottomSheet from "../../components/ui/BottomSheet";
 
-function createMessage(id, role, content) {
+function createMessage(id, role, content, meta) {
   return {
     id,
     role,
     content,
+    meta: meta ?? null,
     createdAt: Date.now(),
   };
 }
@@ -75,6 +78,91 @@ function formatDateLabel(value) {
   return date.toLocaleDateString();
 }
 
+function safeParseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function extractFirstJsonBlock(text) {
+  if (!text) return null;
+  const match = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
+  return match?.[1] ?? null;
+}
+
+function normalizeExerciseDraft(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const exerciseId = Number(entry.exerciseId);
+  if (!Number.isFinite(exerciseId)) return null;
+  const sets = Number(entry.sets);
+  const reps = Number(entry.reps);
+  const warmupSets = Number(entry.warmupSets);
+  return {
+    exerciseId,
+    ...(Number.isFinite(sets) ? { sets } : {}),
+    ...(Number.isFinite(reps) ? { reps } : {}),
+    ...(Number.isFinite(warmupSets) ? { warmupSets } : {}),
+  };
+}
+
+function normalizeTemplateDraft(raw, fallbackName) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = String(raw.name ?? raw.title ?? fallbackName ?? "").trim();
+  const exercises = Array.isArray(raw.exercises) ? raw.exercises : [];
+  const normalizedExercises = exercises
+    .map((exercise) => normalizeExerciseDraft(exercise))
+    .filter(Boolean);
+  if (!normalizedExercises.length) return null;
+  const spaceId = Number(raw.spaceId);
+  return {
+    name: name || "Coach Template",
+    exercises: normalizedExercises,
+    ...(Number.isFinite(spaceId) ? { spaceId } : {}),
+  };
+}
+
+function resolveTemplateDraftFromActionDraft(actionDraft) {
+  if (!actionDraft) return null;
+  if (
+    actionDraft.kind !== ActionDraftKinds.create_template &&
+    actionDraft.kind !== ActionDraftKinds.create_workout
+  ) {
+    return null;
+  }
+  const payload = actionDraft.payload ?? {};
+  const fallbackName = payload.name ?? payload.title ?? actionDraft.title ?? null;
+  const raw = { ...payload };
+  if (!raw.name && fallbackName) raw.name = fallbackName;
+  return normalizeTemplateDraft(raw, fallbackName);
+}
+
+function resolveTemplateDraftFromText(text) {
+  const block = extractFirstJsonBlock(text);
+  if (!block) return null;
+  const parsed = safeParseJson(block);
+  if (!parsed) return null;
+  if (parsed?.actionDraft) {
+    const fromContract = resolveTemplateDraftFromActionDraft(parsed.actionDraft);
+    if (fromContract) return fromContract;
+  }
+  return normalizeTemplateDraft(parsed, null);
+}
+
+function resolveTemplateDraft({ actionDraft, text, templateTool }) {
+  const draft =
+    resolveTemplateDraftFromActionDraft(actionDraft) ?? resolveTemplateDraftFromText(text);
+  if (!draft) return null;
+  if (!templateTool) return draft;
+  const validation = validateToolInput(templateTool, draft);
+  return validation.valid ? draft : null;
+}
+
+const TEMPLATE_REQUEST_PROMPT =
+  "Convert your last plan into the IronAI template JSON format. " +
+  "Reply with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
+
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
@@ -89,6 +177,7 @@ export default function CoachView({
     [settings?.coach_memory]
   );
 
+  const templateTool = useMemo(() => getToolRegistry().get("create_template"), []);
   const [state, dispatch] = useReducer(coachReducer, initialCoachState);
   const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
   const sortedSpaces = useMemo(
@@ -115,6 +204,10 @@ export default function CoachView({
   const [pendingLaunchContext, setPendingLaunchContext] = useState(
     () => launchContext ?? null
   );
+  const [pendingTemplateRequest, setPendingTemplateRequest] = useState(false);
+  const [templateConfirmDraft, setTemplateConfirmDraft] = useState(null);
+  const [templateConfirmOpen, setTemplateConfirmOpen] = useState(false);
+  const [templateCreating, setTemplateCreating] = useState(false);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -291,6 +384,12 @@ export default function CoachView({
           : ""
       }`
     : "—";
+  const latestAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "assistant") return messages[i].id;
+    }
+    return null;
+  }, [messages]);
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -330,110 +429,151 @@ export default function CoachView({
     spaces: "Workout spaces",
   };
 
-  const handleSend = async () => {
-    const trimmed = input.trim();
-    if (!trimmed || sending) return;
-    if (!accessState.canChat) {
-      setError(accessState.message);
-      return;
-    }
+  const sendCoachMessage = useCallback(
+    async (messageText, options = {}) => {
+      const trimmed = String(messageText ?? "").trim();
+      if (!trimmed || sending) return;
+      if (!accessState.canChat) {
+        setError(accessState.message);
+        return;
+      }
 
-    setError("");
-    setSending(true);
-    setInput("");
+      const { clearInput = false, autoTemplateRequest = false } = options;
 
-    const userId = (messageIdRef.current += 1);
-    setMessages((prev) => [...prev, createMessage(userId, "user", trimmed)]);
+      setError("");
+      setSending(true);
+      if (clearInput) setInput("");
+      if (autoTemplateRequest) setPendingTemplateRequest(true);
 
-    const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
-    let streamedId = null;
-    try {
-      const result = await runCoachTurn({
-        apiKey,
-        chatHistory: chatHistoryRef.current,
-        userMessage: trimmed,
-        contextConfig: {
-          enabled: effectiveContextEnabled,
-          scopes: contextScopes,
-          launchContext: pendingLaunchContext,
-          activeGymId,
-        },
-        memoryEnabled,
-        memorySummary: memory,
-        onStreamStart: () => {
-          streamedId = (messageIdRef.current += 1);
-          streamingIdRef.current = streamedId;
-          setMessages((prev) => [...prev, createMessage(streamedId, "assistant", "")]);
-        },
-        onStreamDelta: (delta) => {
-          if (!streamedId) return;
+      const userId = (messageIdRef.current += 1);
+      setMessages((prev) => [
+        ...prev,
+        createMessage(userId, "user", trimmed, {
+          ...(autoTemplateRequest ? { autoTemplateRequest: true } : {}),
+        }),
+      ]);
+
+      const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
+      let streamedId = null;
+      try {
+        const result = await runCoachTurn({
+          apiKey,
+          chatHistory: chatHistoryRef.current,
+          userMessage: trimmed,
+          contextConfig: {
+            enabled: effectiveContextEnabled,
+            scopes: contextScopes,
+            launchContext: pendingLaunchContext,
+            activeGymId,
+          },
+          memoryEnabled,
+          memorySummary: memory,
+          onStreamStart: () => {
+            streamedId = (messageIdRef.current += 1);
+            streamingIdRef.current = streamedId;
+            setMessages((prev) => [
+              ...prev,
+              createMessage(streamedId, "assistant", ""),
+            ]);
+          },
+          onStreamDelta: (delta) => {
+            if (!streamedId) return;
+            setMessages((prev) =>
+              prev.map((msg) =>
+                msg.id === streamedId
+                  ? { ...msg, content: `${msg.content}${delta}` }
+                  : msg
+              )
+            );
+          },
+          onStreamEnd: () => {
+            streamingIdRef.current = null;
+          },
+        });
+
+        setChatHistory(result.conversation);
+        dispatch({ type: "ADD_TOOL_EVENTS", payload: result.toolEvents });
+        dispatch({ type: "QUEUE_PROPOSALS", payload: result.proposals });
+        dispatch({ type: "SET_DEBUG", payload: result.debug });
+        setContextContract(result.contextContract ?? null);
+        setPayloadFingerprint(result.payloadFingerprint ?? null);
+
+        if (result.payloadFingerprint || result.contextContract) {
           setMessages((prev) =>
             prev.map((msg) =>
-              msg.id === streamedId ? { ...msg, content: `${msg.content}${delta}` } : msg
+              msg.id === userId
+                ? {
+                    ...msg,
+                    meta: {
+                      ...(msg.meta ?? {}),
+                      payloadFingerprint: result.payloadFingerprint ?? null,
+                      contextContract: result.contextContract ?? null,
+                    },
+                  }
+                : msg
             )
           );
-        },
-        onStreamEnd: () => {
-          streamingIdRef.current = null;
-        },
-      });
+        }
 
-      setChatHistory(result.conversation);
-      dispatch({ type: "ADD_TOOL_EVENTS", payload: result.toolEvents });
-      dispatch({ type: "QUEUE_PROPOSALS", payload: result.proposals });
-      dispatch({ type: "SET_DEBUG", payload: result.debug });
-      setContextContract(result.contextContract ?? null);
-      setPayloadFingerprint(result.payloadFingerprint ?? null);
+        if (keyStatus !== "valid") {
+          void setOpenAIKeyStatus("valid");
+        }
 
-      if (result.payloadFingerprint || result.contextContract) {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === userId
-              ? {
-                  ...msg,
-                  meta: {
-                    ...(msg.meta ?? {}),
-                    payloadFingerprint: result.payloadFingerprint ?? null,
-                    contextContract: result.contextContract ?? null,
-                  },
-                }
-              : msg
-          )
-        );
-      }
+        const assistantMeta = {
+          actionDraft: result.actionDraft ?? null,
+          actionContractVersion: result.actionContractVersion ?? null,
+        };
 
-      if (keyStatus !== "valid") {
-        void setOpenAIKeyStatus("valid");
+        if (!streamedId) {
+          const assistantId = (messageIdRef.current += 1);
+          setMessages((prev) => [
+            ...prev,
+            createMessage(assistantId, "assistant", result.assistant, assistantMeta),
+          ]);
+        } else {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === streamedId
+                ? { ...msg, content: result.assistant, meta: assistantMeta }
+                : msg
+            )
+          );
+        }
+        if (pendingLaunchContext) {
+          setPendingLaunchContext(null);
+          onLaunchContextConsumed?.();
+        }
+      } catch (err) {
+        if (err?.status === 401 || err?.status === 403) {
+          void setOpenAIKeyStatus("invalid");
+        }
+        setError(resolveErrorMessage(err, accessState));
+        if (streamedId) {
+          setMessages((prev) => prev.filter((msg) => msg.id !== streamedId));
+        }
+      } finally {
+        setSending(false);
+        if (autoTemplateRequest) setPendingTemplateRequest(false);
       }
+    },
+    [
+      accessState,
+      activeGymId,
+      apiKey,
+      contextEnabled,
+      contextScopes,
+      keyStatus,
+      memory,
+      memoryEnabled,
+      onLaunchContextConsumed,
+      pendingLaunchContext,
+      sending,
+    ]
+  );
 
-      if (!streamedId) {
-        const assistantId = (messageIdRef.current += 1);
-        setMessages((prev) => [
-          ...prev,
-          createMessage(assistantId, "assistant", result.assistant),
-        ]);
-      } else {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === streamedId ? { ...msg, content: result.assistant } : msg
-          )
-        );
-      }
-      if (pendingLaunchContext) {
-        setPendingLaunchContext(null);
-        onLaunchContextConsumed?.();
-      }
-    } catch (err) {
-      if (err?.status === 401 || err?.status === 403) {
-        void setOpenAIKeyStatus("invalid");
-      }
-      setError(resolveErrorMessage(err, accessState));
-      if (streamedId) {
-        setMessages((prev) => prev.filter((msg) => msg.id !== streamedId));
-      }
-    } finally {
-      setSending(false);
-    }
+  const handleSend = async () => {
+    if (!input.trim()) return;
+    await sendCoachMessage(input, { clearInput: true });
   };
 
   const handleKeyDown = (event) => {
@@ -443,6 +583,57 @@ export default function CoachView({
       void handleSend();
     }
   };
+
+  const resolveDraftForMessage = useCallback(
+    (message) =>
+      resolveTemplateDraft({
+        actionDraft: message?.meta?.actionDraft ?? null,
+        text: message?.content ?? "",
+        templateTool,
+      }),
+    [templateTool]
+  );
+
+  const handleMakeTemplate = useCallback(
+    async (message) => {
+      if (!message || message.role !== "assistant") return;
+      if (pendingTemplateRequest || templateCreating) return;
+      const draft = resolveDraftForMessage(message);
+      if (draft) {
+        setTemplateConfirmDraft(draft);
+        setTemplateConfirmOpen(true);
+        return;
+      }
+      await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, { autoTemplateRequest: true });
+    },
+    [pendingTemplateRequest, resolveDraftForMessage, sendCoachMessage, templateCreating]
+  );
+
+  const handleConfirmTemplate = useCallback(async () => {
+    if (!templateConfirmDraft || templateCreating) return;
+    setTemplateCreating(true);
+    try {
+      await executeTool("create_template", templateConfirmDraft);
+      onNotify?.(
+        `Template created${templateConfirmDraft.name ? `: ${templateConfirmDraft.name}` : "."}`,
+        { tone: "success" }
+      );
+      setTemplateConfirmOpen(false);
+      setTemplateConfirmDraft(null);
+    } catch (err) {
+      onNotify?.(`Unable to create template: ${err?.message ?? "Unknown error"}`, {
+        tone: "warning",
+      });
+    } finally {
+      setTemplateCreating(false);
+    }
+  }, [onNotify, templateConfirmDraft, templateCreating]);
+
+  const handleCloseTemplateConfirm = useCallback(() => {
+    if (templateCreating) return;
+    setTemplateConfirmOpen(false);
+    setTemplateConfirmDraft(null);
+  }, [templateCreating]);
 
   const confirmProposal = async (proposal) => {
     dispatch({
@@ -589,6 +780,10 @@ export default function CoachView({
     URL.revokeObjectURL(url);
     onNotify?.("Diagnostics exported.", { tone: "success" });
   }, [coachDiagnosticsReport, onNotify]);
+
+  const templateConfirmSummary = templateConfirmDraft?.name
+    ? `Template: ${templateConfirmDraft.name}.`
+    : "Template ready.";
 
   return (
     <div className="page">
@@ -773,11 +968,61 @@ export default function CoachView({
             {messages.length === 0 && !sending ? (
               <div className="chat-empty">Ask a question to get started.</div>
             ) : null}
-            {messages.map((message) => (
-              <div key={message.id} className="chat-message" data-role={message.role}>
-                <div className="chat-bubble">{message.content}</div>
-              </div>
-            ))}
+            {messages.map((message) => {
+              const isAssistant = message.role === "assistant";
+              const isLatestAssistant = isAssistant && message.id === latestAssistantId;
+              const templateDraft = isLatestAssistant
+                ? resolveDraftForMessage(message)
+                : null;
+              const makeTemplateDisabled =
+                !isLatestAssistant || pendingTemplateRequest || templateCreating || sending;
+              const changeGymDisabled = !isLatestAssistant || !hasGyms;
+              const showRequesting =
+                isLatestAssistant && pendingTemplateRequest && !templateDraft;
+              const showStaleHint = isAssistant && !isLatestAssistant;
+
+              return (
+                <div key={message.id} className="chat-message" data-role={message.role}>
+                  <div className="chat-message__stack">
+                    <div className="chat-bubble">{message.content}</div>
+                    {isAssistant ? (
+                      <div
+                        className="chat-actions"
+                        data-stale={showStaleHint ? "true" : "false"}
+                      >
+                        <div className="ui-row ui-row--wrap">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleMakeTemplate(message)}
+                            disabled={makeTemplateDisabled}
+                          >
+                            Make template
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setGymPickerOpen(true)}
+                            disabled={changeGymDisabled}
+                          >
+                            Change gym
+                          </Button>
+                        </div>
+                        {showRequesting ? (
+                          <div className="chat-actions__status">
+                            Requesting template format…
+                          </div>
+                        ) : showStaleHint ? (
+                          <div className="chat-actions__status">
+                            Actions apply to the latest reply.
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
             {sending && !streamingIdRef.current ? (
               <div className="chat-message" data-role="assistant" data-loading="true">
                 <div className="chat-bubble">Coach is thinking...</div>
@@ -1034,6 +1279,39 @@ export default function CoachView({
             </div>
           </CardBody>
         </Card>
+      ) : null}
+
+      {templateConfirmOpen ? (
+        <div className="coach-modal" role="dialog" aria-modal="true">
+          <div
+            className="coach-modal__backdrop"
+            onClick={handleCloseTemplateConfirm}
+          />
+          <div className="coach-modal__content" role="document">
+            <div className="ui-section-title">Create template?</div>
+            <div className="template-meta">
+              {templateConfirmSummary} This will save a template from the coach plan.
+            </div>
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleCloseTemplateConfirm}
+                disabled={templateCreating}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleConfirmTemplate}
+                loading={templateCreating}
+              >
+                Create
+              </Button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       <BottomSheet
