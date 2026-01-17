@@ -13,6 +13,7 @@ import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
+import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import { getCoachActiveGymMeta, listWorkoutSpaces, setCoachActiveGymMeta } from "../../db";
@@ -75,6 +76,22 @@ function formatDateLabel(value) {
   return date.toLocaleDateString();
 }
 
+function formatTemplateMappingPreview(mapping, limit = 5) {
+  const list = Array.isArray(mapping) ? mapping : [];
+  const trimmed = list.slice(0, limit);
+  const remainder = Math.max(0, list.length - trimmed.length);
+  const lines = trimmed.map((entry) => {
+    const draftLabel = entry.draftName || (entry.draftId != null ? `ID ${entry.draftId}` : "Unknown");
+    if (!entry.resolvedId) {
+      return `${draftLabel} → create custom`;
+    }
+    const resolvedLabel = entry.resolvedName ?? "Unknown";
+    return `${draftLabel} → ${resolvedLabel} (#${entry.resolvedId})`;
+  });
+  if (remainder) lines.push(`… +${remainder} more`);
+  return lines;
+}
+
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
@@ -108,6 +125,7 @@ export default function CoachView({
   const [payloadFingerprint, setPayloadFingerprint] = useState(null);
   const [debugContextContract, setDebugContextContract] = useState(null);
   const [debugContextFingerprint, setDebugContextFingerprint] = useState(null);
+  const [templateMappingPreview, setTemplateMappingPreview] = useState({});
   const [gymPickerOpen, setGymPickerOpen] = useState(false);
   const [activeGymId, setActiveGymId] = useState(null);
   const [coachGymLoaded, setCoachGymLoaded] = useState(false);
@@ -224,6 +242,7 @@ export default function CoachView({
     if (!coachDiagnosticsEnabled) {
       setDebugContextContract(null);
       setDebugContextFingerprint(null);
+      setTemplateMappingPreview({});
       return () => {
         cancelled = true;
       };
@@ -254,6 +273,43 @@ export default function CoachView({
       cancelled = true;
     };
   }, [coachDiagnosticsEnabled, contextScopes, memory, memoryEnabled, activeGymId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!coachDiagnosticsEnabled) {
+      setTemplateMappingPreview({});
+      return () => {
+        cancelled = true;
+      };
+    }
+    const buildPreview = async () => {
+      const previews = {};
+      const templateProposals = state.proposals.filter(
+        (proposal) => proposal.name === "create_template"
+      );
+      for (const proposal of templateProposals) {
+        const draftExercises = Array.isArray(proposal.input?.exercises)
+          ? proposal.input.exercises
+          : [];
+        if (!draftExercises.length) continue;
+        try {
+          const preview = await resolveTemplateExercises(draftExercises, {
+            createMissing: false,
+          });
+          previews[proposal.id] = preview;
+        } catch {
+          // Ignore preview failures in debug-only UI.
+        }
+      }
+      if (!cancelled) {
+        setTemplateMappingPreview(previews);
+      }
+    };
+    void buildPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [coachDiagnosticsEnabled, state.proposals]);
 
   const hasGyms = sortedSpaces.length > 0;
   const selectedGym = useMemo(
@@ -825,32 +881,49 @@ export default function CoachView({
             <div className="ui-section-title">Pending actions</div>
           </CardHeader>
           <CardBody className="ui-stack">
-            {state.proposals.map((proposal) => (
-              <div key={proposal.id} className="proposal-card">
-                <div className="proposal-card__summary">{proposal.summary}</div>
-                <div className="proposal-card__meta">
-                  Status: {proposal.status ?? "pending"}
-                </div>
-                {proposal.status === "pending" ? (
-                  <div className="ui-row ui-row--wrap">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => cancelProposal(proposal)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => confirmProposal(proposal)}
-                    >
-                      Confirm
-                    </Button>
+            {state.proposals.map((proposal) => {
+              const preview = templateMappingPreview[proposal.id];
+              const previewLines =
+                coachDiagnosticsEnabled && proposal.name === "create_template"
+                  ? formatTemplateMappingPreview(preview?.mapping)
+                  : [];
+              return (
+                <div key={proposal.id} className="proposal-card">
+                  <div className="proposal-card__summary">{proposal.summary}</div>
+                  <div className="proposal-card__meta">
+                    Status: {proposal.status ?? "pending"}
                   </div>
-                ) : null}
-              </div>
-            ))}
+                  {previewLines.length ? (
+                    <div className="proposal-card__debug">
+                      <div className="template-meta">Mapping preview</div>
+                      {previewLines.map((line) => (
+                        <div key={line} className="template-meta">
+                          {line}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {proposal.status === "pending" ? (
+                    <div className="ui-row ui-row--wrap">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => cancelProposal(proposal)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => confirmProposal(proposal)}
+                      >
+                        Confirm
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </CardBody>
         </Card>
       ) : null}
