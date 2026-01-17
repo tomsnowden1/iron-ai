@@ -20,6 +20,7 @@ const DEFAULT_TEMPLATE_LIMIT = 10;
 const MAX_TEMPLATE_LIMIT = 50;
 const DEFAULT_MAX_BYTES = 60000;
 const MAX_MISSING_EXERCISES = 20;
+const DEFAULT_REQUEST_SESSION_LIMIT = 5;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -30,6 +31,19 @@ function nowMs() {
     return performance.now();
   }
   return Date.now();
+}
+
+function countEquipment(equipmentIds) {
+  if (!Array.isArray(equipmentIds)) return 0;
+  return equipmentIds.filter((id) => id && id !== "bodyweight").length;
+}
+
+function safeJsonSize(value) {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
 }
 
 function toDateLabel(dateValue) {
@@ -227,6 +241,54 @@ function resolveCoachActiveSpace(spaces, activeGymId) {
   if (!validSpaces.length) return null;
   if (activeGymId == null) return null;
   return validSpaces.find((space) => space.id === activeGymId) ?? null;
+}
+
+export async function getCoachRequestContext({ activeGymId } = {}) {
+  const startedAt = nowMs();
+  const settings = await db.settings.get(1);
+  const resolvedActiveGymId = activeGymId ?? settings?.active_space_id ?? null;
+  const spaces = await listWorkoutSpaces();
+  const activeSpace = resolveCoachActiveSpace(spaces, resolvedActiveGymId);
+  const equipmentIds = Array.isArray(activeSpace?.equipmentIds)
+    ? activeSpace.equipmentIds
+    : [];
+  const normalizedEquipmentIds = Array.from(new Set(equipmentIds)).sort((a, b) =>
+    String(a).localeCompare(String(b))
+  );
+  const equipmentCount = countEquipment(normalizedEquipmentIds);
+
+  const exerciseTotal = await db.table("exercises").count();
+  const customExercisesCount = await db
+    .table("exercises")
+    .filter((exercise) => exercise?.is_custom || exercise?.source === "user")
+    .count();
+  const exerciseLibraryCount = Math.max(0, exerciseTotal - customExercisesCount);
+
+  const templatesCount = await db.table("templates").count();
+  const recentSessions = await listRecentWorkoutSessions(DEFAULT_REQUEST_SESSION_LIMIT);
+  const recentWorkoutsCount = recentSessions.length;
+  const lastWorkoutDate =
+    recentSessions[0]?.finishedAt ?? recentSessions[0]?.startedAt ?? null;
+
+  const baseContext = {
+    activeGymId: activeSpace?.id ?? null,
+    gymName: activeSpace?.name ?? null,
+    equipmentIds: normalizedEquipmentIds,
+    equipmentCount,
+    exerciseLibraryCount,
+    customExercisesCount,
+    templatesCount,
+    recentWorkoutsCount,
+    lastWorkoutDate,
+  };
+
+  const contextBytes = safeJsonSize(baseContext);
+  const contextBuildMs = Math.max(0, Math.round(nowMs() - startedAt));
+
+  return {
+    context: { ...baseContext, contextBytes, contextBuildMs },
+    meta: { contextBytes, contextBuildMs },
+  };
 }
 
 export async function getCoachContextSnapshot(options = {}) {
