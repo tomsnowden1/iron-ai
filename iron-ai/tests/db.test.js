@@ -14,11 +14,13 @@ import {
   startWorkoutFromTemplate,
   updateTemplateItem,
 } from '../src/db.js'
+import { seedTestExercises } from './seedTestData.js'
 
 describe.sequential('workout data flows', () => {
   beforeEach(async () => {
     await db.delete()
     await db.open()
+    await seedTestExercises()
   })
 
   afterAll(async () => {

@@ -9,11 +9,13 @@ import {
 import { getCoachContextSnapshot } from "../src/coach/context.js";
 import { coachReducer, initialCoachState } from "../src/coach/state.js";
 import { executeTool, getToolRegistry, validateToolInput } from "../src/coach/tools.js";
+import { seedTestExercises } from "./seedTestData.js";
 
 describe.sequential("coach platform", () => {
   beforeEach(async () => {
     await db.delete();
     await db.open();
+    await seedTestExercises();
   });
 
   afterAll(async () => {

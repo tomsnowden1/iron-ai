@@ -8,6 +8,8 @@ import {
 } from "./tools";
 import { getCoachContextSnapshot } from "./context";
 import { summarizeCoachMemory } from "./memory";
+import { parseCoachActionDraftMessage } from "./actionDraftContract";
+import { buildContextFingerprint } from "./fingerprint";
 import { recordCoachPayloadTelemetry } from "./telemetry";
 
 const MAX_TOOL_LOOPS = 2;
@@ -16,12 +18,15 @@ const COACH_TEMPERATURE = 0.2;
 const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
   "Be concise, practical, and friendly.",
+  "Reply with a succinct assistantText.",
+  "If proposing an action, include a JSON object in a fenced ```json``` block using contractVersion coach_action_v1 with assistantText and an optional actionDraft.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
   "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
   "If a write action is requested, ask for user confirmation before changes are made.",
+  "Avoid asking multiple clarifying questions; propose reasonable defaults instead.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
 ].join(" ");
 
@@ -63,39 +68,6 @@ function buildSystemMessages({ contextSnapshot, memorySummary }) {
     });
   }
   return messages;
-}
-
-function safeStringify(value) {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return "";
-  }
-}
-
-function hashStringFNV1a(input) {
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < input.length; i += 1) {
-    hash ^= input.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-function buildPayloadFingerprint({ model, messages, tools }, contextBytes) {
-  const payload = {
-    model,
-    messages,
-    tools,
-    temperature: COACH_TEMPERATURE,
-    stream: true,
-  };
-  const hash = hashStringFNV1a(safeStringify(payload));
-  return {
-    algorithm: "fnv1a32",
-    hash,
-    contextBytes: Number.isFinite(contextBytes) ? contextBytes : 0,
-  };
 }
 
 function safeParseJSON(value) {
@@ -165,6 +137,9 @@ export async function runCoachTurn({
     allowedTools: Array.from(allowedTools),
     payloadFingerprint: null,
     payloadBuiltAt: null,
+    actionContractVersion: null,
+    actionParseErrors: null,
+    actionDraft: null,
   };
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
@@ -200,27 +175,23 @@ export async function runCoachTurn({
   let finalAssistant = null;
   let pendingToolMessages = [];
 
+  if (contextSnapshot) {
+    payloadFingerprint = await buildContextFingerprint(
+      contextSnapshot,
+      contextContract?.contextBytes ?? null
+    );
+    payloadBuiltAt = Date.now();
+    debug.payloadFingerprint = payloadFingerprint;
+    debug.payloadBuiltAt = payloadBuiltAt;
+    await recordCoachPayloadTelemetry({
+      fingerprint: payloadFingerprint,
+      contract: contextContract,
+      builtAt: payloadBuiltAt,
+    });
+  }
+
   while (loop < MAX_TOOL_LOOPS) {
     loop += 1;
-    if (!payloadFingerprint) {
-      const contextBytes = contextContract?.contextBytes ?? 0;
-      payloadFingerprint = buildPayloadFingerprint(
-        {
-          model: DEFAULT_COACH_MODEL,
-          messages: conversation,
-          tools,
-        },
-        contextBytes
-      );
-      payloadBuiltAt = Date.now();
-      debug.payloadFingerprint = payloadFingerprint;
-      debug.payloadBuiltAt = payloadBuiltAt;
-      await recordCoachPayloadTelemetry({
-        fingerprint: payloadFingerprint,
-        contract: contextContract,
-        builtAt: payloadBuiltAt,
-      });
-    }
     const streamResult = await streamChatCompletion({
       apiKey,
       model: DEFAULT_COACH_MODEL,
@@ -361,8 +332,25 @@ export async function runCoachTurn({
     history = [...history, { role: "assistant", content: finalAssistant }];
   }
 
+  const parsedActionDraft = parseCoachActionDraftMessage(finalAssistant);
+  const assistantText = parsedActionDraft.assistantText || finalAssistant;
+  const actionDraft = parsedActionDraft.actionDraft ?? null;
+  const actionContractVersion = parsedActionDraft.contractVersion ?? null;
+  const actionParseErrors = parsedActionDraft.parseErrors ?? null;
+
+  if (history.length && history[history.length - 1]?.role === "assistant") {
+    history = [
+      ...history.slice(0, -1),
+      { ...history[history.length - 1], content: assistantText },
+    ];
+  }
+
+  debug.actionContractVersion = actionContractVersion;
+  debug.actionParseErrors = actionParseErrors;
+  debug.actionDraft = actionDraft;
+
   return {
-    assistant: finalAssistant,
+    assistant: assistantText,
     conversation: history,
     toolEvents,
     proposals,
@@ -371,6 +359,9 @@ export async function runCoachTurn({
     contextContract,
     payloadFingerprint,
     payloadBuiltAt,
+    actionDraft,
+    actionContractVersion,
+    actionParseErrors,
   };
 }
 
