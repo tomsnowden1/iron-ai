@@ -12,6 +12,7 @@ import { getCoachContextSnapshot } from "../../coach/context";
 import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
+import { buildContextFingerprint } from "../../coach/fingerprint";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import { getCoachActiveGymMeta, listWorkoutSpaces, setCoachActiveGymMeta } from "../../db";
@@ -105,6 +106,8 @@ export default function CoachView({
   const [contextLoading, setContextLoading] = useState(false);
   const [contextContract, setContextContract] = useState(null);
   const [payloadFingerprint, setPayloadFingerprint] = useState(null);
+  const [debugContextContract, setDebugContextContract] = useState(null);
+  const [debugContextFingerprint, setDebugContextFingerprint] = useState(null);
   const [gymPickerOpen, setGymPickerOpen] = useState(false);
   const [activeGymId, setActiveGymId] = useState(null);
   const [coachGymLoaded, setCoachGymLoaded] = useState(false);
@@ -133,6 +136,14 @@ export default function CoachView({
   );
   const canSend = accessState.canChat && input.trim().length > 0 && !sending;
   const debugEnabled = import.meta.env.DEV || diagnosticsEnabled;
+  const coachDiagnosticsEnabled = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return (
+      params.get("debug") === "1" ||
+      window.localStorage.getItem("debugCoach") === "1"
+    );
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -208,6 +219,42 @@ export default function CoachView({
     }
   }, [contextEnabled]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!coachDiagnosticsEnabled) {
+      setDebugContextContract(null);
+      setDebugContextFingerprint(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const buildDiagnosticsContext = async () => {
+      try {
+        const { snapshot, contract } = await getCoachContextSnapshot({
+          scopes: contextScopes,
+          memorySummary: memoryEnabled ? memory : null,
+          activeGymId,
+        });
+        if (cancelled) return;
+        const fingerprint = await buildContextFingerprint(
+          snapshot,
+          contract?.contextBytes ?? null
+        );
+        if (cancelled) return;
+        setDebugContextContract(contract ?? null);
+        setDebugContextFingerprint(fingerprint);
+      } catch {
+        if (cancelled) return;
+        setDebugContextContract(null);
+        setDebugContextFingerprint(null);
+      }
+    };
+    void buildDiagnosticsContext();
+    return () => {
+      cancelled = true;
+    };
+  }, [coachDiagnosticsEnabled, contextScopes, memory, memoryEnabled, activeGymId]);
+
   const hasGyms = sortedSpaces.length > 0;
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
@@ -229,9 +276,21 @@ export default function CoachView({
   const lastWorkoutLabel = trustBadgeEnabled
     ? formatDateLabel(contextContract.lastWorkoutDate)
     : "—";
-  const debugContract = contextContract ?? state.debug?.contextContract ?? null;
+  const debugContract =
+    contextContract ?? debugContextContract ?? state.debug?.contextContract ?? null;
   const debugPayloadFingerprint =
-    payloadFingerprint ?? state.debug?.payloadFingerprint ?? null;
+    payloadFingerprint ??
+    debugContextFingerprint ??
+    state.debug?.payloadFingerprint ??
+    null;
+  const actionContractVersion = state.debug?.actionContractVersion ?? null;
+  const payloadFingerprintLabel = debugPayloadFingerprint
+    ? `${debugPayloadFingerprint.hash}${
+        debugPayloadFingerprint.algorithm
+          ? ` (${debugPayloadFingerprint.algorithm})`
+          : ""
+      }`
+    : "—";
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -465,6 +524,71 @@ export default function CoachView({
       onAction: () => setActiveGymId(previousId ?? null),
     });
   };
+
+  const coachDiagnosticsReport = useMemo(
+    () => ({
+      generatedAt: new Date().toISOString(),
+      coachContext: {
+        activeGymId: debugContract?.activeGymId ?? null,
+        gymName: debugContract?.activeGymName ?? null,
+        equipmentCount: debugContract?.equipmentCount ?? null,
+        recentWorkoutsCount: debugContract?.recentWorkoutsCount ?? null,
+        lastWorkoutDate: debugContract?.lastWorkoutDate ?? null,
+        templatesCount: debugContract?.templatesCount ?? null,
+        customExercisesCount: debugContract?.customExercisesCount ?? null,
+        exerciseLibraryCount: debugContract?.exerciseLibraryCount ?? null,
+        contextBytes: debugContract?.contextBytes ?? null,
+        contextBuildMs: debugContract?.buildMs ?? null,
+      },
+      actionContractVersion: actionContractVersion ?? null,
+      payloadFingerprint: debugPayloadFingerprint
+        ? {
+            algorithm: debugPayloadFingerprint.algorithm ?? null,
+            hash: debugPayloadFingerprint.hash ?? null,
+            contextBytes: debugPayloadFingerprint.contextBytes ?? null,
+          }
+        : null,
+    }),
+    [actionContractVersion, debugContract, debugPayloadFingerprint]
+  );
+
+  const handleCopyCoachDiagnostics = useCallback(async () => {
+    const payload = JSON.stringify(coachDiagnosticsReport, null, 2);
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(payload);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = payload;
+        textarea.setAttribute("readonly", "true");
+        textarea.style.position = "absolute";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      onNotify?.("Diagnostics copied to clipboard.", { tone: "success" });
+    } catch {
+      onNotify?.("Unable to copy diagnostics right now.", { tone: "warning" });
+    }
+  }, [coachDiagnosticsReport, onNotify]);
+
+  const handleExportCoachDiagnostics = useCallback(() => {
+    const payload = JSON.stringify(coachDiagnosticsReport, null, 2);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `coach-diagnostics-${timestamp}.json`;
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    onNotify?.("Diagnostics exported.", { tone: "success" });
+  }, [coachDiagnosticsReport, onNotify]);
 
   return (
     <div className="page">
@@ -747,6 +871,104 @@ export default function CoachView({
                 ))}
               </div>
             </details>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {coachDiagnosticsEnabled ? (
+        <Card className="dev-panel">
+          <CardHeader>
+            <div className="ui-section-title">Coach context debug</div>
+          </CardHeader>
+          <CardBody className="ui-stack">
+            <div className="coach-trust__details">
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Active gym ID</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.activeGymId)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Gym name</div>
+                <div className="coach-trust__item-value">
+                  {debugContract?.activeGymName ?? "—"}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Equipment</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.equipmentCount)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Recent workouts</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.recentWorkoutsCount)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Last workout</div>
+                <div className="coach-trust__item-value">
+                  {formatDateLabel(debugContract?.lastWorkoutDate)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Templates</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.templatesCount)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Custom exercises</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.customExercisesCount)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Library exercises</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.exerciseLibraryCount)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Contract version</div>
+                <div className="coach-trust__item-value">
+                  {actionContractVersion ?? "—"}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Context bytes</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.contextBytes)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Context build ms</div>
+                <div className="coach-trust__item-value">
+                  {formatCount(debugContract?.buildMs)}
+                </div>
+              </div>
+              <div className="coach-trust__item">
+                <div className="coach-trust__item-label">Payload fingerprint</div>
+                <div className="coach-trust__item-value">{payloadFingerprintLabel}</div>
+              </div>
+            </div>
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleCopyCoachDiagnostics}
+              >
+                Copy diagnostics report
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleExportCoachDiagnostics}
+              >
+                Export diagnostics report
+              </Button>
+            </div>
           </CardBody>
         </Card>
       ) : null}
