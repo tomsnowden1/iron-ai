@@ -3,12 +3,15 @@ import {
   addExerciseToWorkout,
   createEmptyWorkout,
   createTemplate,
+  createWorkoutSpace,
   db,
   getAllExercises,
+  listEquipment,
 } from "../src/db.js";
 import { getCoachContextSnapshot } from "../src/coach/context.js";
 import { coachReducer, initialCoachState } from "../src/coach/state.js";
 import { executeTool, getToolRegistry, validateToolInput } from "../src/coach/tools.js";
+import { normalizeGymName } from "../src/workoutSpaces/logic.js";
 import { seedTestExercises } from "./seedTestData.js";
 
 describe.sequential("coach platform", () => {
@@ -92,5 +95,42 @@ describe.sequential("coach platform", () => {
       payload: { id: "1", status: "confirmed" },
     });
     expect(confirmed.proposals[0].status).toBe("confirmed");
+  });
+
+  it("includes active gym equipment in context snapshot", async () => {
+    const equipment = await listEquipment();
+    const selectable = equipment.filter((item) => item.id !== "bodyweight").slice(0, 2);
+    const equipmentIds = selectable.map((item) => item.id);
+    const spaceId = await createWorkoutSpace({ name: "Condo", equipmentIds });
+
+    const { snapshot } = await getCoachContextSnapshot({
+      scopes: { spaces: true },
+      activeGymId: spaceId,
+    });
+
+    expect(snapshot.activeGymId).toBe(spaceId);
+    expect(snapshot.activeGymName).toBe("Condo");
+    expect(snapshot.equipmentCount).toBe(equipmentIds.length);
+    expect(snapshot.equipment).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: equipmentIds[0], name: expect.any(String) }),
+      ])
+    );
+  });
+
+  it("normalizes gym names for matching", () => {
+    expect(normalizeGymName("Condo")).toBe(normalizeGymName(" condo  "));
+  });
+
+  it("reuses existing gym by normalized name in create_workout_space", async () => {
+    const equipment = await listEquipment();
+    const selectable = equipment.filter((item) => item.id !== "bodyweight").slice(0, 1);
+    const equipmentIds = selectable.map((item) => item.id);
+    const spaceId = await createWorkoutSpace({ name: "Condo", equipmentIds });
+
+    const result = await executeTool("create_workout_space", { name: " condo " });
+    expect(result.spaceId).toBe(spaceId);
+    expect(result.reused).toBe(true);
+    expect(result.match).toBe("name");
   });
 });

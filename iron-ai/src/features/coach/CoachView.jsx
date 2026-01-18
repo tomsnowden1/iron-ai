@@ -679,6 +679,7 @@ export default function CoachView({
     });
     const result = await executeWriteToolCall({
       proposal,
+      context: { activeGymId },
       onResult: (res) => {
         dispatch({
           type: "UPDATE_PROPOSAL_STATUS",
@@ -852,6 +853,11 @@ export default function CoachView({
             ) : null}
           </div>
         </div>
+        {!contextEnabled ? (
+          <div className="coach-context-warning">
+            Context is off. The coach cannot see your equipment.
+          </div>
+        ) : null}
       </div>
 
       <Card className="coach-card">

@@ -15,7 +15,7 @@ import {
 } from "../db";
 import { normalizeCoachMemory, upsertGoal } from "./memory";
 import { validateSchema } from "./schema";
-import { isSpaceExpired } from "../workoutSpaces/logic";
+import { isSpaceExpired, normalizeGymName } from "../workoutSpaces/logic";
 import { getExerciseSubstitutions } from "../equipment/engine";
 
 const MAX_LIST_LIMIT = 50;
@@ -38,6 +38,17 @@ function resolveCoachActiveSpace(spaces, activeGymId) {
   if (!validSpaces.length) return null;
   if (activeGymId == null) return null;
   return validSpaces.find((space) => space.id === activeGymId) ?? null;
+}
+
+function resolveCoachSpaceByName(spaces, name) {
+  if (!Array.isArray(spaces) || spaces.length === 0) return null;
+  const normalized = normalizeGymName(name);
+  if (!normalized) return null;
+  const validSpaces = spaces.filter((space) => !isSpaceExpired(space));
+  if (!validSpaces.length) return null;
+  return (
+    validSpaces.find((space) => normalizeGymName(space.name) === normalized) ?? null
+  );
 }
 
 async function getSessionBundles(limit) {
@@ -740,7 +751,20 @@ export const toolDefinitions = [
     },
     outputSchema: { type: "object" },
     isWriteTool: true,
-    handler: async ({ name, description, equipmentIds, isDefault, isTemporary, expiresAt }) => {
+    handler: async (
+      { name, description, equipmentIds, isDefault, isTemporary, expiresAt },
+      context
+    ) => {
+      const spaces = await listWorkoutSpaces();
+      const activeGymId = context?.activeGymId ?? null;
+      const activeSpace = resolveCoachActiveSpace(spaces, activeGymId);
+      if (activeSpace) {
+        return { spaceId: activeSpace.id ?? null, reused: true, match: "active" };
+      }
+      const matchedSpace = resolveCoachSpaceByName(spaces, name);
+      if (matchedSpace) {
+        return { spaceId: matchedSpace.id ?? null, reused: true, match: "name" };
+      }
       const equipment = await listEquipment();
       const validIds = new Set(equipment.map((item) => item.id));
       const safeEquipment = Array.isArray(equipmentIds)
