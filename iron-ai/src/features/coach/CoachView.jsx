@@ -17,7 +17,10 @@ import { coachReducer, initialCoachState } from "../../coach/state";
 import { actionDraftReducer, initialActionDraftState } from "../../coach/actionDraftState";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
-import { ActionDraftKinds } from "../../coach/actionDraftContract";
+import {
+  ActionDraftKinds,
+  parseCoachActionDraftMessage,
+} from "../../coach/actionDraftContract";
 import { executeActionDraft, validateActionDraft } from "../../coach/actionDraftExecution";
 import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
@@ -112,10 +115,36 @@ function safeParseJson(text) {
   }
 }
 
-function extractFirstJsonBlock(text) {
+function extractJsonBlocks(text) {
+  if (!text) return [];
+  const blocks = [];
+  const regex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match = null;
+  while ((match = regex.exec(text)) !== null) {
+    blocks.push(match[1] ?? "");
+  }
+  return blocks;
+}
+
+function sanitizeJsonCandidate(text) {
+  if (!text) return "";
+  let cleaned = String(text).trim();
+  const firstBrace = cleaned.indexOf("{");
+  const lastBrace = cleaned.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  }
+  cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
+  return cleaned.trim();
+}
+
+function safeParseJsonObject(text) {
   if (!text) return null;
-  const match = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  return match?.[1] ?? null;
+  const cleaned = sanitizeJsonCandidate(text);
+  if (!cleaned) return null;
+  const parsed = safeParseJson(cleaned);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return parsed;
 }
 
 function normalizeExerciseDraft(entry) {
@@ -157,7 +186,7 @@ function normalizeTemplateDraft(raw, fallbackName) {
     .map((exercise) => normalizeExerciseDraft(exercise))
     .filter(Boolean);
   if (!normalizedExercises.length) return null;
-  const spaceId = Number(raw.spaceId);
+  const spaceId = Number(raw.spaceId ?? raw.gymId);
   return {
     name: name || "Coach Template",
     exercises: normalizedExercises,
@@ -181,20 +210,32 @@ function resolveTemplateDraftFromActionDraft(actionDraft) {
 }
 
 function resolveTemplateDraftFromText(text) {
-  const block = extractFirstJsonBlock(text);
-  if (!block) return null;
-  const parsed = safeParseJson(block);
-  if (!parsed) return null;
-  if (parsed?.actionDraft) {
-    const fromContract = resolveTemplateDraftFromActionDraft(parsed.actionDraft);
-    if (fromContract) return fromContract;
+  const blocks = extractJsonBlocks(text);
+  const candidates = [...blocks];
+  if (!blocks.length) {
+    const trimmed = String(text ?? "").trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      candidates.push(trimmed);
+    }
   }
-  return normalizeTemplateDraft(parsed, null);
+  for (const candidate of candidates) {
+    const parsed = safeParseJsonObject(candidate);
+    if (!parsed) continue;
+    if (parsed?.actionDraft) {
+      const fromContract = resolveTemplateDraftFromActionDraft(parsed.actionDraft);
+      if (fromContract) return fromContract;
+    }
+    const draft = normalizeTemplateDraft(parsed, null);
+    if (draft) return draft;
+  }
+  return null;
 }
 
 function resolveTemplateDraft({ actionDraft, text, templateTool }) {
+  const parsedActionDraft =
+    actionDraft ?? parseCoachActionDraftMessage(text ?? "").actionDraft ?? null;
   const draft =
-    resolveTemplateDraftFromActionDraft(actionDraft) ?? resolveTemplateDraftFromText(text);
+    resolveTemplateDraftFromActionDraft(parsedActionDraft) ?? resolveTemplateDraftFromText(text);
   if (!draft) return null;
   if (!templateTool) return draft;
   const validation = validateToolInput(templateTool, draft);
@@ -203,7 +244,7 @@ function resolveTemplateDraft({ actionDraft, text, templateTool }) {
 
 const TEMPLATE_REQUEST_PROMPT =
   "Convert your last plan into the IronAI template JSON format. " +
-  "Reply with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
+  "Reply only with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
 
 export default function CoachView({
   launchContext,
@@ -735,16 +776,23 @@ export default function CoachView({
   const handleMakeTemplate = useCallback(
     async (message) => {
       if (!message || message.role !== "assistant") return;
-      if (pendingTemplateRequest || templateCreating) return;
+      if (message.id !== latestAssistantId) return;
       const draft = resolveDraftForMessage(message);
       if (draft) {
         setTemplateConfirmDraft(draft);
         setTemplateConfirmOpen(true);
         return;
       }
+      if (pendingTemplateRequest || templateCreating) return;
       await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, { autoTemplateRequest: true });
     },
-    [pendingTemplateRequest, resolveDraftForMessage, sendCoachMessage, templateCreating]
+    [
+      latestAssistantId,
+      pendingTemplateRequest,
+      resolveDraftForMessage,
+      sendCoachMessage,
+      templateCreating,
+    ]
   );
 
   const handleConfirmTemplate = useCallback(async () => {
@@ -1229,8 +1277,10 @@ export default function CoachView({
               const templateDraft = isLatestAssistant
                 ? resolveDraftForMessage(message)
                 : null;
+              const waitingOnTemplate =
+                isLatestAssistant && pendingTemplateRequest && !templateDraft;
               const makeTemplateDisabled =
-                !isLatestAssistant || pendingTemplateRequest || templateCreating || sending;
+                !isLatestAssistant || waitingOnTemplate || templateCreating || sending;
               const changeGymDisabled = !isLatestAssistant || !hasGyms;
               const showRequesting =
                 isLatestAssistant && pendingTemplateRequest && !templateDraft;
