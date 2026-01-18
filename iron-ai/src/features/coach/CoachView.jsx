@@ -13,9 +13,9 @@ import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
-import { ActionDraftKinds } from "../../coach/actionDraftContract";
-import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
+import { executeTool, getToolRegistry } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
+import { resolveTemplateDraftInfo } from "./templateDraft";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import {
   getAllExercises,
@@ -90,87 +90,6 @@ function formatIdList(values, limit = 8) {
   const truncated = safe.slice(0, limit);
   const suffix = safe.length > limit ? ` ...+${safe.length - limit}` : "";
   return `${truncated.join(", ")}${suffix}`;
-}
-
-function safeParseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function extractFirstJsonBlock(text) {
-  if (!text) return null;
-  const match = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  return match?.[1] ?? null;
-}
-
-function normalizeExerciseDraft(entry) {
-  if (!entry || typeof entry !== "object") return null;
-  const exerciseId = Number(entry.exerciseId);
-  if (!Number.isFinite(exerciseId)) return null;
-  const sets = Number(entry.sets);
-  const reps = Number(entry.reps);
-  const warmupSets = Number(entry.warmupSets);
-  return {
-    exerciseId,
-    ...(Number.isFinite(sets) ? { sets } : {}),
-    ...(Number.isFinite(reps) ? { reps } : {}),
-    ...(Number.isFinite(warmupSets) ? { warmupSets } : {}),
-  };
-}
-
-function normalizeTemplateDraft(raw, fallbackName) {
-  if (!raw || typeof raw !== "object") return null;
-  const name = String(raw.name ?? raw.title ?? fallbackName ?? "").trim();
-  const exercises = Array.isArray(raw.exercises) ? raw.exercises : [];
-  const normalizedExercises = exercises
-    .map((exercise) => normalizeExerciseDraft(exercise))
-    .filter(Boolean);
-  if (!normalizedExercises.length) return null;
-  const spaceId = Number(raw.spaceId);
-  return {
-    name: name || "Coach Template",
-    exercises: normalizedExercises,
-    ...(Number.isFinite(spaceId) ? { spaceId } : {}),
-  };
-}
-
-function resolveTemplateDraftFromActionDraft(actionDraft) {
-  if (!actionDraft) return null;
-  if (
-    actionDraft.kind !== ActionDraftKinds.create_template &&
-    actionDraft.kind !== ActionDraftKinds.create_workout
-  ) {
-    return null;
-  }
-  const payload = actionDraft.payload ?? {};
-  const fallbackName = payload.name ?? payload.title ?? actionDraft.title ?? null;
-  const raw = { ...payload };
-  if (!raw.name && fallbackName) raw.name = fallbackName;
-  return normalizeTemplateDraft(raw, fallbackName);
-}
-
-function resolveTemplateDraftFromText(text) {
-  const block = extractFirstJsonBlock(text);
-  if (!block) return null;
-  const parsed = safeParseJson(block);
-  if (!parsed) return null;
-  if (parsed?.actionDraft) {
-    const fromContract = resolveTemplateDraftFromActionDraft(parsed.actionDraft);
-    if (fromContract) return fromContract;
-  }
-  return normalizeTemplateDraft(parsed, null);
-}
-
-function resolveTemplateDraft({ actionDraft, text, templateTool }) {
-  const draft =
-    resolveTemplateDraftFromActionDraft(actionDraft) ?? resolveTemplateDraftFromText(text);
-  if (!draft) return null;
-  if (!templateTool) return draft;
-  const validation = validateToolInput(templateTool, draft);
-  return validation.valid ? draft : null;
 }
 
 const TEMPLATE_REQUEST_PROMPT =
@@ -426,6 +345,10 @@ export default function CoachView({
     }
     return null;
   }, [messages]);
+  const latestAssistantMessage = useMemo(() => {
+    if (latestAssistantId == null) return null;
+    return messages.find((message) => message.id === latestAssistantId) ?? null;
+  }, [latestAssistantId, messages]);
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -621,14 +544,37 @@ export default function CoachView({
     }
   };
 
-  const resolveDraftForMessage = useCallback(
+  const resolveDraftInfoForMessage = useCallback(
     (message) =>
-      resolveTemplateDraft({
+      resolveTemplateDraftInfo({
         actionDraft: message?.meta?.actionDraft ?? null,
         text: message?.content ?? "",
         templateTool,
       }),
     [templateTool]
+  );
+
+  const resolveDraftForMessage = useCallback(
+    (message) =>
+      resolveDraftInfoForMessage(message).draft ?? null,
+    [resolveDraftInfoForMessage]
+  );
+
+  const latestTemplateDraftInfo = useMemo(() => {
+    if (!latestAssistantMessage) return null;
+    return resolveDraftInfoForMessage(latestAssistantMessage);
+  }, [latestAssistantMessage, resolveDraftInfoForMessage]);
+
+  const templateDraftDebug = useMemo(
+    () => ({
+      draftFound: latestTemplateDraftInfo?.found ?? false,
+      draftValid: latestTemplateDraftInfo?.valid ?? false,
+      validationError: latestTemplateDraftInfo?.error ?? null,
+      source: latestTemplateDraftInfo?.source ?? null,
+      messageId: latestAssistantMessage?.id ?? null,
+      messageCreatedAt: latestAssistantMessage?.createdAt ?? null,
+    }),
+    [latestAssistantMessage, latestTemplateDraftInfo]
   );
 
   const handleMakeTemplate = useCallback(
@@ -1014,7 +960,7 @@ export default function CoachView({
               const isAssistant = message.role === "assistant";
               const isLatestAssistant = isAssistant && message.id === latestAssistantId;
               const templateDraft = isLatestAssistant
-                ? resolveDraftForMessage(message)
+                ? latestTemplateDraftInfo?.draft ?? null
                 : null;
               const makeTemplateDisabled =
                 !isLatestAssistant || pendingTemplateRequest || templateCreating || sending;
@@ -1052,7 +998,7 @@ export default function CoachView({
                         </div>
                         {showRequesting ? (
                           <div className="chat-actions__status">
-                            Requesting template format…
+                            Requesting template JSON…
                           </div>
                         ) : showStaleHint ? (
                           <div className="chat-actions__status">
@@ -1299,6 +1245,12 @@ export default function CoachView({
                     debugPayloadFingerprint.contextBytes
                   )} bytes)`
                 : "—"}
+            </div>
+            <div className="coach-debug__block">
+              <div className="ui-muted">Template draft</div>
+              <pre className="coach-debug__payload">
+                {JSON.stringify(templateDraftDebug, null, 2)}
+              </pre>
             </div>
             <div className="coach-debug__block">
               <div className="ui-muted">Context contract</div>
