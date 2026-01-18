@@ -3409,6 +3409,12 @@ export default function App() {
     setTab("workout");
   };
 
+  const handleOpenWorkout = (id) => {
+    if (!id) return;
+    setWorkoutId(id);
+    setTab("workout");
+  };
+
   const handleOpenTemplate = (id) => {
     setActiveTemplateId(id);
     setTab("templates");
@@ -3503,12 +3509,17 @@ export default function App() {
             launchContext={coachLaunchContext}
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
             onNotify={notify}
+            onOpenTemplate={handleOpenTemplate}
+            onOpenWorkout={handleOpenWorkout}
             onNavigateToGyms={(options = {}) => {
+              const gymView = options.spaceId
+                ? { type: "detail", spaceId: options.spaceId }
+                : options.create
+                  ? { type: "form", mode: "create", spaceId: null }
+                  : null;
               setPendingMoreNavigation({
                 section: "gyms",
-                gymView: options.create
-                  ? { type: "form", mode: "create", spaceId: null }
-                  : null,
+                gymView,
               });
               setTab("more");
             }}

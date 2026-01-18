@@ -6,18 +6,28 @@ import {
   CardBody,
   CardFooter,
   CardHeader,
+  Input,
+  Label,
   PageHeader,
+  Select,
 } from "../../components/ui";
 import { getCoachContextSnapshot } from "../../coach/context";
 import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
+import { actionDraftReducer, initialActionDraftState } from "../../coach/actionDraftState";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
 import { ActionDraftKinds } from "../../coach/actionDraftContract";
+import { executeActionDraft, validateActionDraft } from "../../coach/actionDraftExecution";
 import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
-import { getCoachActiveGymMeta, listWorkoutSpaces, setCoachActiveGymMeta } from "../../db";
+import {
+  getAllExercises,
+  getCoachActiveGymMeta,
+  listWorkoutSpaces,
+  setCoachActiveGymMeta,
+} from "../../db";
 import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
 import BottomSheet from "../../components/ui/BottomSheet";
 
@@ -78,6 +88,22 @@ function formatDateLabel(value) {
   return date.toLocaleDateString();
 }
 
+function formatConfidence(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return Number(value).toFixed(2);
+}
+
+function hasCoachContextCounts(contract) {
+  if (!contract) return false;
+  const counts = [
+    contract.recentWorkoutsCount,
+    contract.templatesCount,
+    contract.customExercisesCount,
+    contract.exerciseLibraryCount,
+  ];
+  return counts.some((value) => Number(value) > 0);
+}
+
 function safeParseJson(text) {
   try {
     return JSON.parse(text);
@@ -96,9 +122,25 @@ function normalizeExerciseDraft(entry) {
   if (!entry || typeof entry !== "object") return null;
   const exerciseId = Number(entry.exerciseId);
   if (!Number.isFinite(exerciseId)) return null;
-  const sets = Number(entry.sets);
-  const reps = Number(entry.reps);
-  const warmupSets = Number(entry.warmupSets);
+  let sets = null;
+  let reps = null;
+  let warmupSets = null;
+
+  if (Array.isArray(entry.sets)) {
+    sets = entry.sets.length;
+    const repValues = entry.sets
+      .map((set) => Number(set?.reps))
+      .filter((value) => Number.isFinite(value));
+    if (repValues.length) reps = repValues[0];
+  } else {
+    const setsValue = Number(entry.sets);
+    const repsValue = Number(entry.reps);
+    const warmupValue = Number(entry.warmupSets);
+    if (Number.isFinite(setsValue)) sets = setsValue;
+    if (Number.isFinite(repsValue)) reps = repsValue;
+    if (Number.isFinite(warmupValue)) warmupSets = warmupValue;
+  }
+
   return {
     exerciseId,
     ...(Number.isFinite(sets) ? { sets } : {}),
@@ -167,6 +209,8 @@ export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
   onNotify,
+  onOpenTemplate,
+  onOpenWorkout,
   onNavigateToGyms,
   diagnosticsEnabled,
 }) {
@@ -179,10 +223,19 @@ export default function CoachView({
 
   const templateTool = useMemo(() => getToolRegistry().get("create_template"), []);
   const [state, dispatch] = useReducer(coachReducer, initialCoachState);
+  const [actionState, actionDispatch] = useReducer(
+    actionDraftReducer,
+    initialActionDraftState
+  );
   const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
+  const allExercises = useLiveQuery(() => getAllExercises(), []);
   const sortedSpaces = useMemo(
     () => (workoutSpaces ? sortSpacesByName(workoutSpaces) : []),
     [workoutSpaces]
+  );
+  const exerciseMap = useMemo(
+    () => new Map((allExercises ?? []).map((exercise) => [exercise.id, exercise])),
+    [allExercises]
   );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -208,6 +261,13 @@ export default function CoachView({
   const [templateConfirmDraft, setTemplateConfirmDraft] = useState(null);
   const [templateConfirmOpen, setTemplateConfirmOpen] = useState(false);
   const [templateCreating, setTemplateCreating] = useState(false);
+  const [actionEditMode, setActionEditMode] = useState(false);
+  const [actionEditDraft, setActionEditDraft] = useState({ title: "", gymId: "" });
+  const [actionErrors, setActionErrors] = useState([]);
+  const [actionWarnings, setActionWarnings] = useState([]);
+  const [actionApplying, setActionApplying] = useState(false);
+  const [actionConfirmOpen, setActionConfirmOpen] = useState(false);
+  const [pendingHighRiskDraft, setPendingHighRiskDraft] = useState(null);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -390,6 +450,25 @@ export default function CoachView({
     }
     return null;
   }, [messages]);
+  const actionDraft = actionState.draft;
+  const actionPayload = actionDraft?.payload ?? null;
+  const actionDraftTitle =
+    actionPayload?.name ?? actionPayload?.title ?? actionDraft?.title ?? "";
+  const actionDraftSummary = actionDraft?.summary ?? "";
+  const actionDraftExercises = Array.isArray(actionPayload?.exercises)
+    ? actionPayload.exercises
+    : [];
+  const actionDraftGymId = Number.isFinite(Number(actionPayload?.gymId))
+    ? Number(actionPayload?.gymId)
+    : null;
+  const actionDraftGym =
+    sortedSpaces.find((space) => space.id === actionDraftGymId) ?? null;
+  const actionDraftKind = actionDraft?.kind ?? null;
+  const actionDraftHasGyms =
+    actionDraftKind === ActionDraftKinds.create_workout ||
+    actionDraftKind === ActionDraftKinds.create_template;
+  const actionEditTitle = String(actionEditDraft.title ?? "");
+  const canSaveActionEdit = actionEditTitle.trim().length > 0;
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -428,6 +507,43 @@ export default function CoachView({
     settings: "Settings",
     spaces: "Workout spaces",
   };
+
+  useEffect(() => {
+    if (!actionDraft) {
+      setActionEditMode(false);
+      setActionEditDraft({ title: "", gymId: "" });
+      setActionErrors([]);
+      setActionWarnings([]);
+      setPendingHighRiskDraft(null);
+      return;
+    }
+    setActionEditMode(false);
+    setActionEditDraft({
+      title: actionDraftTitle,
+      gymId: actionDraftGymId ?? "",
+    });
+    setActionErrors([]);
+    setPendingHighRiskDraft(null);
+  }, [actionDraft, actionDraftTitle, actionDraftGymId]);
+
+  useEffect(() => {
+    let active = true;
+    const validateDraft = async () => {
+      if (!actionDraft) {
+        setActionWarnings([]);
+        return;
+      }
+      const result = await validateActionDraft(actionDraft, {
+        defaultGymId: activeGymId,
+      });
+      if (!active) return;
+      setActionWarnings(result.warnings ?? []);
+    };
+    void validateDraft();
+    return () => {
+      active = false;
+    };
+  }, [actionDraft, activeGymId]);
 
   const sendCoachMessage = useCallback(
     async (messageText, options = {}) => {
@@ -522,6 +638,8 @@ export default function CoachView({
         const assistantMeta = {
           actionDraft: result.actionDraft ?? null,
           actionContractVersion: result.actionContractVersion ?? null,
+          contextContract: result.contextContract ?? null,
+          payloadFingerprint: result.payloadFingerprint ?? null,
         };
 
         if (!streamedId) {
@@ -530,6 +648,16 @@ export default function CoachView({
             ...prev,
             createMessage(assistantId, "assistant", result.assistant, assistantMeta),
           ]);
+          actionDispatch({
+            type: "SET_FROM_MESSAGE",
+            payload: {
+              messageId: assistantId,
+              actionDraft: result.actionDraft ?? null,
+              contractVersion: result.actionContractVersion ?? null,
+              contextContract: result.contextContract ?? null,
+              payloadFingerprint: result.payloadFingerprint ?? null,
+            },
+          });
         } else {
           setMessages((prev) =>
             prev.map((msg) =>
@@ -538,6 +666,16 @@ export default function CoachView({
                 : msg
             )
           );
+          actionDispatch({
+            type: "SET_FROM_MESSAGE",
+            payload: {
+              messageId: streamedId,
+              actionDraft: result.actionDraft ?? null,
+              contractVersion: result.actionContractVersion ?? null,
+              contextContract: result.contextContract ?? null,
+              payloadFingerprint: result.payloadFingerprint ?? null,
+            },
+          });
         }
         if (pendingLaunchContext) {
           setPendingLaunchContext(null);
@@ -634,6 +772,123 @@ export default function CoachView({
     setTemplateConfirmOpen(false);
     setTemplateConfirmDraft(null);
   }, [templateCreating]);
+
+  const handleDiscardActionDraft = useCallback(() => {
+    actionDispatch({ type: "DISCARD" });
+    setActionEditMode(false);
+    setActionErrors([]);
+  }, [actionDispatch]);
+
+  const handleCancelActionEdit = useCallback(() => {
+    setActionEditMode(false);
+    setActionEditDraft({
+      title: actionDraftTitle,
+      gymId: actionDraftGymId ?? "",
+    });
+  }, [actionDraftGymId, actionDraftTitle]);
+
+  const handleSaveActionEdit = useCallback(() => {
+    if (!actionDraft) return;
+    const nextTitle = String(actionEditDraft.title ?? "").trim();
+    const nextGymId = actionDraftHasGyms
+      ? Number.parseInt(String(actionEditDraft.gymId ?? ""), 10)
+      : null;
+    const payload = { ...(actionDraft.payload ?? {}) };
+    if (nextTitle) {
+      payload.name = nextTitle;
+      payload.title = nextTitle;
+    }
+    if (actionDraftHasGyms) {
+      payload.gymId =
+        Number.isFinite(nextGymId) && nextGymId > 0 ? nextGymId : null;
+    }
+    const updated = {
+      ...actionDraft,
+      title: nextTitle || actionDraft.title,
+      payload,
+    };
+    actionDispatch({ type: "UPDATE_DRAFT", payload: { draft: updated } });
+    setActionEditMode(false);
+  }, [actionDispatch, actionDraft, actionDraftHasGyms, actionEditDraft]);
+
+  const handleApplyActionDraft = useCallback(
+    async (options = {}) => {
+      if (!actionDraft || actionApplying) return;
+      const { skipConfirm = false } = options;
+      setActionApplying(true);
+      setActionErrors([]);
+      try {
+        const validation = await validateActionDraft(actionDraft, {
+          defaultGymId: activeGymId,
+        });
+        setActionWarnings(validation.warnings ?? []);
+        if (!validation.valid || !validation.normalizedDraft) {
+          setActionErrors(
+            validation.errors?.length ? validation.errors : ["Unable to apply draft."]
+          );
+          return;
+        }
+        if (validation.normalizedDraft.risk === "high" && !skipConfirm) {
+          setPendingHighRiskDraft(validation.normalizedDraft);
+          setActionConfirmOpen(true);
+          return;
+        }
+
+        const result = await executeActionDraft(validation.normalizedDraft);
+        const label =
+          result.kind === ActionDraftKinds.create_workout
+            ? "Created workout."
+            : result.kind === ActionDraftKinds.create_template
+              ? "Created template."
+              : "Created gym.";
+        const openAction =
+          result.kind === ActionDraftKinds.create_workout
+            ? () => onOpenWorkout?.(result.id)
+            : result.kind === ActionDraftKinds.create_template
+              ? () => onOpenTemplate?.(result.id)
+              : () => onNavigateToGyms?.({ spaceId: result.id });
+        const canOpen =
+          (result.kind === ActionDraftKinds.create_workout && onOpenWorkout) ||
+          (result.kind === ActionDraftKinds.create_template && onOpenTemplate) ||
+          (result.kind === ActionDraftKinds.create_gym && onNavigateToGyms);
+
+        onNotify?.(label, {
+          tone: "success",
+          ...(canOpen ? { actionLabel: "Open", onAction: openAction } : {}),
+        });
+        actionDispatch({ type: "DISCARD" });
+      } catch (err) {
+        setActionErrors([err?.message ?? "Unable to apply draft."]);
+      } finally {
+        setActionApplying(false);
+      }
+    },
+    [
+      actionApplying,
+      actionDispatch,
+      actionDraft,
+      activeGymId,
+      onNavigateToGyms,
+      onNotify,
+      onOpenTemplate,
+      onOpenWorkout,
+    ]
+  );
+
+  const handleConfirmActionDraft = useCallback(() => {
+    if (!pendingHighRiskDraft) {
+      setActionConfirmOpen(false);
+      return;
+    }
+    setPendingHighRiskDraft(null);
+    setActionConfirmOpen(false);
+    void handleApplyActionDraft({ skipConfirm: true });
+  }, [handleApplyActionDraft, pendingHighRiskDraft]);
+
+  const handleCancelActionConfirm = useCallback(() => {
+    setPendingHighRiskDraft(null);
+    setActionConfirmOpen(false);
+  }, []);
 
   const confirmProposal = async (proposal) => {
     dispatch({
@@ -980,6 +1235,15 @@ export default function CoachView({
               const showRequesting =
                 isLatestAssistant && pendingTemplateRequest && !templateDraft;
               const showStaleHint = isAssistant && !isLatestAssistant;
+              const trustContext = message?.meta?.contextContract ?? null;
+              const trustFingerprint = message?.meta?.payloadFingerprint ?? null;
+              const showTrustLine =
+                Boolean(message?.meta?.actionDraft) && hasCoachContextCounts(trustContext);
+              const trustGymLabel = trustContext?.activeGymName ?? "None";
+              const trustWorkoutsLabel = formatCount(trustContext?.recentWorkoutsCount);
+              const trustLastDate = formatDateLabel(trustContext?.lastWorkoutDate);
+              const trustLibraryLabel = formatCount(trustContext?.exerciseLibraryCount);
+              const trustFingerprintLabel = trustFingerprint?.hash ?? "—";
 
               return (
                 <div key={message.id} className="chat-message" data-role={message.role}>
@@ -990,6 +1254,19 @@ export default function CoachView({
                         className="chat-actions"
                         data-stale={showStaleHint ? "true" : "false"}
                       >
+                        {showTrustLine ? (
+                          <div className="coach-trust-line">
+                            <span className="coach-trust-line__label">
+                              Using your data
+                            </span>
+                            <span>Gym: {trustGymLabel}</span>
+                            <span>Library: {trustLibraryLabel}</span>
+                            <span>
+                              Workouts: {trustWorkoutsLabel} (last {trustLastDate})
+                            </span>
+                            <span>Fingerprint: {trustFingerprintLabel}</span>
+                          </div>
+                        ) : null}
                         <div className="ui-row ui-row--wrap">
                           <Button
                             variant="secondary"
@@ -1063,6 +1340,218 @@ export default function CoachView({
           <div className="template-meta">Chat history is not saved yet.</div>
         </CardFooter>
       </Card>
+
+      {actionDraft ? (
+        <Card className="coach-action-tray">
+          <CardHeader>
+            <div className="ui-row ui-row--between ui-row--wrap">
+              <div>
+                <div className="ui-section-title">Suggested Action</div>
+                <div className="template-meta">
+                  {actionDraftSummary || "Coach has a ready action draft."}
+                </div>
+              </div>
+              <div className="coach-action-badges">
+                <span className="pill pill--muted">
+                  Confidence {formatConfidence(actionDraft.confidence)}
+                </span>
+                <span
+                  className={`pill ${
+                    actionDraft.risk === "high"
+                      ? "pill--danger"
+                      : actionDraft.risk === "medium"
+                        ? "pill--muted"
+                        : ""
+                  }`}
+                >
+                  Risk {actionDraft.risk ?? "low"}
+                </span>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody className="coach-action-body ui-stack">
+            <div className="coach-action-title">
+              {actionDraftTitle || "Untitled action"}
+            </div>
+            {actionDraftSummary ? (
+              <div className="template-meta">{actionDraftSummary}</div>
+            ) : null}
+
+            {actionEditMode ? (
+              <div className="coach-action-edit ui-stack">
+                <div>
+                  <Label htmlFor="action-draft-title">Title</Label>
+                  <Input
+                    id="action-draft-title"
+                    value={actionEditDraft.title}
+                    onChange={(event) =>
+                      setActionEditDraft((prev) => ({
+                        ...prev,
+                        title: event.target.value,
+                      }))
+                    }
+                    placeholder="Draft title"
+                  />
+                </div>
+                {actionDraftHasGyms ? (
+                  hasGyms ? (
+                    <div>
+                      <Label htmlFor="action-draft-gym">Gym</Label>
+                      <Select
+                        id="action-draft-gym"
+                        value={String(actionEditDraft.gymId ?? "")}
+                        onChange={(event) =>
+                          setActionEditDraft((prev) => ({
+                            ...prev,
+                            gymId: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="">No gym</option>
+                        {sortedSpaces.map((space) => (
+                          <option key={space.id} value={space.id}>
+                            {space.name ?? "Untitled Gym"}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : (
+                    <div className="template-meta">No gyms available yet.</div>
+                  )
+                ) : null}
+              </div>
+            ) : (
+              <div className="coach-action-summary">
+                {actionDraftHasGyms ? (
+                  <div className="template-meta">
+                    Gym: {actionDraftGym ? actionDraftGym.name ?? "Untitled Gym" : "None"}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            <details className="coach-action-details">
+              <summary>Draft details</summary>
+              <div className="coach-action-details__body">
+                {actionDraftKind === ActionDraftKinds.create_workout ||
+                actionDraftKind === ActionDraftKinds.create_template ? (
+                  <div className="coach-action-exercises">
+                    {actionDraftExercises.length ? (
+                      actionDraftExercises.map((entry, index) => {
+                        const exercise = exerciseMap.get(entry.exerciseId);
+                        const name =
+                          exercise?.name ?? `Exercise ${entry.exerciseId ?? index + 1}`;
+                        const setCount = Array.isArray(entry.sets)
+                          ? entry.sets.length
+                          : null;
+                        const repsValue = Array.isArray(entry.sets)
+                          ? entry.sets
+                              .map((set) => Number(set?.reps))
+                              .find((value) => Number.isFinite(value))
+                          : null;
+                        const detailParts = [];
+                        if (setCount) detailParts.push(`${setCount} sets`);
+                        if (repsValue != null) detailParts.push(`${repsValue} reps`);
+                        const meta =
+                          detailParts.length > 0
+                            ? detailParts.join(" · ")
+                            : "Sets from draft";
+                        return (
+                          <div key={`${entry.exerciseId}-${index}`} className="coach-action-exercise">
+                            <div className="coach-action-exercise__name">{name}</div>
+                            <div className="coach-action-exercise__meta">{meta}</div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="template-meta">Exercises: (from draft)</div>
+                    )}
+                  </div>
+                ) : null}
+
+                {actionDraftKind === ActionDraftKinds.create_gym ? (
+                  <div className="template-meta">
+                    Equipment IDs:{" "}
+                    {Array.isArray(actionPayload?.equipmentIds) &&
+                    actionPayload.equipmentIds.length
+                      ? actionPayload.equipmentIds.join(", ")
+                      : "None specified"}
+                  </div>
+                ) : null}
+
+                {actionPayload?.plannedDurationMins ? (
+                  <div className="template-meta">
+                    Planned duration: {actionPayload.plannedDurationMins} mins
+                  </div>
+                ) : null}
+                {actionPayload?.frequencyHint ? (
+                  <div className="template-meta">
+                    Frequency: {actionPayload.frequencyHint}
+                  </div>
+                ) : null}
+              </div>
+            </details>
+
+            {actionWarnings.length ? (
+              <div className="coach-action-alert coach-action-alert--warning">
+                {actionWarnings.map((warning, index) => (
+                  <div key={`warning-${index}`}>{warning}</div>
+                ))}
+              </div>
+            ) : null}
+            {actionErrors.length ? (
+              <div className="coach-action-alert coach-action-alert--error">
+                {actionErrors.map((err, index) => (
+                  <div key={`error-${index}`}>{err}</div>
+                ))}
+              </div>
+            ) : null}
+          </CardBody>
+          <CardFooter className="coach-action-footer ui-row ui-row--wrap">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => handleApplyActionDraft()}
+              loading={actionApplying}
+              disabled={actionApplying || actionEditMode}
+            >
+              Apply
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                if (actionEditMode) {
+                  handleSaveActionEdit();
+                  return;
+                }
+                setActionEditMode(true);
+              }}
+              disabled={actionApplying || (actionEditMode && !canSaveActionEdit)}
+            >
+              {actionEditMode ? "Save" : "Edit"}
+            </Button>
+            {actionEditMode ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleCancelActionEdit}
+                disabled={actionApplying}
+              >
+                Cancel
+              </Button>
+            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleDiscardActionDraft}
+              disabled={actionApplying}
+            >
+              Discard
+            </Button>
+          </CardFooter>
+        </Card>
+      ) : null}
 
       {state.proposals.length ? (
         <Card>
@@ -1308,6 +1797,37 @@ export default function CoachView({
                 loading={templateCreating}
               >
                 Create
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {actionConfirmOpen ? (
+        <div className="coach-modal" role="dialog" aria-modal="true">
+          <div
+            className="coach-modal__backdrop"
+            onClick={handleCancelActionConfirm}
+          />
+          <div className="coach-modal__content" role="document">
+            <div className="ui-section-title">High-risk action</div>
+            <div className="template-meta">
+              This will overwrite existing data. Continue?
+            </div>
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleCancelActionConfirm}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleConfirmActionDraft}
+              >
+                Continue
               </Button>
             </div>
           </div>
