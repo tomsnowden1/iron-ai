@@ -826,6 +826,11 @@
     flex-wrap: wrap;
   }
 
+  .coach-gym-pill__text {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
   .coach-gym-pill__label {
     font-size: var(--text-xs);
     letter-spacing: 0.06em;
@@ -985,6 +990,31 @@
   .coach-gym-option.is-selected {
     border-color: var(--color-border);
     background: var(--color-surface-muted);
+  }
+
+  .coach-gym-footer {
+    margin-top: var(--space-3);
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .coach-debug-panel {
+    width: 100%;
+  }
+
+  .coach-debug-panel__summary {
+    cursor: pointer;
+    list-style: none;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .coach-debug-panel__summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .coach-debug-panel__body {
+    margin-top: var(--space-2);
   }
 
   .proposal-card {
