@@ -25,8 +25,6 @@ import { executeActionDraft, validateActionDraft } from "../../coach/actionDraft
 import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
-import { db, listWorkoutSpaces, setActiveWorkoutSpace } from "../../db";
-import { sortSpacesByName } from "../../workoutSpaces/logic";
 import {
   db,
   getAllExercises,
@@ -35,7 +33,6 @@ import {
   setActiveWorkoutSpace,
   setCoachActiveGymMeta,
 } from "../../db";
-
 import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
 
 import BottomSheet from "../../components/ui/BottomSheet";
