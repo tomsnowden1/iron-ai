@@ -208,9 +208,7 @@ function truncateSnapshot(snapshot, maxBytes) {
 
   maybeTruncate("equipment", (current) => ({
     ...current,
-    activeSpace: current.activeSpace
-      ? { ...current.activeSpace, equipmentIds: [] }
-      : current.activeSpace,
+    activeSpace: current.activeSpace ? { ...current.activeSpace } : current.activeSpace,
     availableEquipment: [],
     missingEquipment: [],
   }));
@@ -227,6 +225,70 @@ function resolveCoachActiveSpace(spaces, activeGymId) {
   if (!validSpaces.length) return null;
   if (activeGymId == null) return null;
   return validSpaces.find((space) => space.id === activeGymId) ?? null;
+}
+
+function summarizeExerciseCounts(exercises) {
+  let customCount = 0;
+  exercises.forEach((exercise) => {
+    if (exercise?.is_custom) customCount += 1;
+  });
+  return {
+    totalCount: exercises.length,
+    customCount,
+  };
+}
+
+export async function getCoachContextSummary(options = {}) {
+  const startedAt = nowMs();
+  const { activeGymId = null } = options;
+  const spaces = await listWorkoutSpaces();
+  const activeSpace = resolveCoachActiveSpace(spaces, activeGymId);
+  const exercises = await getAllExercises();
+  const exerciseCounts = summarizeExerciseCounts(exercises);
+
+  const snapshot = {
+    generatedAt: new Date().toISOString(),
+    scopes: {
+      sessions: false,
+      templates: false,
+      exerciseHistory: false,
+      notes: false,
+      settings: false,
+      spaces: true,
+    },
+    sessions: [],
+    templates: [],
+    exerciseLibrary: exerciseCounts,
+    settings: null,
+    activeSpace: activeSpace
+      ? {
+          id: activeSpace.id ?? null,
+          name: activeSpace.name ?? "Unknown",
+          isTemporary: activeSpace.isTemporary ?? false,
+          expiresAt: activeSpace.expiresAt ?? null,
+          equipmentIds: Array.isArray(activeSpace.equipmentIds)
+            ? activeSpace.equipmentIds
+            : [],
+        }
+      : null,
+    availableEquipment: [],
+    missingEquipment: [],
+    memorySummary: null,
+    launchContext: null,
+  };
+
+  const size = sizeOfSnapshot(snapshot);
+  const meta = { sizeBytes: size, truncated: false, omitted: [] };
+  const finalSnapshot = { ...snapshot, meta };
+  const contextBytes = resolveSnapshotBytes(finalSnapshot);
+  const buildMs = Math.max(0, Math.round(nowMs() - startedAt));
+  const contract = buildCoachContextContract({
+    snapshot: finalSnapshot,
+    contextBytes,
+    buildMs,
+  });
+
+  return { snapshot: finalSnapshot, meta, contract };
 }
 
 export async function getCoachContextSnapshot(options = {}) {

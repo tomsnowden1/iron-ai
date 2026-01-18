@@ -6,10 +6,11 @@ import {
   summarizeToolCall,
   validateToolInput,
 } from "./tools";
-import { getCoachContextSnapshot } from "./context";
+import { getCoachContextSnapshot, getCoachContextSummary } from "./context";
 import { summarizeCoachMemory } from "./memory";
 import { parseCoachActionDraftMessage } from "./actionDraftContract";
 import { buildContextFingerprint } from "./fingerprint";
+import { buildCoachContextContract } from "./contract";
 import { recordCoachPayloadTelemetry } from "./telemetry";
 
 const MAX_TOOL_LOOPS = 2;
@@ -144,8 +145,17 @@ export async function runCoachTurn({
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
 
+  const summaryResult = await getCoachContextSummary({ activeGymId });
+  const baselineSnapshot = summaryResult.snapshot;
+  const baselineMeta = summaryResult.meta ?? null;
+  const baselineContract = summaryResult.contract ?? null;
+
   let contextSnapshot = null;
   let contextContract = null;
+  let contextMeta = null;
+  let payloadSnapshot = null;
+  let payloadContract = null;
+  let payloadMeta = null;
   if (contextConfig?.enabled) {
     // TODO: Extend context snapshot sources (planner, long-term stats) as needed.
     const { snapshot, meta, contract } = await getCoachContextSnapshot({
@@ -158,36 +168,101 @@ export async function runCoachTurn({
     });
     contextSnapshot = snapshot;
     contextContract = contract ?? null;
-    debug.contextMeta = meta;
-    debug.contextContract = contextContract;
+    contextMeta = meta;
   }
+  const useFullContext = Boolean(contextSnapshot);
+  if (contextSnapshot) {
+    payloadSnapshot = {
+      ...contextSnapshot,
+      activeSpace: contextSnapshot.activeSpace ?? baselineSnapshot?.activeSpace ?? null,
+      exerciseLibrary:
+        contextSnapshot.exerciseLibrary ?? baselineSnapshot?.exerciseLibrary ?? null,
+    };
+    payloadMeta = contextMeta ?? baselineMeta;
+  } else {
+    payloadSnapshot = baselineSnapshot;
+    payloadMeta = baselineMeta;
+  }
+  let payloadBytes = 0;
+  try {
+    payloadBytes = JSON.stringify(payloadSnapshot).length;
+  } catch {
+    payloadBytes = 0;
+  }
+  const buildMs =
+    contextContract?.buildMs ?? baselineContract?.buildMs ?? 0;
+  payloadContract = buildCoachContextContract({
+    snapshot: payloadSnapshot,
+    contextBytes: payloadBytes,
+    buildMs,
+  });
+  const resolvedMeta = payloadMeta ?? { sizeBytes: payloadBytes, truncated: false, omitted: [] };
+  payloadSnapshot = {
+    ...payloadSnapshot,
+    meta: { ...resolvedMeta, sizeBytes: payloadBytes },
+  };
+  contextContract = payloadContract;
+  debug.contextMeta = payloadSnapshot?.meta ?? payloadMeta;
+  debug.contextContract = payloadContract;
+  const templatesAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.templates);
+  const sessionsAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.sessions);
+  const summaryOnly = !useFullContext;
 
   let loop = 0;
   let history = [...chatHistory, { role: "user", content: userMessage }];
   let conversation = [
-    ...buildSystemMessages({ contextSnapshot, memorySummary: memorySummaryData }),
+    ...buildSystemMessages({ contextSnapshot: payloadSnapshot, memorySummary: memorySummaryData }),
     ...history,
   ];
   debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
 
   let payloadFingerprint = null;
   let payloadBuiltAt = null;
+  let payloadSummary = null;
   let finalAssistant = null;
   let pendingToolMessages = [];
 
-  if (contextSnapshot) {
+  if (payloadSnapshot) {
     payloadFingerprint = await buildContextFingerprint(
-      contextSnapshot,
-      contextContract?.contextBytes ?? null
+      payloadSnapshot,
+      payloadContract?.contextBytes ?? null
     );
     payloadBuiltAt = Date.now();
     debug.payloadFingerprint = payloadFingerprint;
     debug.payloadBuiltAt = payloadBuiltAt;
     await recordCoachPayloadTelemetry({
       fingerprint: payloadFingerprint,
-      contract: contextContract,
+      contract: payloadContract,
       builtAt: payloadBuiltAt,
     });
+    const equipmentIds = Array.isArray(payloadSnapshot?.activeSpace?.equipmentIds)
+      ? payloadSnapshot.activeSpace.equipmentIds
+      : [];
+    const exerciseCount =
+      (payloadContract?.exerciseLibraryCount ?? 0) +
+      (payloadContract?.customExercisesCount ?? 0);
+    payloadSummary = {
+      activeGymId: payloadContract?.activeGymId ?? payloadSnapshot?.activeSpace?.id ?? null,
+      activeGymName: payloadContract?.activeGymName ?? payloadSnapshot?.activeSpace?.name ?? null,
+      equipmentCount: payloadContract?.equipmentCount ?? 0,
+      equipmentIds,
+      exerciseLibraryCount: payloadContract?.exerciseLibraryCount ?? 0,
+      customExercisesCount: payloadContract?.customExercisesCount ?? 0,
+      templatesCount: templatesAvailable ? payloadContract?.templatesCount ?? null : null,
+      recentWorkoutsCount: sessionsAvailable ? payloadContract?.recentWorkoutsCount ?? null : null,
+      contextBytes: payloadContract?.contextBytes ?? null,
+      buildMs: payloadContract?.buildMs ?? null,
+      summaryOnly,
+    };
+    const gymLabel = payloadSummary.activeGymId ?? "null";
+    const eqLabel = payloadSummary.equipmentCount ?? 0;
+    const exLabel = exerciseCount;
+    const bytesLabel = payloadFingerprint?.contextBytes ?? payloadSummary.contextBytes ?? 0;
+    const msLabel = payloadSummary.buildMs ?? 0;
+    const fpLabel = payloadFingerprint?.hash ?? "none";
+    console.info(
+      `coach_payload gym=${gymLabel} eq=${eqLabel} ex=${exLabel} bytes=${bytesLabel} ms=${msLabel} fp=${fpLabel}`
+    );
   }
 
   while (loop < MAX_TOOL_LOOPS) {
@@ -324,7 +399,7 @@ export async function runCoachTurn({
     }
 
     history = [...history, ...pendingToolMessages];
-    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+    conversation = [...buildSystemMessages({ contextSnapshot: payloadSnapshot }), ...history];
   }
 
   if (!finalAssistant) {
@@ -359,6 +434,7 @@ export async function runCoachTurn({
     contextContract,
     payloadFingerprint,
     payloadBuiltAt,
+    payloadSummary,
     actionDraft,
     actionContractVersion,
     actionParseErrors,
