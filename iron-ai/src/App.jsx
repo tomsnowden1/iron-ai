@@ -86,7 +86,7 @@ import {
   updateWorkoutSet,
 } from "./db";
 
-const SESSION_NOTE_LIMIT = 500;
+const SESSION_NOTE_LIMIT = 500 ;
 const EXERCISE_NOTE_LIMIT = 250;
 const SESSION_IDLE_MS = 8 * 60 * 1000;
 const SESSION_PROLONGED_IDLE_MS = 12 * 60 * 1000;
