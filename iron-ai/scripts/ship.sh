@@ -152,34 +152,54 @@ say "Pushing branch $branch to origin..."
 git push -u origin "$branch"
 
 say "Opening PR to main..."
+gh_handled=false
+pr_number=""
+
 if command -v gh >/dev/null 2>&1; then
-  pr_number=""
-  if pr_number=$(gh pr create --base main --head "$branch" --title "$commit_msg" --body "Automated ship via scripts/ship.sh" --json number --jq .number 2>/dev/null); then
-    :
-  else
-    pr_number=$(gh pr view --json number --jq .number)
-  fi
+  if gh auth status >/dev/null 2>&1; then
+    gh_handled=true
+    if ! pr_number=$(gh pr view --json number --jq .number 2>/dev/null); then
+      if ! pr_number=$(gh pr create --base main --head "$branch" --title "$commit_msg" --body "Automated ship via scripts/ship.sh" --json number --jq .number); then
+        say "gh pr create failed; skipping gh."
+        gh_handled=false
+      fi
+    fi
 
-  pr_url=$(gh pr view --json url --jq .url)
-  say "PR: $pr_url"
+    if [[ "$gh_handled" == "true" && -n "$pr_number" ]]; then
+      pr_url=$(gh pr view --json url --jq .url)
+      say "PR: $pr_url"
 
-  if gh label list --limit 200 | grep -qE '^automerge\b'; then
-    gh pr edit "$pr_number" --add-label automerge
-  else
-    say "automerge label not found; skipping label"
-  fi
+      if gh label list --limit 200 >/dev/null 2>&1; then
+        if gh label list --limit 200 | grep -qE '^automerge\\b'; then
+          gh pr edit "$pr_number" --add-label automerge || true
+        else
+          say "automerge label not found; skipping label"
+        fi
+      else
+        say "Unable to list labels; skipping label"
+      fi
 
-  if gh pr merge "$pr_number" --auto --merge; then
-    say "Auto-merge enabled"
+      if gh pr merge "$pr_number" --auto --merge; then
+        say "Auto-merge enabled"
+      else
+        say "Auto-merge not enabled; check repo settings and permissions"
+      fi
+    else
+      gh_handled=false
+    fi
   else
-    say "Auto-merge not enabled; check repo settings and permissions"
+    say "gh is installed but not authenticated; skipping gh."
   fi
-elif has_git_alias prmain || has_git_cmd prmain; then
-  say "Using git prmain helper"
-  git prmain
-elif has_git_alias shipmain || has_git_cmd shipmain; then
-  say "Using git shipmain helper"
-  git shipmain
-else
-  say "No GitHub CLI or helper command found. Open a PR to main manually."
+fi
+
+if [[ "$gh_handled" != "true" ]]; then
+  if has_git_alias prmain || has_git_cmd prmain; then
+    say "Using git prmain helper"
+    git prmain
+  elif has_git_alias shipmain || has_git_cmd shipmain; then
+    say "Using git shipmain helper"
+    git shipmain
+  else
+    say "No GitHub CLI or helper command found. Open a PR to main manually."
+  fi
 fi
