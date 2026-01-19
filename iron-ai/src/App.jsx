@@ -54,6 +54,7 @@ import { resolveActiveSpace } from "./workoutSpaces/logic";
 import {
   clearOpenAIKey,
   getOpenAIKeyMasked,
+  useCoachMemoryEnabled,
   setOpenAIKey,
   testOpenAIKey,
   updateSettings,
@@ -2288,9 +2289,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [openAiEditing, setOpenAiEditing] = useState(!settings?.openai_api_key);
   const [openAiTesting, setOpenAiTesting] = useState(false);
   const [openAiTestResult, setOpenAiTestResult] = useState(null);
-  const [coachMemoryEnabled, setCoachMemoryEnabled] = useState(
-    settings?.coach_memory_enabled ?? false
-  );
+  const { coachMemoryEnabled, setCoachMemoryEnabled } = useCoachMemoryEnabled();
   const [coachMemory, setCoachMemory] = useState(() =>
     normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory())
   );
@@ -2323,10 +2322,10 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     trimmedOpenAiKey.length === 0 || trimmedOpenAiKey.startsWith("sk-");
   const maskedOpenAiKey = getOpenAIKeyMasked(settings?.openai_api_key);
   const openAiKeyStatus = settings?.openai_api_key_status ?? "missing";
+  const resolvedCoachMemoryEnabled = coachMemoryEnabled ?? false;
 
   useEffect(() => {
     if (memoryEditOpen) return;
-    setCoachMemoryEnabled(settings?.coach_memory_enabled ?? false);
     setCoachMemory(normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory()));
   }, [memoryEditOpen, settings]);
 
@@ -2340,10 +2339,14 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     setOpenAiTestResult(null);
   }, [settings?.openai_api_key]);
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    console.debug("[coachMemory] Settings value ->", coachMemoryEnabled);
+  }, [coachMemoryEnabled]);
+
   const saveSettings = async () => {
     await updateSettings({
       coach_persona: persona,
-      coach_memory_enabled: coachMemoryEnabled,
       coach_memory: coachMemory,
       exercise_picker_auto_focus: exercisePickerAutoFocus,
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
@@ -2608,12 +2611,17 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             <div className="template-meta">Let the coach remember preferences.</div>
           </div>
           <Button
-            variant={coachMemoryEnabled ? "primary" : "secondary"}
+            variant={resolvedCoachMemoryEnabled ? "primary" : "secondary"}
             size="sm"
             type="button"
-            onClick={() => setCoachMemoryEnabled((prev) => !prev)}
+            onClick={() =>
+              void setCoachMemoryEnabled(!resolvedCoachMemoryEnabled, {
+                caller: "settings-toggle",
+              })
+            }
+            aria-pressed={resolvedCoachMemoryEnabled}
           >
-            {coachMemoryEnabled ? "On" : "Off"}
+            {resolvedCoachMemoryEnabled ? "On" : "Off"}
           </Button>
         </div>
 

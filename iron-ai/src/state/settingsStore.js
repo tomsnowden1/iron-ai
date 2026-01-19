@@ -1,9 +1,62 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import { db } from "../db";
 import { testOpenAIKey as testOpenAIKeyRequest } from "../services/openai";
 
 const SETTINGS_ID = 1;
+const COACH_MEMORY_ENABLED_KEY = "ironai.coachMemoryEnabled";
+const LEGACY_COACH_MEMORY_ENABLED_KEYS = [
+  "ironai.coach_memory_enabled",
+  "coachMemoryEnabled",
+  "coach_memory_enabled",
+];
+
+function getLocalStorage() {
+  if (typeof globalThis === "undefined") return null;
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function parseStoredBoolean(raw) {
+  if (raw == null) return { exists: false, value: false };
+  if (raw === "true" || raw === "1") return { exists: true, value: true };
+  if (raw === "false" || raw === "0") return { exists: true, value: false };
+  try {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "boolean") return { exists: true, value: parsed };
+  } catch {
+    // Ignore invalid storage payloads.
+  }
+  return { exists: false, value: false };
+}
+
+function readCoachMemoryEnabledFromStorage() {
+  const storage = getLocalStorage();
+  if (!storage) return { exists: false, value: false, key: null };
+  const keys = [COACH_MEMORY_ENABLED_KEY, ...LEGACY_COACH_MEMORY_ENABLED_KEYS];
+  for (const key of keys) {
+    const raw = storage.getItem(key);
+    if (raw == null) continue;
+    const parsed = parseStoredBoolean(raw);
+    if (parsed.exists) {
+      return { exists: true, value: parsed.value, key };
+    }
+  }
+  return { exists: false, value: false, key: null };
+}
+
+function writeCoachMemoryEnabledToStorage(value, sourceKey) {
+  const storage = getLocalStorage();
+  if (!storage) return;
+  storage.setItem(COACH_MEMORY_ENABLED_KEY, value ? "true" : "false");
+  if (sourceKey && sourceKey !== COACH_MEMORY_ENABLED_KEY) {
+    storage.removeItem(sourceKey);
+  }
+}
 
 export function normalizeOpenAIKey(value) {
   return String(value ?? "").trim();
@@ -38,6 +91,30 @@ export async function getSettings() {
 export async function updateSettings(patch) {
   const current = await getSettings();
   await db.settings.put({ ...(current ?? {}), id: SETTINGS_ID, ...(patch ?? {}) });
+}
+
+export async function getCoachMemoryEnabled() {
+  const settings = await getSettings();
+  if (typeof settings?.coach_memory_enabled === "boolean") {
+    return settings.coach_memory_enabled;
+  }
+  const stored = readCoachMemoryEnabledFromStorage();
+  if (stored.exists) {
+    await updateSettings({ coach_memory_enabled: stored.value });
+    writeCoachMemoryEnabledToStorage(stored.value, stored.key);
+    return stored.value;
+  }
+  return false;
+}
+
+export async function setCoachMemoryEnabled(nextValue, options = {}) {
+  const value = Boolean(nextValue);
+  if (import.meta.env.DEV) {
+    console.debug("[coachMemory] set ->", value, "from", options?.caller ?? "unknown");
+  }
+  await updateSettings({ coach_memory_enabled: value });
+  writeCoachMemoryEnabledToStorage(value);
+  return value;
 }
 
 export async function setOpenAIKey(nextKey) {
@@ -132,6 +209,48 @@ export function useSettings() {
     keyStatus,
     maskedOpenAIKey: maskOpenAIKey(apiKey),
     coachMemoryEnabled: Boolean(settings?.coach_memory_enabled),
+  };
+}
+
+export function useCoachMemoryEnabled() {
+  const settings = useLiveQuery(() => db.settings.get(SETTINGS_ID), [], null);
+  const [coachMemoryEnabled, setCoachMemoryEnabledState] = useState(() => {
+    const stored = readCoachMemoryEnabledFromStorage();
+    return stored.exists ? stored.value : undefined;
+  });
+  const migratedRef = useRef(false);
+
+  useEffect(() => {
+    if (settings === null) return;
+    const settingsValue = settings?.coach_memory_enabled;
+    if (typeof settingsValue === "boolean") {
+      setCoachMemoryEnabledState(settingsValue);
+      writeCoachMemoryEnabledToStorage(settingsValue);
+      return;
+    }
+    const stored = readCoachMemoryEnabledFromStorage();
+    if (stored.exists) {
+      setCoachMemoryEnabledState(stored.value);
+      writeCoachMemoryEnabledToStorage(stored.value, stored.key);
+      if (!migratedRef.current) {
+        migratedRef.current = true;
+        void updateSettings({ coach_memory_enabled: stored.value });
+      }
+      return;
+    }
+    setCoachMemoryEnabledState(false);
+  }, [settings]);
+
+  const setEnabled = useCallback(async (nextValue, options = {}) => {
+    const resolved = Boolean(nextValue);
+    setCoachMemoryEnabledState(resolved);
+    await setCoachMemoryEnabled(resolved, options);
+    return resolved;
+  }, []);
+
+  return {
+    coachMemoryEnabled,
+    setCoachMemoryEnabled: setEnabled,
   };
 }
 
