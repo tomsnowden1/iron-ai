@@ -17,17 +17,33 @@ const draftByKind = {
   create_workout: {
     ...baseDraft,
     kind: "create_workout",
-    payload: { date: "2024-03-01" },
+    payload: {
+      name: "Full body",
+      exercises: [
+        {
+          exerciseId: 1,
+          sets: [{ reps: 8, weight: 135 }],
+        },
+      ],
+    },
   },
   create_template: {
     ...baseDraft,
     kind: "create_template",
-    payload: { name: "Push Day" },
+    payload: {
+      name: "Push Day",
+      exercises: [
+        {
+          exerciseId: 2,
+          sets: [{ reps: 10 }],
+        },
+      ],
+    },
   },
   create_gym: {
     ...baseDraft,
     kind: "create_gym",
-    payload: { name: "Downtown Gym" },
+    payload: { name: "Downtown Gym", equipmentIds: ["dumbbell"] },
   },
 };
 

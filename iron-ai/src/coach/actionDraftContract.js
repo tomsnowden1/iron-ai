@@ -14,10 +14,70 @@ export const ActionDraftRisks = {
   high: "high",
 };
 
+const NumericValue = z
+  .union([z.number(), z.string()])
+  .refine((value) => Number.isFinite(Number(value)), {
+    message: "Value must be numeric.",
+  });
+
+const NumericId = z
+  .union([z.number(), z.string()])
+  .refine((value) => Number.isInteger(Number(value)) && Number(value) > 0, {
+    message: "ID must be a positive integer.",
+  });
+
+const ActionDraftSetSchema = z
+  .object({
+    reps: NumericValue.optional(),
+    weight: NumericValue.optional(),
+    duration: NumericValue.optional(),
+    rpe: NumericValue.optional(),
+  })
+  .passthrough();
+
+const ActionDraftExerciseSchema = z
+  .object({
+    exerciseId: NumericId,
+    sets: z.array(ActionDraftSetSchema).optional(),
+    notes: z.string().optional(),
+  })
+  .passthrough();
+
 const ActionDraftPayloadSchemas = {
-  create_workout: z.object({ date: z.string().min(1) }).passthrough(),
-  create_template: z.object({ name: z.string().min(1) }).passthrough(),
-  create_gym: z.object({ name: z.string().min(1) }).passthrough(),
+  create_workout: z
+    .object({
+      name: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      gymId: NumericId.optional(),
+      exercises: z.array(ActionDraftExerciseSchema).min(1),
+      plannedDurationMins: NumericValue.optional(),
+    })
+    .refine((value) => value.name || value.title, {
+      message: "Workout draft requires a name or title.",
+    })
+    .passthrough(),
+  create_template: z
+    .object({
+      name: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      gymId: NumericId.optional(),
+      exercises: z.array(ActionDraftExerciseSchema).min(1),
+      frequencyHint: z.string().optional(),
+    })
+    .refine((value) => value.name || value.title, {
+      message: "Template draft requires a name or title.",
+    })
+    .passthrough(),
+  create_gym: z
+    .object({
+      name: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      equipmentIds: z.array(z.string()).optional(),
+    })
+    .refine((value) => value.name || value.title, {
+      message: "Gym draft requires a name or title.",
+    })
+    .passthrough(),
 };
 
 const BaseActionDraftSchema = z

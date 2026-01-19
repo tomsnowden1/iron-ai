@@ -826,6 +826,11 @@
     flex-wrap: wrap;
   }
 
+  .coach-gym-pill__text {
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
   .coach-gym-pill__label {
     font-size: var(--text-xs);
     letter-spacing: 0.06em;
@@ -893,6 +898,21 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--color-text);
+  }
+
+  .coach-trust-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .coach-trust-line__label {
+    font-size: var(--text-xs);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
   }
 
   .coach-context {
@@ -970,6 +990,31 @@
   .coach-gym-option.is-selected {
     border-color: var(--color-border);
     background: var(--color-surface-muted);
+  }
+
+  .coach-gym-footer {
+    margin-top: var(--space-3);
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .coach-debug-panel {
+    width: 100%;
+  }
+
+  .coach-debug-panel__summary {
+    cursor: pointer;
+    list-style: none;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .coach-debug-panel__summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .coach-debug-panel__body {
+    margin-top: var(--space-2);
   }
 
   .proposal-card {
@@ -1061,8 +1106,22 @@
     justify-content: flex-start;
   }
 
-  .chat-bubble {
+  .chat-message__stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
     max-width: 72%;
+  }
+
+  .chat-message[data-role="user"] .chat-message__stack {
+    align-items: flex-end;
+  }
+
+  .chat-message[data-role="assistant"] .chat-message__stack {
+    align-items: flex-start;
+  }
+
+  .chat-bubble {
     padding: 10px 12px;
     border-radius: 14px;
     background: var(--color-surface-muted);
@@ -1082,6 +1141,21 @@
   .chat-message[data-loading="true"] .chat-bubble {
     opacity: 0.7;
     font-style: italic;
+  }
+
+  .chat-actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .chat-actions[data-stale="true"] {
+    opacity: 0.7;
+  }
+
+  .chat-actions__status {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
   }
 
   .chat-empty {
@@ -1105,6 +1179,137 @@
   .chat-error {
     color: var(--color-destructive);
     font-size: var(--text-xs);
+  }
+
+  .coach-action-tray {
+    border: 1px solid var(--color-border-subtle);
+  }
+
+  .coach-action-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .coach-action-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .coach-action-title {
+    font-size: var(--text-md);
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .coach-action-edit {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px dashed var(--color-border-subtle);
+    background: var(--color-surface-muted);
+  }
+
+  .coach-action-details {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface);
+  }
+
+  .coach-action-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--color-text);
+    list-style: none;
+  }
+
+  .coach-action-details summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .coach-action-details__body {
+    margin-top: var(--space-2);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .coach-action-exercises {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .coach-action-exercise {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .coach-action-exercise__name {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .coach-action-exercise__meta {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .coach-action-alert {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    font-size: var(--text-xs);
+  }
+
+  .coach-action-alert--warning {
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+    color: var(--color-text);
+  }
+
+  .coach-action-alert--error {
+    border: 1px solid color-mix(in srgb, var(--color-destructive) 35%, transparent);
+    background: color-mix(in srgb, var(--color-destructive) 10%, var(--color-surface));
+    color: var(--color-destructive);
+  }
+
+  .coach-action-footer {
+    justify-content: flex-start;
+    gap: var(--space-2);
+  }
+
+  .coach-modal {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 40;
+  }
+
+  .coach-modal__backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(15, 20, 24, 0.45);
+  }
+
+  .coach-modal__content {
+    position: relative;
+    z-index: 1;
+    max-width: 360px;
+    width: calc(100% - var(--space-6));
+    padding: var(--space-4);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--color-border);
+    background: var(--color-surface);
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
   @media (max-width: 720px) {

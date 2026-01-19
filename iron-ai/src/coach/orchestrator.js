@@ -6,7 +6,7 @@ import {
   summarizeToolCall,
   validateToolInput,
 } from "./tools";
-import { getCoachContextSnapshot } from "./context";
+import { getCoachContextSnapshot, getCoachRequestContext } from "./context";
 import { summarizeCoachMemory } from "./memory";
 import { parseCoachActionDraftMessage } from "./actionDraftContract";
 import { buildContextFingerprint } from "./fingerprint";
@@ -20,12 +20,14 @@ const SYSTEM_PROMPT = [
   "Be concise, practical, and friendly.",
   "Reply with a succinct assistantText.",
   "If proposing an action, include a JSON object in a fenced ```json``` block using contractVersion coach_action_v1 with assistantText and an optional actionDraft.",
+  "Action drafts must include kind, confidence, risk, title, summary, and payload. For workouts/templates: payload includes name/title, optional gymId, and exercises: [{ exerciseId, sets?: [{ reps?, weight?, duration?, rpe? }], notes? }]. For gyms: payload includes name/title and optional equipmentIds.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
   "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
   "If a write action is requested, ask for user confirmation before changes are made.",
+  "Avoid high-risk actionDrafts unless the user explicitly requests overwriting or destructive changes.",
   "Avoid asking multiple clarifying questions; propose reasonable defaults instead.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
 ].join(" ");
@@ -51,12 +53,18 @@ const WRITE_TOOLS = [
   "set_active_space",
 ];
 
-function buildSystemMessages({ contextSnapshot, memorySummary }) {
+function buildSystemMessages({ contextSnapshot, memorySummary, requestContext }) {
   const messages = [{ role: "system", content: SYSTEM_PROMPT }];
   if (memorySummary) {
     messages.push({
       role: "system",
       content: `Coach memory summary (JSON):\n${JSON.stringify(memorySummary)}`,
+    });
+  }
+  if (requestContext) {
+    messages.push({
+      role: "system",
+      content: `Coach request context (JSON):\n${JSON.stringify(requestContext)}`,
     });
   }
   if (contextSnapshot) {
@@ -137,12 +145,43 @@ export async function runCoachTurn({
     allowedTools: Array.from(allowedTools),
     payloadFingerprint: null,
     payloadBuiltAt: null,
+    requestContext: null,
+    requestMeta: null,
+    requestFingerprint: null,
     actionContractVersion: null,
     actionParseErrors: null,
     actionDraft: null,
   };
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
+
+  let requestContext = {
+    activeGymId: null,
+    gymName: null,
+    equipmentIds: [],
+    equipmentCount: 0,
+    exerciseLibraryCount: 0,
+    customExercisesCount: 0,
+    templatesCount: 0,
+    recentWorkoutsCount: 0,
+    lastWorkoutDate: null,
+    contextBytes: 0,
+    contextBuildMs: 0,
+  };
+  let requestMeta = { contextBytes: 0, contextBuildMs: 0 };
+  try {
+    const result = await getCoachRequestContext({ activeGymId });
+    requestContext = result.context ?? requestContext;
+    requestMeta = result.meta ?? requestMeta;
+  } catch {
+    // Fall back to a minimal request context if the DB is unavailable.
+  }
+  const requestFingerprint = await buildContextFingerprint(
+    requestContext,
+    requestMeta?.contextBytes ?? null
+  );
+  const requestExerciseCount =
+    (requestContext.exerciseLibraryCount ?? 0) + (requestContext.customExercisesCount ?? 0);
 
   let contextSnapshot = null;
   let contextContract = null;
@@ -165,26 +204,42 @@ export async function runCoachTurn({
   let loop = 0;
   let history = [...chatHistory, { role: "user", content: userMessage }];
   let conversation = [
-    ...buildSystemMessages({ contextSnapshot, memorySummary: memorySummaryData }),
+    ...buildSystemMessages({
+      contextSnapshot,
+      memorySummary: memorySummaryData,
+      requestContext,
+    }),
     ...history,
   ];
   debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
 
-  let payloadFingerprint = null;
-  let payloadBuiltAt = null;
+  let payloadFingerprint = requestFingerprint;
+  let payloadBuiltAt = Date.now();
+  let snapshotFingerprint = null;
   let finalAssistant = null;
   let pendingToolMessages = [];
 
+  debug.payloadFingerprint = payloadFingerprint;
+  debug.payloadBuiltAt = payloadBuiltAt;
+  debug.requestContext = requestContext;
+  debug.requestMeta = requestMeta;
+  debug.requestFingerprint = requestFingerprint;
+
+  console.info(
+    `coach_payload gym=${requestContext.activeGymId ?? "none"} eq=${
+      requestContext.equipmentCount ?? 0
+    } ex=${requestExerciseCount} bytes=${requestMeta?.contextBytes ?? 0} ms=${
+      requestMeta?.contextBuildMs ?? 0
+    } fp=${requestFingerprint.hash}`
+  );
+
   if (contextSnapshot) {
-    payloadFingerprint = await buildContextFingerprint(
+    snapshotFingerprint = await buildContextFingerprint(
       contextSnapshot,
       contextContract?.contextBytes ?? null
     );
-    payloadBuiltAt = Date.now();
-    debug.payloadFingerprint = payloadFingerprint;
-    debug.payloadBuiltAt = payloadBuiltAt;
     await recordCoachPayloadTelemetry({
-      fingerprint: payloadFingerprint,
+      fingerprint: snapshotFingerprint,
       contract: contextContract,
       builtAt: payloadBuiltAt,
     });
@@ -214,7 +269,10 @@ export async function runCoachTurn({
 
     const assistantToolCallMessage = buildAssistantToolCallMessage(streamResult.toolCalls);
     history = [...history, assistantToolCallMessage];
-    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+    conversation = [
+      ...buildSystemMessages({ contextSnapshot, requestContext }),
+      ...history,
+    ];
 
     pendingToolMessages = [];
     for (const toolCall of streamResult.toolCalls) {
@@ -324,7 +382,10 @@ export async function runCoachTurn({
     }
 
     history = [...history, ...pendingToolMessages];
-    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+    conversation = [
+      ...buildSystemMessages({ contextSnapshot, requestContext }),
+      ...history,
+    ];
   }
 
   if (!finalAssistant) {
