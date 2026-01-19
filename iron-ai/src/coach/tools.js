@@ -17,6 +17,7 @@ import { normalizeCoachMemory, upsertGoal } from "./memory";
 import { validateSchema } from "./schema";
 import { isSpaceExpired } from "../workoutSpaces/logic";
 import { getExerciseSubstitutions } from "../equipment/engine";
+import { resolveTemplateExercises } from "./templateExerciseMapping";
 
 const MAX_LIST_LIMIT = 50;
 const MAX_SESSION_LIMIT = 20;
@@ -587,9 +588,10 @@ export const toolDefinitions = [
           maxItems: 20,
           items: {
             type: "object",
-            required: ["exerciseId"],
             properties: {
               exerciseId: { type: "integer" },
+              name: { type: "string", minLength: 1, maxLength: 120 },
+              exerciseName: { type: "string", minLength: 1, maxLength: 120 },
               sets: { type: "integer" },
               reps: { type: "integer" },
               warmupSets: { type: "integer" },
@@ -601,13 +603,27 @@ export const toolDefinitions = [
     outputSchema: { type: "object" },
     isWriteTool: true,
     handler: async ({ name, exercises, spaceId }) => {
-      const existingExercises = await getAllExercises();
-      const validIds = new Set(existingExercises.map((exercise) => exercise.id));
-      exercises.forEach((ex) => {
-        if (!validIds.has(ex.exerciseId)) {
-          throw new Error(`Exercise ${ex.exerciseId} not found.`);
-        }
-      });
+      const draftExercises = Array.isArray(exercises) ? exercises : [];
+      if (!draftExercises.length) {
+        throw new Error("Provide at least one exercise.");
+      }
+      const {
+        resolvedExercises,
+        mapping,
+        mappedCount,
+        createdCustomCount,
+      } = await resolveTemplateExercises(draftExercises, { createMissing: true });
+
+      if (mappedCount !== draftExercises.length) {
+        console.warn(
+          `template_create mapping mismatch (${mappedCount}/${draftExercises.length}).`
+        );
+        throw new Error("Unable to resolve all exercises for this template.");
+      }
+
+      console.info(
+        `template_create mapped=${mappedCount}/${draftExercises.length} createdCustom=${createdCustomCount}`
+      );
       if (spaceId != null) {
         const space = await getWorkoutSpaceById(spaceId);
         if (!space) throw new Error("Workout space not found.");
@@ -627,8 +643,8 @@ export const toolDefinitions = [
             updatedAt: now,
           });
           const items = [];
-          for (let i = 0; i < exercises.length; i++) {
-            const ex = exercises[i];
+          for (let i = 0; i < resolvedExercises.length; i++) {
+            const ex = resolvedExercises[i];
             const notes = ex.warmupSets ? `Warmup sets: ${ex.warmupSets}` : "";
             const itemId = await db.table("templateItems").add({
               templateId,
@@ -642,11 +658,15 @@ export const toolDefinitions = [
             });
             items.push({ exerciseId: ex.exerciseId, itemId });
           }
-          return { templateId, items };
+          return { templateId, items, mapping };
         }
       );
 
-      return { templateId: result.templateId, exercises: result.items };
+      return {
+        templateId: result.templateId,
+        exercises: result.items,
+        mapping: result.mapping ?? null,
+      };
     },
   },
   {
@@ -664,9 +684,10 @@ export const toolDefinitions = [
           maxItems: 20,
           items: {
             type: "object",
-            required: ["exerciseId"],
             properties: {
               exerciseId: { type: "integer" },
+              name: { type: "string", minLength: 1, maxLength: 120 },
+              exerciseName: { type: "string", minLength: 1, maxLength: 120 },
               sets: { type: "integer" },
               reps: { type: "integer" },
             },
@@ -680,6 +701,21 @@ export const toolDefinitions = [
       if (!templateId && (!exercises || exercises.length === 0)) {
         throw new Error("Provide a templateId or exercises.");
       }
+      let resolvedExercises = exercises ?? null;
+      if (!templateId && Array.isArray(exercises) && exercises.length) {
+        const result = await resolveTemplateExercises(exercises, { createMissing: true });
+        if (result.mappedCount !== exercises.length) {
+          console.warn(
+            `planned_workout mapping mismatch (${result.mappedCount}/${exercises.length}).`
+          );
+          throw new Error("Unable to resolve all exercises for this workout.");
+        }
+        resolvedExercises = result.resolvedExercises.map((item) => ({
+          exerciseId: item.exerciseId,
+          sets: item.sets ?? null,
+          reps: item.reps ?? null,
+        }));
+      }
       if (templateId) {
         const template = await db.table("templates").get(templateId);
         if (!template) {
@@ -689,7 +725,7 @@ export const toolDefinitions = [
       const plannedId = await addPlannedWorkout({
         date,
         templateId: templateId ?? null,
-        exercises: exercises ?? null,
+        exercises: resolvedExercises ?? null,
         source: "coach",
       });
       return { plannedWorkoutId: plannedId };
