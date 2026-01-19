@@ -158,15 +158,20 @@ pr_number=""
 if command -v gh >/dev/null 2>&1; then
   if gh auth status >/dev/null 2>&1; then
     gh_handled=true
-    if ! pr_number=$(gh pr view --json number --jq .number 2>/dev/null); then
-      if ! pr_number=$(gh pr create --base main --head "$branch" --title "$commit_msg" --body "Automated ship via scripts/ship.sh" --json number --jq .number); then
+    pr_url=""
+    if pr_number=$(gh pr view --json number --jq .number 2>/dev/null); then
+      pr_url=$(gh pr view --json url --jq .url)
+    else
+      if pr_url=$(gh pr create --base main --head "$branch" --title "$commit_msg" --body "Automated ship via scripts/ship.sh"); then
+        pr_number=$(gh pr view --json number --jq .number)
+        pr_url=$(gh pr view --json url --jq .url)
+      else
         say "gh pr create failed; skipping gh."
         gh_handled=false
       fi
     fi
 
     if [[ "$gh_handled" == "true" && -n "$pr_number" ]]; then
-      pr_url=$(gh pr view --json url --jq .url)
       say "PR: $pr_url"
 
       if gh label list --limit 200 >/dev/null 2>&1; then
