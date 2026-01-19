@@ -23,7 +23,7 @@ import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
 import { executeTool, getToolRegistry } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { resolveTemplateDraftInfo } from "./templateDraft";
-import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
+import { setOpenAIKeyStatus, useCoachMemoryEnabled, useSettings } from "../../state/settingsStore";
 import {
   db,
   getAllExercises,
@@ -156,12 +156,17 @@ export default function CoachView({
   onNavigateToGyms,
   diagnosticsEnabled,
 }) {
-  const { settings, apiKey, hasKey, keyStatus, coachMemoryEnabled } = useSettings();
-  const memoryEnabled = coachMemoryEnabled;
+  const { settings, apiKey, hasKey, keyStatus } = useSettings();
+  const { coachMemoryEnabled } = useCoachMemoryEnabled();
+  const memoryEnabled = coachMemoryEnabled ?? false;
   const memory = useMemo(
     () => normalizeCoachMemory(settings?.coach_memory),
     [settings?.coach_memory]
   );
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    console.debug("[coachMemory] Coach value ->", coachMemoryEnabled);
+  }, [coachMemoryEnabled]);
 
   const templateTool = useMemo(() => getToolRegistry().get("create_template"), []);
   const [state, dispatch] = useReducer(coachReducer, initialCoachState);
