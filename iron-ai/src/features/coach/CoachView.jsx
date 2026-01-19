@@ -6,24 +6,34 @@ import {
   CardBody,
   CardFooter,
   CardHeader,
+  Input,
+  Label,
   PageHeader,
+  Select,
 } from "../../components/ui";
 import { getCoachContextSnapshot } from "../../coach/context";
 import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
+import { actionDraftReducer, initialActionDraftState } from "../../coach/actionDraftState";
+import { ActionDraftKinds } from "../../coach/actionDraftContract";
+import { executeActionDraft, validateActionDraft } from "../../coach/actionDraftExecution";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
+import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
 import { executeTool, getToolRegistry } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { resolveTemplateDraftInfo } from "./templateDraft";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import {
+  db,
   getAllExercises,
   getCoachActiveGymMeta,
   listWorkoutSpaces,
+  setActiveWorkoutSpace,
   setCoachActiveGymMeta,
 } from "../../db";
 import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
+
 import BottomSheet from "../../components/ui/BottomSheet";
 
 function createMessage(id, role, content, meta) {
@@ -92,14 +102,57 @@ function formatIdList(values, limit = 8) {
   return `${truncated.join(", ")}${suffix}`;
 }
 
+function formatTemplateMappingPreview(mapping, limit = 5) {
+  const list = Array.isArray(mapping) ? mapping : [];
+  const trimmed = list.slice(0, limit);
+  const remainder = Math.max(0, list.length - trimmed.length);
+  const lines = trimmed.map((entry) => {
+    const draftLabel =
+      entry.draftName || (entry.draftId != null ? `ID ${entry.draftId}` : "Unknown");
+    if (!entry.resolvedId) {
+      return `${draftLabel} → create custom`;
+    }
+    const resolvedLabel = entry.resolvedName ?? "Unknown";
+    return `${draftLabel} → ${resolvedLabel} (#${entry.resolvedId})`;
+  });
+  if (remainder) lines.push(`… +${remainder} more`);
+  return lines;
+}
+
+function summarizeIdList(ids, limit = 6) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { items: [], omitted: 0 };
+  }
+  const items = ids.slice(0, limit);
+  const omitted = Math.max(0, ids.length - items.length);
+  return { items, omitted };
+}
+
+function formatConfidence(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return Number(value).toFixed(2);
+}
+
+function hasCoachContextCounts(contract) {
+  if (!contract) return false;
+  const counts = [
+    contract.recentWorkoutsCount,
+    contract.templatesCount,
+    contract.customExercisesCount,
+    contract.exerciseLibraryCount,
+  ];
+  return counts.some((value) => Number(value) > 0);
+}
+
 const TEMPLATE_REQUEST_PROMPT =
   "Convert your last plan into the IronAI template JSON format. " +
   "Reply with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
-
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
   onNotify,
+  onOpenTemplate,
+  onOpenWorkout,
   onNavigateToGyms,
   diagnosticsEnabled,
 }) {
@@ -112,11 +165,19 @@ export default function CoachView({
 
   const templateTool = useMemo(() => getToolRegistry().get("create_template"), []);
   const [state, dispatch] = useReducer(coachReducer, initialCoachState);
+  const [actionState, actionDispatch] = useReducer(
+    actionDraftReducer,
+    initialActionDraftState
+  );
   const workoutSpaces = useLiveQuery(() => listWorkoutSpaces(), []);
   const allExercises = useLiveQuery(() => getAllExercises(), []);
   const sortedSpaces = useMemo(
     () => (workoutSpaces ? sortSpacesByName(workoutSpaces) : []),
     [workoutSpaces]
+  );
+  const exerciseMap = useMemo(
+    () => new Map((allExercises ?? []).map((exercise) => [exercise.id, exercise])),
+    [allExercises]
   );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -132,10 +193,8 @@ export default function CoachView({
   const [payloadSummary, setPayloadSummary] = useState(null);
   const [debugContextContract, setDebugContextContract] = useState(null);
   const [debugContextFingerprint, setDebugContextFingerprint] = useState(null);
+  const [templateMappingPreview, setTemplateMappingPreview] = useState({});
   const [gymPickerOpen, setGymPickerOpen] = useState(false);
-  const [activeGymId, setActiveGymId] = useState(null);
-  const [coachGymLoaded, setCoachGymLoaded] = useState(false);
-  const [coachGymHasStored, setCoachGymHasStored] = useState(false);
   const [pendingLaunchContext, setPendingLaunchContext] = useState(
     () => launchContext ?? null
   );
@@ -143,6 +202,13 @@ export default function CoachView({
   const [templateConfirmDraft, setTemplateConfirmDraft] = useState(null);
   const [templateConfirmOpen, setTemplateConfirmOpen] = useState(false);
   const [templateCreating, setTemplateCreating] = useState(false);
+  const [actionEditMode, setActionEditMode] = useState(false);
+  const [actionEditDraft, setActionEditDraft] = useState({ title: "", gymId: "" });
+  const [actionErrors, setActionErrors] = useState([]);
+  const [actionWarnings, setActionWarnings] = useState([]);
+  const [actionApplying, setActionApplying] = useState(false);
+  const [actionConfirmOpen, setActionConfirmOpen] = useState(false);
+  const [pendingHighRiskDraft, setPendingHighRiskDraft] = useState(null);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -164,55 +230,14 @@ export default function CoachView({
   );
   const canSend = accessState.canChat && input.trim().length > 0 && !sending;
   const debugEnabled = import.meta.env.DEV || diagnosticsEnabled;
+  const activeGymId = settings?.active_space_id ?? null;
+  const exerciseCount = useLiveQuery(() => db.table("exercises").count(), []);
   const coachDiagnosticsEnabled = useMemo(() => {
     if (typeof window === "undefined") return false;
-    // Debug panel is enabled with ?debug=1.
     const params = new URLSearchParams(window.location.search);
+    // Debug panel gated by ?debug=1 to avoid accidental exposure in normal UX.
     return params.get("debug") === "1";
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadCoachGym = async () => {
-      const result = await getCoachActiveGymMeta();
-      if (cancelled) return;
-      setActiveGymId(result.value ?? null);
-      setCoachGymLoaded(true);
-      setCoachGymHasStored(result.exists);
-    };
-    void loadCoachGym();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!coachGymLoaded || coachGymHasStored) return;
-    if (!sortedSpaces.length) return;
-    const defaultSpace = resolveActiveSpace(
-      sortedSpaces,
-      settings?.active_space_id ?? null
-    );
-    if (!defaultSpace) return;
-    setActiveGymId(defaultSpace.id ?? null);
-    setCoachGymHasStored(true);
-  }, [coachGymLoaded, coachGymHasStored, sortedSpaces, settings?.active_space_id]);
-
-  useEffect(() => {
-    if (!coachGymLoaded) return;
-    if (activeGymId == null) return;
-    if (!sortedSpaces.length) return;
-    const exists = sortedSpaces.some((space) => space.id === activeGymId);
-    if (!exists) {
-      setActiveGymId(null);
-      setCoachGymHasStored(true);
-    }
-  }, [activeGymId, coachGymLoaded, sortedSpaces]);
-
-  useEffect(() => {
-    if (!coachGymLoaded) return;
-    void setCoachActiveGymMeta(activeGymId);
-  }, [activeGymId, coachGymLoaded]);
 
   useEffect(() => {
     if (!launchContext) return;
@@ -250,6 +275,7 @@ export default function CoachView({
     if (!coachDiagnosticsEnabled) {
       setDebugContextContract(null);
       setDebugContextFingerprint(null);
+      setTemplateMappingPreview({});
       return () => {
         cancelled = true;
       };
@@ -281,19 +307,55 @@ export default function CoachView({
     };
   }, [coachDiagnosticsEnabled, contextScopes, memory, memoryEnabled, activeGymId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!coachDiagnosticsEnabled) {
+      setTemplateMappingPreview({});
+      return () => {
+        cancelled = true;
+      };
+    }
+    const buildPreview = async () => {
+      const previews = {};
+      const templateProposals = state.proposals.filter(
+        (proposal) => proposal.name === "create_template"
+      );
+      for (const proposal of templateProposals) {
+        const draftExercises = Array.isArray(proposal.input?.exercises)
+          ? proposal.input.exercises
+          : [];
+        if (!draftExercises.length) continue;
+        try {
+          const preview = await resolveTemplateExercises(draftExercises, {
+            createMissing: false,
+          });
+          previews[proposal.id] = preview;
+        } catch {
+          // Ignore preview failures in debug-only UI.
+        }
+      }
+      if (!cancelled) {
+        setTemplateMappingPreview(previews);
+      }
+    };
+    void buildPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [coachDiagnosticsEnabled, state.proposals]);
+
   const hasGyms = sortedSpaces.length > 0;
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
     [sortedSpaces, activeGymId]
   );
-  const exerciseCountValue = Array.isArray(allExercises) ? allExercises.length : null;
-  const exerciseCountLabel = `${formatCount(exerciseCountValue)} exercises`;
-  const gymEquipmentValue = selectedGym ? equipmentCount(selectedGym.equipmentIds) : null;
-  const gymEquipmentLabel = `${formatCount(gymEquipmentValue)} equipment`;
+  const gymNameLabel = selectedGym ? selectedGym.name ?? "Untitled Gym" : "No gym selected";
+  const gymEquipmentCount = equipmentCount(selectedGym?.equipmentIds) ?? 0;
+  const gymEquipmentLabel = `${gymEquipmentCount} equipment`;
+  const exerciseCountLabel = `${formatCount(exerciseCount)} exercises`;
   const contextPillLabel = selectedGym
-    ? `${selectedGym.name ?? "Untitled Gym"} · ${gymEquipmentLabel} · ${exerciseCountLabel}`
+    ? `${gymNameLabel} · ${gymEquipmentLabel} · ${exerciseCountLabel}`
     : `No gym selected · ${exerciseCountLabel}`;
-  const gymActionLabel = selectedGym ? "Change" : "Select gym";
   const trustBadgeEnabled =
     Boolean(contextContract) && (contextEnabled || Boolean(pendingLaunchContext));
   const trustSummary = trustBadgeEnabled
@@ -306,12 +368,20 @@ export default function CoachView({
     : "—";
   const debugContract =
     contextContract ?? debugContextContract ?? state.debug?.contextContract ?? null;
+  const debugRequestContext = state.debug?.requestContext ?? null;
   const debugPayloadFingerprint =
     payloadFingerprint ??
-    debugContextFingerprint ??
+    state.debug?.requestFingerprint ??
     state.debug?.payloadFingerprint ??
+    debugContextFingerprint ??
     null;
   const actionContractVersion = state.debug?.actionContractVersion ?? null;
+  const equipmentIdSummary = summarizeIdList(debugRequestContext?.equipmentIds);
+  const equipmentIdLabel = equipmentIdSummary.items.length
+    ? `${equipmentIdSummary.items.join(", ")}${
+        equipmentIdSummary.omitted ? ` +${equipmentIdSummary.omitted} more` : ""
+      }`
+    : "—";
   const payloadFingerprintLabel = debugPayloadFingerprint
     ? `${debugPayloadFingerprint.hash}${
         debugPayloadFingerprint.algorithm
@@ -349,6 +419,25 @@ export default function CoachView({
     if (latestAssistantId == null) return null;
     return messages.find((message) => message.id === latestAssistantId) ?? null;
   }, [latestAssistantId, messages]);
+  const actionDraft = actionState.draft;
+  const actionPayload = actionDraft?.payload ?? null;
+  const actionDraftTitle =
+    actionPayload?.name ?? actionPayload?.title ?? actionDraft?.title ?? "";
+  const actionDraftSummary = actionDraft?.summary ?? "";
+  const actionDraftExercises = Array.isArray(actionPayload?.exercises)
+    ? actionPayload.exercises
+    : [];
+  const actionDraftGymId = Number.isFinite(Number(actionPayload?.gymId))
+    ? Number(actionPayload?.gymId)
+    : null;
+  const actionDraftGym =
+    sortedSpaces.find((space) => space.id === actionDraftGymId) ?? null;
+  const actionDraftKind = actionDraft?.kind ?? null;
+  const actionDraftHasGyms =
+    actionDraftKind === ActionDraftKinds.create_workout ||
+    actionDraftKind === ActionDraftKinds.create_template;
+  const actionEditTitle = String(actionEditDraft.title ?? "");
+  const canSaveActionEdit = actionEditTitle.trim().length > 0;
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -387,6 +476,43 @@ export default function CoachView({
     settings: "Settings",
     spaces: "Workout spaces",
   };
+
+  useEffect(() => {
+    if (!actionDraft) {
+      setActionEditMode(false);
+      setActionEditDraft({ title: "", gymId: "" });
+      setActionErrors([]);
+      setActionWarnings([]);
+      setPendingHighRiskDraft(null);
+      return;
+    }
+    setActionEditMode(false);
+    setActionEditDraft({
+      title: actionDraftTitle,
+      gymId: actionDraftGymId ?? "",
+    });
+    setActionErrors([]);
+    setPendingHighRiskDraft(null);
+  }, [actionDraft, actionDraftTitle, actionDraftGymId]);
+
+  useEffect(() => {
+    let active = true;
+    const validateDraft = async () => {
+      if (!actionDraft) {
+        setActionWarnings([]);
+        return;
+      }
+      const result = await validateActionDraft(actionDraft, {
+        defaultGymId: activeGymId,
+      });
+      if (!active) return;
+      setActionWarnings(result.warnings ?? []);
+    };
+    void validateDraft();
+    return () => {
+      active = false;
+    };
+  }, [actionDraft, activeGymId]);
 
   const sendCoachMessage = useCallback(
     async (messageText, options = {}) => {
@@ -482,6 +608,8 @@ export default function CoachView({
         const assistantMeta = {
           actionDraft: result.actionDraft ?? null,
           actionContractVersion: result.actionContractVersion ?? null,
+          contextContract: result.contextContract ?? null,
+          payloadFingerprint: result.payloadFingerprint ?? null,
         };
 
         if (!streamedId) {
@@ -490,6 +618,16 @@ export default function CoachView({
             ...prev,
             createMessage(assistantId, "assistant", result.assistant, assistantMeta),
           ]);
+          actionDispatch({
+            type: "SET_FROM_MESSAGE",
+            payload: {
+              messageId: assistantId,
+              actionDraft: result.actionDraft ?? null,
+              contractVersion: result.actionContractVersion ?? null,
+              contextContract: result.contextContract ?? null,
+              payloadFingerprint: result.payloadFingerprint ?? null,
+            },
+          });
         } else {
           setMessages((prev) =>
             prev.map((msg) =>
@@ -498,6 +636,16 @@ export default function CoachView({
                 : msg
             )
           );
+          actionDispatch({
+            type: "SET_FROM_MESSAGE",
+            payload: {
+              messageId: streamedId,
+              actionDraft: result.actionDraft ?? null,
+              contractVersion: result.actionContractVersion ?? null,
+              contextContract: result.contextContract ?? null,
+              payloadFingerprint: result.payloadFingerprint ?? null,
+            },
+          });
         }
         if (pendingLaunchContext) {
           setPendingLaunchContext(null);
@@ -580,16 +728,23 @@ export default function CoachView({
   const handleMakeTemplate = useCallback(
     async (message) => {
       if (!message || message.role !== "assistant") return;
-      if (pendingTemplateRequest || templateCreating) return;
+      if (message.id !== latestAssistantId) return;
       const draft = resolveDraftForMessage(message);
       if (draft) {
         setTemplateConfirmDraft(draft);
         setTemplateConfirmOpen(true);
         return;
       }
+      if (pendingTemplateRequest || templateCreating) return;
       await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, { autoTemplateRequest: true });
     },
-    [pendingTemplateRequest, resolveDraftForMessage, sendCoachMessage, templateCreating]
+    [
+      latestAssistantId,
+      pendingTemplateRequest,
+      resolveDraftForMessage,
+      sendCoachMessage,
+      templateCreating,
+    ]
   );
 
   const handleConfirmTemplate = useCallback(async () => {
@@ -617,6 +772,123 @@ export default function CoachView({
     setTemplateConfirmOpen(false);
     setTemplateConfirmDraft(null);
   }, [templateCreating]);
+
+  const handleDiscardActionDraft = useCallback(() => {
+    actionDispatch({ type: "DISCARD" });
+    setActionEditMode(false);
+    setActionErrors([]);
+  }, [actionDispatch]);
+
+  const handleCancelActionEdit = useCallback(() => {
+    setActionEditMode(false);
+    setActionEditDraft({
+      title: actionDraftTitle,
+      gymId: actionDraftGymId ?? "",
+    });
+  }, [actionDraftGymId, actionDraftTitle]);
+
+  const handleSaveActionEdit = useCallback(() => {
+    if (!actionDraft) return;
+    const nextTitle = String(actionEditDraft.title ?? "").trim();
+    const nextGymId = actionDraftHasGyms
+      ? Number.parseInt(String(actionEditDraft.gymId ?? ""), 10)
+      : null;
+    const payload = { ...(actionDraft.payload ?? {}) };
+    if (nextTitle) {
+      payload.name = nextTitle;
+      payload.title = nextTitle;
+    }
+    if (actionDraftHasGyms) {
+      payload.gymId =
+        Number.isFinite(nextGymId) && nextGymId > 0 ? nextGymId : null;
+    }
+    const updated = {
+      ...actionDraft,
+      title: nextTitle || actionDraft.title,
+      payload,
+    };
+    actionDispatch({ type: "UPDATE_DRAFT", payload: { draft: updated } });
+    setActionEditMode(false);
+  }, [actionDispatch, actionDraft, actionDraftHasGyms, actionEditDraft]);
+
+  const handleApplyActionDraft = useCallback(
+    async (options = {}) => {
+      if (!actionDraft || actionApplying) return;
+      const { skipConfirm = false } = options;
+      setActionApplying(true);
+      setActionErrors([]);
+      try {
+        const validation = await validateActionDraft(actionDraft, {
+          defaultGymId: activeGymId,
+        });
+        setActionWarnings(validation.warnings ?? []);
+        if (!validation.valid || !validation.normalizedDraft) {
+          setActionErrors(
+            validation.errors?.length ? validation.errors : ["Unable to apply draft."]
+          );
+          return;
+        }
+        if (validation.normalizedDraft.risk === "high" && !skipConfirm) {
+          setPendingHighRiskDraft(validation.normalizedDraft);
+          setActionConfirmOpen(true);
+          return;
+        }
+
+        const result = await executeActionDraft(validation.normalizedDraft);
+        const label =
+          result.kind === ActionDraftKinds.create_workout
+            ? "Created workout."
+            : result.kind === ActionDraftKinds.create_template
+              ? "Created template."
+              : "Created gym.";
+        const openAction =
+          result.kind === ActionDraftKinds.create_workout
+            ? () => onOpenWorkout?.(result.id)
+            : result.kind === ActionDraftKinds.create_template
+              ? () => onOpenTemplate?.(result.id)
+              : () => onNavigateToGyms?.({ spaceId: result.id });
+        const canOpen =
+          (result.kind === ActionDraftKinds.create_workout && onOpenWorkout) ||
+          (result.kind === ActionDraftKinds.create_template && onOpenTemplate) ||
+          (result.kind === ActionDraftKinds.create_gym && onNavigateToGyms);
+
+        onNotify?.(label, {
+          tone: "success",
+          ...(canOpen ? { actionLabel: "Open", onAction: openAction } : {}),
+        });
+        actionDispatch({ type: "DISCARD" });
+      } catch (err) {
+        setActionErrors([err?.message ?? "Unable to apply draft."]);
+      } finally {
+        setActionApplying(false);
+      }
+    },
+    [
+      actionApplying,
+      actionDispatch,
+      actionDraft,
+      activeGymId,
+      onNavigateToGyms,
+      onNotify,
+      onOpenTemplate,
+      onOpenWorkout,
+    ]
+  );
+
+  const handleConfirmActionDraft = useCallback(() => {
+    if (!pendingHighRiskDraft) {
+      setActionConfirmOpen(false);
+      return;
+    }
+    setPendingHighRiskDraft(null);
+    setActionConfirmOpen(false);
+    void handleApplyActionDraft({ skipConfirm: true });
+  }, [handleApplyActionDraft, pendingHighRiskDraft]);
+
+  const handleCancelActionConfirm = useCallback(() => {
+    setPendingHighRiskDraft(null);
+    setActionConfirmOpen(false);
+  }, []);
 
   const confirmProposal = async (proposal) => {
     dispatch({
@@ -687,7 +959,7 @@ export default function CoachView({
       return;
     }
     const previousId = activeGymId;
-    setActiveGymId(nextId);
+    void setActiveWorkoutSpace(nextId);
     setGymPickerOpen(false);
     if (!onNotify) return;
     const nextGym = sortedSpaces.find((space) => space.id === nextId);
@@ -696,24 +968,26 @@ export default function CoachView({
       tone: "info",
       duration: 5000,
       actionLabel: "Undo",
-      onAction: () => setActiveGymId(previousId ?? null),
+      onAction: () => setActiveWorkoutSpace(previousId ?? null),
     });
   };
 
   const coachDiagnosticsReport = useMemo(
     () => ({
       generatedAt: new Date().toISOString(),
-      coachContext: {
-        activeGymId: debugContract?.activeGymId ?? null,
-        gymName: debugContract?.activeGymName ?? null,
-        equipmentCount: debugContract?.equipmentCount ?? null,
-        recentWorkoutsCount: debugContract?.recentWorkoutsCount ?? null,
-        lastWorkoutDate: debugContract?.lastWorkoutDate ?? null,
-        templatesCount: debugContract?.templatesCount ?? null,
-        customExercisesCount: debugContract?.customExercisesCount ?? null,
-        exerciseLibraryCount: debugContract?.exerciseLibraryCount ?? null,
-        contextBytes: debugContract?.contextBytes ?? null,
-        contextBuildMs: debugContract?.buildMs ?? null,
+      coachRequestContext: {
+        activeGymId: debugRequestContext?.activeGymId ?? null,
+        gymName: debugRequestContext?.gymName ?? null,
+        equipmentCount: debugRequestContext?.equipmentCount ?? null,
+        equipmentIds: equipmentIdSummary.items,
+        equipmentIdsOmitted: equipmentIdSummary.omitted,
+        recentWorkoutsCount: debugRequestContext?.recentWorkoutsCount ?? null,
+        lastWorkoutDate: debugRequestContext?.lastWorkoutDate ?? null,
+        templatesCount: debugRequestContext?.templatesCount ?? null,
+        customExercisesCount: debugRequestContext?.customExercisesCount ?? null,
+        exerciseLibraryCount: debugRequestContext?.exerciseLibraryCount ?? null,
+        contextBytes: debugRequestContext?.contextBytes ?? null,
+        contextBuildMs: debugRequestContext?.contextBuildMs ?? null,
       },
       actionContractVersion: actionContractVersion ?? null,
       payloadFingerprint: debugPayloadFingerprint
@@ -724,7 +998,7 @@ export default function CoachView({
           }
         : null,
     }),
-    [actionContractVersion, debugContract, debugPayloadFingerprint]
+    [actionContractVersion, debugPayloadFingerprint, debugRequestContext, equipmentIdSummary]
   );
 
   const handleCopyCoachDiagnostics = useCallback(async () => {
@@ -777,7 +1051,7 @@ export default function CoachView({
         <div className="coach-gym-bar__inner">
           <div className="coach-gym-pill">
             <span className="coach-gym-pill__label">Context</span>
-            <span className="coach-gym-pill__name">{contextPillLabel}</span>
+            <span className="coach-gym-pill__text">{contextPillLabel}</span>
           </div>
           <div className="coach-gym-bar__actions">
             <Button
@@ -786,7 +1060,7 @@ export default function CoachView({
               onClick={() => setGymPickerOpen(true)}
               disabled={!hasGyms}
             >
-              {gymActionLabel}
+              {activeGymId != null ? "Change gym" : "Select gym"}
             </Button>
             {!hasGyms ? (
               <Button
@@ -962,12 +1236,23 @@ export default function CoachView({
               const templateDraft = isLatestAssistant
                 ? latestTemplateDraftInfo?.draft ?? null
                 : null;
+              const waitingOnTemplate =
+                isLatestAssistant && pendingTemplateRequest && !templateDraft;
               const makeTemplateDisabled =
-                !isLatestAssistant || pendingTemplateRequest || templateCreating || sending;
+                !isLatestAssistant || waitingOnTemplate || templateCreating || sending;
               const changeGymDisabled = !isLatestAssistant || !hasGyms;
               const showRequesting =
                 isLatestAssistant && pendingTemplateRequest && !templateDraft;
               const showStaleHint = isAssistant && !isLatestAssistant;
+              const trustContext = message?.meta?.contextContract ?? null;
+              const trustFingerprint = message?.meta?.payloadFingerprint ?? null;
+              const showTrustLine =
+                Boolean(message?.meta?.actionDraft) && hasCoachContextCounts(trustContext);
+              const trustGymLabel = trustContext?.activeGymName ?? "None";
+              const trustWorkoutsLabel = formatCount(trustContext?.recentWorkoutsCount);
+              const trustLastDate = formatDateLabel(trustContext?.lastWorkoutDate);
+              const trustLibraryLabel = formatCount(trustContext?.exerciseLibraryCount);
+              const trustFingerprintLabel = trustFingerprint?.hash ?? "—";
 
               return (
                 <div key={message.id} className="chat-message" data-role={message.role}>
@@ -978,6 +1263,19 @@ export default function CoachView({
                         className="chat-actions"
                         data-stale={showStaleHint ? "true" : "false"}
                       >
+                        {showTrustLine ? (
+                          <div className="coach-trust-line">
+                            <span className="coach-trust-line__label">
+                              Using your data
+                            </span>
+                            <span>Gym: {trustGymLabel}</span>
+                            <span>Library: {trustLibraryLabel}</span>
+                            <span>
+                              Workouts: {trustWorkoutsLabel} (last {trustLastDate})
+                            </span>
+                            <span>Fingerprint: {trustFingerprintLabel}</span>
+                          </div>
+                        ) : null}
                         <div className="ui-row ui-row--wrap">
                           <Button
                             variant="secondary"
@@ -1052,38 +1350,267 @@ export default function CoachView({
         </CardFooter>
       </Card>
 
+      {actionDraft ? (
+        <Card className="coach-action-tray">
+          <CardHeader>
+            <div className="ui-row ui-row--between ui-row--wrap">
+              <div>
+                <div className="ui-section-title">Suggested Action</div>
+                <div className="template-meta">
+                  {actionDraftSummary || "Coach has a ready action draft."}
+                </div>
+              </div>
+              <div className="coach-action-badges">
+                <span className="pill pill--muted">
+                  Confidence {formatConfidence(actionDraft.confidence)}
+                </span>
+                <span
+                  className={`pill ${
+                    actionDraft.risk === "high"
+                      ? "pill--danger"
+                      : actionDraft.risk === "medium"
+                        ? "pill--muted"
+                        : ""
+                  }`}
+                >
+                  Risk {actionDraft.risk ?? "low"}
+                </span>
+              </div>
+            </div>
+          </CardHeader>
+          <CardBody className="coach-action-body ui-stack">
+            <div className="coach-action-title">
+              {actionDraftTitle || "Untitled action"}
+            </div>
+            {actionDraftSummary ? (
+              <div className="template-meta">{actionDraftSummary}</div>
+            ) : null}
+
+            {actionEditMode ? (
+              <div className="coach-action-edit ui-stack">
+                <div>
+                  <Label htmlFor="action-draft-title">Title</Label>
+                  <Input
+                    id="action-draft-title"
+                    value={actionEditDraft.title}
+                    onChange={(event) =>
+                      setActionEditDraft((prev) => ({
+                        ...prev,
+                        title: event.target.value,
+                      }))
+                    }
+                    placeholder="Draft title"
+                  />
+                </div>
+                {actionDraftHasGyms ? (
+                  hasGyms ? (
+                    <div>
+                      <Label htmlFor="action-draft-gym">Gym</Label>
+                      <Select
+                        id="action-draft-gym"
+                        value={String(actionEditDraft.gymId ?? "")}
+                        onChange={(event) =>
+                          setActionEditDraft((prev) => ({
+                            ...prev,
+                            gymId: event.target.value,
+                          }))
+                        }
+                      >
+                        <option value="">No gym</option>
+                        {sortedSpaces.map((space) => (
+                          <option key={space.id} value={space.id}>
+                            {space.name ?? "Untitled Gym"}
+                          </option>
+                        ))}
+                      </Select>
+                    </div>
+                  ) : (
+                    <div className="template-meta">No gyms available yet.</div>
+                  )
+                ) : null}
+              </div>
+            ) : (
+              <div className="coach-action-summary">
+                {actionDraftHasGyms ? (
+                  <div className="template-meta">
+                    Gym: {actionDraftGym ? actionDraftGym.name ?? "Untitled Gym" : "None"}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            <details className="coach-action-details">
+              <summary>Draft details</summary>
+              <div className="coach-action-details__body">
+                {actionDraftKind === ActionDraftKinds.create_workout ||
+                actionDraftKind === ActionDraftKinds.create_template ? (
+                  <div className="coach-action-exercises">
+                    {actionDraftExercises.length ? (
+                      actionDraftExercises.map((entry, index) => {
+                        const exercise = exerciseMap.get(entry.exerciseId);
+                        const name =
+                          exercise?.name ?? `Exercise ${entry.exerciseId ?? index + 1}`;
+                        const setCount = Array.isArray(entry.sets)
+                          ? entry.sets.length
+                          : null;
+                        const repsValue = Array.isArray(entry.sets)
+                          ? entry.sets
+                              .map((set) => Number(set?.reps))
+                              .find((value) => Number.isFinite(value))
+                          : null;
+                        const detailParts = [];
+                        if (setCount) detailParts.push(`${setCount} sets`);
+                        if (repsValue != null) detailParts.push(`${repsValue} reps`);
+                        const meta =
+                          detailParts.length > 0
+                            ? detailParts.join(" · ")
+                            : "Sets from draft";
+                        return (
+                          <div key={`${entry.exerciseId}-${index}`} className="coach-action-exercise">
+                            <div className="coach-action-exercise__name">{name}</div>
+                            <div className="coach-action-exercise__meta">{meta}</div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="template-meta">Exercises: (from draft)</div>
+                    )}
+                  </div>
+                ) : null}
+
+                {actionDraftKind === ActionDraftKinds.create_gym ? (
+                  <div className="template-meta">
+                    Equipment IDs:{" "}
+                    {Array.isArray(actionPayload?.equipmentIds) &&
+                    actionPayload.equipmentIds.length
+                      ? actionPayload.equipmentIds.join(", ")
+                      : "None specified"}
+                  </div>
+                ) : null}
+
+                {actionPayload?.plannedDurationMins ? (
+                  <div className="template-meta">
+                    Planned duration: {actionPayload.plannedDurationMins} mins
+                  </div>
+                ) : null}
+                {actionPayload?.frequencyHint ? (
+                  <div className="template-meta">
+                    Frequency: {actionPayload.frequencyHint}
+                  </div>
+                ) : null}
+              </div>
+            </details>
+
+            {actionWarnings.length ? (
+              <div className="coach-action-alert coach-action-alert--warning">
+                {actionWarnings.map((warning, index) => (
+                  <div key={`warning-${index}`}>{warning}</div>
+                ))}
+              </div>
+            ) : null}
+            {actionErrors.length ? (
+              <div className="coach-action-alert coach-action-alert--error">
+                {actionErrors.map((err, index) => (
+                  <div key={`error-${index}`}>{err}</div>
+                ))}
+              </div>
+            ) : null}
+          </CardBody>
+          <CardFooter className="coach-action-footer ui-row ui-row--wrap">
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => handleApplyActionDraft()}
+              loading={actionApplying}
+              disabled={actionApplying || actionEditMode}
+            >
+              Apply
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                if (actionEditMode) {
+                  handleSaveActionEdit();
+                  return;
+                }
+                setActionEditMode(true);
+              }}
+              disabled={actionApplying || (actionEditMode && !canSaveActionEdit)}
+            >
+              {actionEditMode ? "Save" : "Edit"}
+            </Button>
+            {actionEditMode ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleCancelActionEdit}
+                disabled={actionApplying}
+              >
+                Cancel
+              </Button>
+            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleDiscardActionDraft}
+              disabled={actionApplying}
+            >
+              Discard
+            </Button>
+          </CardFooter>
+        </Card>
+      ) : null}
+
       {state.proposals.length ? (
         <Card>
           <CardHeader>
             <div className="ui-section-title">Pending actions</div>
           </CardHeader>
           <CardBody className="ui-stack">
-            {state.proposals.map((proposal) => (
-              <div key={proposal.id} className="proposal-card">
-                <div className="proposal-card__summary">{proposal.summary}</div>
-                <div className="proposal-card__meta">
-                  Status: {proposal.status ?? "pending"}
-                </div>
-                {proposal.status === "pending" ? (
-                  <div className="ui-row ui-row--wrap">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() => cancelProposal(proposal)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() => confirmProposal(proposal)}
-                    >
-                      Confirm
-                    </Button>
+            {state.proposals.map((proposal) => {
+              const preview = templateMappingPreview[proposal.id];
+              const previewLines =
+                coachDiagnosticsEnabled && proposal.name === "create_template"
+                  ? formatTemplateMappingPreview(preview?.mapping)
+                  : [];
+              return (
+                <div key={proposal.id} className="proposal-card">
+                  <div className="proposal-card__summary">{proposal.summary}</div>
+                  <div className="proposal-card__meta">
+                    Status: {proposal.status ?? "pending"}
                   </div>
-                ) : null}
-              </div>
-            ))}
+                  {previewLines.length ? (
+                    <div className="proposal-card__debug">
+                      <div className="template-meta">Mapping preview</div>
+                      {previewLines.map((line) => (
+                        <div key={line} className="template-meta">
+                          {line}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {proposal.status === "pending" ? (
+                    <div className="ui-row ui-row--wrap">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => cancelProposal(proposal)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        onClick={() => confirmProposal(proposal)}
+                      >
+                        Confirm
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </CardBody>
         </Card>
       ) : null}
@@ -1110,93 +1637,157 @@ export default function CoachView({
 
       {coachDiagnosticsEnabled ? (
         <Card className="dev-panel">
-          <CardHeader>
-            <div className="ui-section-title">Coach payload debug</div>
-          </CardHeader>
-          <CardBody className="ui-stack">
-            <details className="coach-tools">
-              <summary>Last payload</summary>
-              <div className="coach-trust__details">
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Active gym ID</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadGymId)}
+          <CardBody>
+            <details className="coach-debug-panel">
+              <summary className="coach-debug-panel__summary">Coach context debug</summary>
+              <div className="coach-debug-panel__body ui-stack">
+                <div className="coach-trust__details">
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Active gym ID</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.activeGymId)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Gym name</div>
+                    <div className="coach-trust__item-value">
+                      {debugRequestContext?.gymName ?? "—"}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment count</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.equipmentCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment IDs</div>
+                    <div className="coach-trust__item-value">{equipmentIdLabel}</div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Recent workouts</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.recentWorkoutsCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Last workout</div>
+                    <div className="coach-trust__item-value">
+                      {formatDateLabel(debugRequestContext?.lastWorkoutDate)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Templates</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.templatesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Custom exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.customExercisesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Library exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.exerciseLibraryCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context bytes</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.contextBytes)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context build ms</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(debugRequestContext?.contextBuildMs)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Payload fingerprint</div>
+                    <div className="coach-trust__item-value">{payloadFingerprintLabel}</div>
                   </div>
                 </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Gym name</div>
-                  <div className="coach-trust__item-value">{payloadGymName ?? "—"}</div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Equipment count</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadEquipmentCount)}
+                <div className="ui-strong">Payload summary</div>
+                <div className="coach-trust__details">
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Active gym ID</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadGymId)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Gym name</div>
+                    <div className="coach-trust__item-value">{payloadGymName ?? "—"}</div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment count</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadEquipmentCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment IDs</div>
+                    <div className="coach-trust__item-value">
+                      {payloadEquipmentIdsLabel}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Library exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadExerciseLibraryCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Custom exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadCustomExercisesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Templates</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadTemplatesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Recent workouts</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadRecentWorkoutsCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context bytes</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadContextBytes)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context build ms</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadBuildMs)}
+                    </div>
                   </div>
                 </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Equipment IDs</div>
-                  <div className="coach-trust__item-value">
-                    {payloadEquipmentIdsLabel}
-                  </div>
+                <div className="ui-row ui-row--wrap">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleCopyCoachDiagnostics}
+                  >
+                    Copy diagnostics report
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleExportCoachDiagnostics}
+                  >
+                    Export diagnostics report
+                  </Button>
                 </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Library exercises</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadExerciseLibraryCount)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Custom exercises</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadCustomExercisesCount)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Templates</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadTemplatesCount)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Recent workouts</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadRecentWorkoutsCount)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Context bytes</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadContextBytes)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Context build ms</div>
-                  <div className="coach-trust__item-value">
-                    {formatCount(payloadBuildMs)}
-                  </div>
-                </div>
-                <div className="coach-trust__item">
-                  <div className="coach-trust__item-label">Payload fingerprint</div>
-                  <div className="coach-trust__item-value">
-                    {payloadFingerprintLabel}
-                  </div>
-                </div>
-              </div>
-              <div className="ui-row ui-row--wrap">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleCopyCoachDiagnostics}
-                >
-                  Copy diagnostics report
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleExportCoachDiagnostics}
-                >
-                  Export diagnostics report
-                </Button>
               </div>
             </details>
           </CardBody>
@@ -1305,6 +1896,37 @@ export default function CoachView({
         </div>
       ) : null}
 
+      {actionConfirmOpen ? (
+        <div className="coach-modal" role="dialog" aria-modal="true">
+          <div
+            className="coach-modal__backdrop"
+            onClick={handleCancelActionConfirm}
+          />
+          <div className="coach-modal__content" role="document">
+            <div className="ui-section-title">High-risk action</div>
+            <div className="template-meta">
+              This will overwrite existing data. Continue?
+            </div>
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleCancelActionConfirm}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={handleConfirmActionDraft}
+              >
+                Continue
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <BottomSheet
         open={gymPickerOpen}
         onClose={() => setGymPickerOpen(false)}
@@ -1364,6 +1986,15 @@ export default function CoachView({
             ) : null}
           </div>
         )}
+        <div className="coach-gym-footer">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onNavigateToGyms?.({ create: true })}
+          >
+            Create gym
+          </Button>
+        </div>
       </BottomSheet>
     </div>
   );
