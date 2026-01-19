@@ -200,6 +200,28 @@ export async function runCoachTurn({
     debug.contextMeta = meta;
     debug.contextContract = contextContract;
   }
+  const templatesAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.templates);
+  const sessionsAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.sessions);
+  const summaryOnly = !contextSnapshot;
+  const payloadSummary = {
+    activeGymId: contextContract?.activeGymId ?? requestContext.activeGymId ?? null,
+    activeGymName: contextContract?.activeGymName ?? requestContext.gymName ?? null,
+    equipmentCount: contextContract?.equipmentCount ?? requestContext.equipmentCount ?? 0,
+    equipmentIds: requestContext.equipmentIds ?? [],
+    exerciseLibraryCount:
+      contextContract?.exerciseLibraryCount ?? requestContext.exerciseLibraryCount ?? 0,
+    customExercisesCount:
+      contextContract?.customExercisesCount ?? requestContext.customExercisesCount ?? 0,
+    templatesCount: templatesAvailable
+      ? contextContract?.templatesCount ?? requestContext.templatesCount ?? null
+      : null,
+    recentWorkoutsCount: sessionsAvailable
+      ? contextContract?.recentWorkoutsCount ?? requestContext.recentWorkoutsCount ?? null
+      : null,
+    contextBytes: contextContract?.contextBytes ?? requestMeta.contextBytes ?? null,
+    buildMs: contextContract?.buildMs ?? requestMeta.contextBuildMs ?? null,
+    summaryOnly,
+  };
 
   let loop = 0;
   let history = [...chatHistory, { role: "user", content: userMessage }];
@@ -420,6 +442,7 @@ export async function runCoachTurn({
     contextContract,
     payloadFingerprint,
     payloadBuiltAt,
+    payloadSummary,
     actionDraft,
     actionContractVersion,
     actionParseErrors,

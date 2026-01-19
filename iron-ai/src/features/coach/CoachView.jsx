@@ -95,12 +95,22 @@ function formatDateLabel(value) {
   return date.toLocaleDateString();
 }
 
+function formatIdList(values, limit = 8) {
+  if (!Array.isArray(values) || values.length === 0) return "—";
+  const safe = values.map((value) => String(value)).filter((value) => value.length > 0);
+  if (!safe.length) return "—";
+  const truncated = safe.slice(0, limit);
+  const suffix = safe.length > limit ? ` ...+${safe.length - limit}` : "";
+  return `${truncated.join(", ")}${suffix}`;
+}
+
 function formatTemplateMappingPreview(mapping, limit = 5) {
   const list = Array.isArray(mapping) ? mapping : [];
   const trimmed = list.slice(0, limit);
   const remainder = Math.max(0, list.length - trimmed.length);
   const lines = trimmed.map((entry) => {
-    const draftLabel = entry.draftName || (entry.draftId != null ? `ID ${entry.draftId}` : "Unknown");
+    const draftLabel =
+      entry.draftName || (entry.draftId != null ? `ID ${entry.draftId}` : "Unknown");
     if (!entry.resolvedId) {
       return `${draftLabel} → create custom`;
     }
@@ -317,6 +327,7 @@ export default function CoachView({
   const [contextLoading, setContextLoading] = useState(false);
   const [contextContract, setContextContract] = useState(null);
   const [payloadFingerprint, setPayloadFingerprint] = useState(null);
+  const [payloadSummary, setPayloadSummary] = useState(null);
   const [debugContextContract, setDebugContextContract] = useState(null);
   const [debugContextFingerprint, setDebugContextFingerprint] = useState(null);
   const [templateMappingPreview, setTemplateMappingPreview] = useState({});
@@ -515,6 +526,26 @@ export default function CoachView({
           : ""
       }`
     : "—";
+  const payloadGymId = payloadSummary?.activeGymId ?? debugContract?.activeGymId ?? null;
+  const payloadGymName =
+    payloadSummary?.activeGymName ?? debugContract?.activeGymName ?? null;
+  const payloadEquipmentCount =
+    payloadSummary?.equipmentCount ?? debugContract?.equipmentCount ?? null;
+  const payloadEquipmentIds = payloadSummary?.equipmentIds ?? [];
+  const payloadEquipmentIdsLabel = formatIdList(payloadEquipmentIds);
+  const payloadExerciseLibraryCount =
+    payloadSummary?.exerciseLibraryCount ?? debugContract?.exerciseLibraryCount ?? null;
+  const payloadCustomExercisesCount =
+    payloadSummary?.customExercisesCount ?? debugContract?.customExercisesCount ?? null;
+  const payloadTemplatesCount = payloadSummary?.summaryOnly
+    ? null
+    : payloadSummary?.templatesCount ?? debugContract?.templatesCount ?? null;
+  const payloadRecentWorkoutsCount = payloadSummary?.summaryOnly
+    ? null
+    : payloadSummary?.recentWorkoutsCount ?? debugContract?.recentWorkoutsCount ?? null;
+  const payloadContextBytes =
+    payloadSummary?.contextBytes ?? debugContract?.contextBytes ?? null;
+  const payloadBuildMs = payloadSummary?.buildMs ?? debugContract?.buildMs ?? null;
   const latestAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (messages[i].role === "assistant") return messages[i].id;
@@ -684,6 +715,7 @@ export default function CoachView({
         dispatch({ type: "SET_DEBUG", payload: result.debug });
         setContextContract(result.contextContract ?? null);
         setPayloadFingerprint(result.payloadFingerprint ?? null);
+        setPayloadSummary(result.payloadSummary ?? null);
 
         if (result.payloadFingerprint || result.contextContract) {
           setMessages((prev) =>
@@ -1127,6 +1159,7 @@ export default function CoachView({
       <div className="coach-gym-bar">
         <div className="coach-gym-bar__inner">
           <div className="coach-gym-pill">
+            <span className="coach-gym-pill__label">Context</span>
             <span className="coach-gym-pill__text">{contextPillLabel}</span>
           </div>
           <div className="coach-gym-bar__actions">
@@ -1782,6 +1815,67 @@ export default function CoachView({
                     <div className="coach-trust__item-value">{payloadFingerprintLabel}</div>
                   </div>
                 </div>
+                <div className="ui-strong">Payload summary</div>
+                <div className="coach-trust__details">
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Active gym ID</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadGymId)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Gym name</div>
+                    <div className="coach-trust__item-value">{payloadGymName ?? "—"}</div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment count</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadEquipmentCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Equipment IDs</div>
+                    <div className="coach-trust__item-value">
+                      {payloadEquipmentIdsLabel}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Library exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadExerciseLibraryCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Custom exercises</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadCustomExercisesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Templates</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadTemplatesCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Recent workouts</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadRecentWorkoutsCount)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context bytes</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadContextBytes)}
+                    </div>
+                  </div>
+                  <div className="coach-trust__item">
+                    <div className="coach-trust__item-label">Context build ms</div>
+                    <div className="coach-trust__item-value">
+                      {formatCount(payloadBuildMs)}
+                    </div>
+                  </div>
+                </div>
                 <div className="ui-row ui-row--wrap">
                   <Button
                     variant="secondary"
@@ -1938,27 +2032,57 @@ export default function CoachView({
         ariaLabel="Select a gym"
       >
         {sortedSpaces.length ? (
-          <div className="coach-gym-list">
-            {sortedSpaces.map((space) => {
-              const selected = space.id === activeGymId;
-              return (
-                <button
-                  key={space.id}
-                  type="button"
-                  className={`coach-gym-option${selected ? " is-selected" : ""}`}
-                  onClick={() => handleSelectGym(space.id)}
+          <>
+            <div className="coach-gym-list">
+              {sortedSpaces.map((space) => {
+                const selected = space.id === activeGymId;
+                return (
+                  <button
+                    key={space.id}
+                    type="button"
+                    className={`coach-gym-option${selected ? " is-selected" : ""}`}
+                    onClick={() => handleSelectGym(space.id)}
+                  >
+                    <div>
+                      <div className="ui-strong">{space.name ?? "Untitled Gym"}</div>
+                      <div className="template-meta">{formatEquipmentCount(space)}</div>
+                    </div>
+                    {selected ? <span className="pill">Selected</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+            {onNavigateToGyms ? (
+              <div className="ui-row ui-row--wrap">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    setGymPickerOpen(false);
+                    onNavigateToGyms({ create: true });
+                  }}
                 >
-                  <div>
-                    <div className="ui-strong">{space.name ?? "Untitled Gym"}</div>
-                    <div className="template-meta">{formatEquipmentCount(space)}</div>
-                  </div>
-                  {selected ? <span className="pill">Selected</span> : null}
-                </button>
-              );
-            })}
-          </div>
+                  Create gym
+                </Button>
+              </div>
+            ) : null}
+          </>
         ) : (
-          <div className="template-meta">No gyms saved yet.</div>
+          <div className="ui-stack">
+            <div className="template-meta">No gyms saved yet.</div>
+            {onNavigateToGyms ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  setGymPickerOpen(false);
+                  onNavigateToGyms({ create: true });
+                }}
+              >
+                Create gym
+              </Button>
+            ) : null}
+          </div>
         )}
         <div className="coach-gym-footer">
           <Button
