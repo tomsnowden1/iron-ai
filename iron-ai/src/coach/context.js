@@ -38,6 +38,23 @@ function countEquipment(equipmentIds) {
   return equipmentIds.filter((id) => id && id !== "bodyweight").length;
 }
 
+function buildEquipmentPayload(availableEquipment) {
+  if (!Array.isArray(availableEquipment) || availableEquipment.length === 0) return [];
+  return availableEquipment
+    .map((item) => {
+      if (!item) return null;
+      const payload = {
+        id: item.id ?? null,
+        name: item.name ?? "Unknown",
+      };
+      if (Array.isArray(item.aliases) && item.aliases.length) {
+        payload.aliases = item.aliases;
+      }
+      return payload;
+    })
+    .filter(Boolean);
+}
+
 function safeJsonSize(value) {
   try {
     return JSON.stringify(value).length;
@@ -225,6 +242,7 @@ function truncateSnapshot(snapshot, maxBytes) {
     activeSpace: current.activeSpace
       ? { ...current.activeSpace, equipmentIds: [] }
       : current.activeSpace,
+    equipment: null,
     availableEquipment: [],
     missingEquipment: [],
   }));
@@ -434,6 +452,12 @@ export async function getCoachContextSnapshot(options = {}) {
     templates: includeTemplates ? templates : [],
     exerciseLibrary: exerciseLibrary,
     settings,
+    activeGymId: includeSpaces ? activeSpace?.id ?? null : null,
+    activeGymName: includeSpaces ? activeSpace?.name ?? null : null,
+    equipmentCount:
+      includeSpaces && activeSpace ? countEquipment(activeSpace.equipmentIds) : null,
+    equipment:
+      includeSpaces && activeSpace ? buildEquipmentPayload(availableEquipment) : null,
     activeSpace: includeSpaces
       ? activeSpace
         ? {

@@ -5,6 +5,13 @@ function parseDate(value) {
   return date;
 }
 
+export function normalizeGymName(name) {
+  return String(name ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 export function isSpaceExpired(space, now = Date.now()) {
   if (!space?.isTemporary) return false;
   const date = parseDate(space.expiresAt);

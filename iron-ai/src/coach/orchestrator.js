@@ -23,6 +23,11 @@ const SYSTEM_PROMPT = [
   "Action drafts must include kind, confidence, risk, title, summary, and payload. For workouts/templates: payload includes name/title, optional gymId, and exercises: [{ exerciseId, sets?: [{ reps?, weight?, duration?, rpe? }], notes? }]. For gyms: payload includes name/title and optional equipmentIds.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
+  "If activeGymId and equipment are present in the context snapshot or request context, do not ask what equipment the user has.",
+  "Use only the equipment from context when generating workouts.",
+  "Do not suggest creating a new gym/space if activeGymId is present or if a gym with the same normalized name already exists.",
+  "Only suggest creating a gym if there is no activeGymId and no existing gyms match by normalized name.",
+  "If activeGymId is present but equipment is missing in the context snapshot or request context, say you cannot see equipment and ask the user to enable context sharing or share their equipment.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
   "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
@@ -449,10 +454,10 @@ export async function runCoachTurn({
   };
 }
 
-export async function executeWriteToolCall({ proposal, onResult }) {
+export async function executeWriteToolCall({ proposal, onResult, context }) {
   if (!proposal) return null;
   try {
-    const result = await executeTool(proposal.name, proposal.input);
+    const result = await executeTool(proposal.name, proposal.input, context);
     onResult?.({ status: "success", result });
     return { status: "success", result };
   } catch (err) {
