@@ -15,16 +15,14 @@ import { getCoachContextSnapshot } from "../../coach/context";
 import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { actionDraftReducer, initialActionDraftState } from "../../coach/actionDraftState";
-import {
-  ActionDraftKinds,
-  parseCoachActionDraftMessage,
-} from "../../coach/actionDraftContract";
+import { ActionDraftKinds } from "../../coach/actionDraftContract";
 import { executeActionDraft, validateActionDraft } from "../../coach/actionDraftExecution";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
 import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
-import { executeTool, getToolRegistry, validateToolInput } from "../../coach/tools";
+import { executeTool, getToolRegistry } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
+import { resolveTemplateDraftInfo } from "./templateDraft";
 import { setOpenAIKeyStatus, useSettings } from "../../state/settingsStore";
 import {
   db,
@@ -146,144 +144,9 @@ function hasCoachContextCounts(contract) {
   return counts.some((value) => Number(value) > 0);
 }
 
-function safeParseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function extractJsonBlocks(text) {
-  if (!text) return [];
-  const blocks = [];
-  const regex = /```(?:json)?\s*([\s\S]*?)```/gi;
-  let match = null;
-  while ((match = regex.exec(text)) !== null) {
-    blocks.push(match[1] ?? "");
-  }
-  return blocks;
-}
-
-function sanitizeJsonCandidate(text) {
-  if (!text) return "";
-  let cleaned = String(text).trim();
-  const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    cleaned = cleaned.slice(firstBrace, lastBrace + 1);
-  }
-  cleaned = cleaned.replace(/,\s*([}\]])/g, "$1");
-  return cleaned.trim();
-}
-
-function safeParseJsonObject(text) {
-  if (!text) return null;
-  const cleaned = sanitizeJsonCandidate(text);
-  if (!cleaned) return null;
-  const parsed = safeParseJson(cleaned);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  return parsed;
-}
-
-function normalizeExerciseDraft(entry) {
-  if (!entry || typeof entry !== "object") return null;
-  const exerciseId = Number(entry.exerciseId);
-  if (!Number.isFinite(exerciseId)) return null;
-  let sets = null;
-  let reps = null;
-  let warmupSets = null;
-
-  if (Array.isArray(entry.sets)) {
-    sets = entry.sets.length;
-    const repValues = entry.sets
-      .map((set) => Number(set?.reps))
-      .filter((value) => Number.isFinite(value));
-    if (repValues.length) reps = repValues[0];
-  } else {
-    const setsValue = Number(entry.sets);
-    const repsValue = Number(entry.reps);
-    const warmupValue = Number(entry.warmupSets);
-    if (Number.isFinite(setsValue)) sets = setsValue;
-    if (Number.isFinite(repsValue)) reps = repsValue;
-    if (Number.isFinite(warmupValue)) warmupSets = warmupValue;
-  }
-
-  return {
-    exerciseId,
-    ...(Number.isFinite(sets) ? { sets } : {}),
-    ...(Number.isFinite(reps) ? { reps } : {}),
-    ...(Number.isFinite(warmupSets) ? { warmupSets } : {}),
-  };
-}
-
-function normalizeTemplateDraft(raw, fallbackName) {
-  if (!raw || typeof raw !== "object") return null;
-  const name = String(raw.name ?? raw.title ?? fallbackName ?? "").trim();
-  const exercises = Array.isArray(raw.exercises) ? raw.exercises : [];
-  const normalizedExercises = exercises
-    .map((exercise) => normalizeExerciseDraft(exercise))
-    .filter(Boolean);
-  if (!normalizedExercises.length) return null;
-  const spaceId = Number(raw.spaceId ?? raw.gymId);
-  return {
-    name: name || "Coach Template",
-    exercises: normalizedExercises,
-    ...(Number.isFinite(spaceId) ? { spaceId } : {}),
-  };
-}
-
-function resolveTemplateDraftFromActionDraft(actionDraft) {
-  if (!actionDraft) return null;
-  if (
-    actionDraft.kind !== ActionDraftKinds.create_template &&
-    actionDraft.kind !== ActionDraftKinds.create_workout
-  ) {
-    return null;
-  }
-  const payload = actionDraft.payload ?? {};
-  const fallbackName = payload.name ?? payload.title ?? actionDraft.title ?? null;
-  const raw = { ...payload };
-  if (!raw.name && fallbackName) raw.name = fallbackName;
-  return normalizeTemplateDraft(raw, fallbackName);
-}
-
-function resolveTemplateDraftFromText(text) {
-  const blocks = extractJsonBlocks(text);
-  const candidates = [...blocks];
-  if (!blocks.length) {
-    const trimmed = String(text ?? "").trim();
-    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-      candidates.push(trimmed);
-    }
-  }
-  for (const candidate of candidates) {
-    const parsed = safeParseJsonObject(candidate);
-    if (!parsed) continue;
-    if (parsed?.actionDraft) {
-      const fromContract = resolveTemplateDraftFromActionDraft(parsed.actionDraft);
-      if (fromContract) return fromContract;
-    }
-    const draft = normalizeTemplateDraft(parsed, null);
-    if (draft) return draft;
-  }
-  return null;
-}
-
-function resolveTemplateDraft({ actionDraft, text, templateTool }) {
-  const parsedActionDraft =
-    actionDraft ?? parseCoachActionDraftMessage(text ?? "").actionDraft ?? null;
-  const draft =
-    resolveTemplateDraftFromActionDraft(parsedActionDraft) ?? resolveTemplateDraftFromText(text);
-  if (!draft) return null;
-  if (!templateTool) return draft;
-  const validation = validateToolInput(templateTool, draft);
-  return validation.valid ? draft : null;
-}
-
 const TEMPLATE_REQUEST_PROMPT =
   "Convert your last plan into the IronAI template JSON format. " +
-  "Reply only with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
+  "Reply with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
@@ -552,6 +415,10 @@ export default function CoachView({
     }
     return null;
   }, [messages]);
+  const latestAssistantMessage = useMemo(() => {
+    if (latestAssistantId == null) return null;
+    return messages.find((message) => message.id === latestAssistantId) ?? null;
+  }, [latestAssistantId, messages]);
   const actionDraft = actionState.draft;
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
@@ -825,14 +692,37 @@ export default function CoachView({
     }
   };
 
-  const resolveDraftForMessage = useCallback(
+  const resolveDraftInfoForMessage = useCallback(
     (message) =>
-      resolveTemplateDraft({
+      resolveTemplateDraftInfo({
         actionDraft: message?.meta?.actionDraft ?? null,
         text: message?.content ?? "",
         templateTool,
       }),
     [templateTool]
+  );
+
+  const resolveDraftForMessage = useCallback(
+    (message) =>
+      resolveDraftInfoForMessage(message).draft ?? null,
+    [resolveDraftInfoForMessage]
+  );
+
+  const latestTemplateDraftInfo = useMemo(() => {
+    if (!latestAssistantMessage) return null;
+    return resolveDraftInfoForMessage(latestAssistantMessage);
+  }, [latestAssistantMessage, resolveDraftInfoForMessage]);
+
+  const templateDraftDebug = useMemo(
+    () => ({
+      draftFound: latestTemplateDraftInfo?.found ?? false,
+      draftValid: latestTemplateDraftInfo?.valid ?? false,
+      validationError: latestTemplateDraftInfo?.error ?? null,
+      source: latestTemplateDraftInfo?.source ?? null,
+      messageId: latestAssistantMessage?.id ?? null,
+      messageCreatedAt: latestAssistantMessage?.createdAt ?? null,
+    }),
+    [latestAssistantMessage, latestTemplateDraftInfo]
   );
 
   const handleMakeTemplate = useCallback(
@@ -1344,7 +1234,7 @@ export default function CoachView({
               const isAssistant = message.role === "assistant";
               const isLatestAssistant = isAssistant && message.id === latestAssistantId;
               const templateDraft = isLatestAssistant
-                ? resolveDraftForMessage(message)
+                ? latestTemplateDraftInfo?.draft ?? null
                 : null;
               const waitingOnTemplate =
                 isLatestAssistant && pendingTemplateRequest && !templateDraft;
@@ -1406,7 +1296,7 @@ export default function CoachView({
                         </div>
                         {showRequesting ? (
                           <div className="chat-actions__status">
-                            Requesting template format…
+                            Requesting template JSON…
                           </div>
                         ) : showStaleHint ? (
                           <div className="chat-actions__status">
@@ -1946,6 +1836,12 @@ export default function CoachView({
                     debugPayloadFingerprint.contextBytes
                   )} bytes)`
                 : "—"}
+            </div>
+            <div className="coach-debug__block">
+              <div className="ui-muted">Template draft</div>
+              <pre className="coach-debug__payload">
+                {JSON.stringify(templateDraftDebug, null, 2)}
+              </pre>
             </div>
             <div className="coach-debug__block">
               <div className="ui-muted">Context contract</div>
