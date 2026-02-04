@@ -41,9 +41,7 @@ sync_main() {
   log "Syncing ${BASE_BRANCH} with origin/${BASE_BRANCH}..."
   git fetch origin
 
-  if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
-    git checkout "$BASE_BRANCH" >/dev/null 2>&1
-  fi
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1
 
   if ! git pull --rebase --autostash origin "$BASE_BRANCH"; then
     warn "Failed to rebase ${BASE_BRANCH} on origin/${BASE_BRANCH}."
