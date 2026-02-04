@@ -1,9 +1,13 @@
-import fs from "fs/promises";
-import path from "path";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 import { EQUIPMENT_CATALOG, EQUIPMENT_ID_SET } from "../src/equipment/catalog.js";
 import { inferExerciseEquipment } from "../src/equipment/inference.js";
-import { computeStableId, normalizeString, slugify } from "../src/seed/seedUtils.js";
+import {
+  computeStableId,
+  normalizeString,
+  slugify,
+} from "./lib/seed-node-utils.mjs";
 
 const SOURCE_URL =
   "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/dist/exercises.json";
@@ -259,7 +263,7 @@ const normalizeRecord = async (record, now) => {
   );
   const equipment = requiredEquipmentIds.length ? requiredEquipmentIds : ["bodyweight"];
 
-  const stableId = await computeStableId({
+  const stableId = computeStableId({
     source: "free-exercise-db",
     sourceId,
     externalId: sourceId,

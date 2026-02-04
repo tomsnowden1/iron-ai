@@ -5,20 +5,24 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "prebuild": "npm run validate:seed && npm run generate:seed-payload",
+    "prebuild": "npm run check:src-node-builtins && npm run generate:exercise-seed && npm run validate:seed && npm run generate:seed-payload",
     "build": "vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
     "check": "npm run lint && prettier --check .",
+    "check:src-node-builtins": "node scripts/check-node-builtins-in-src.mjs",
     "test": "vitest",
     "test:run": "vitest run",
     "prepare": "git config core.hooksPath .githooks || true",
     "preview": "vite preview",
+    "generate:exercise-seed": "node scripts/generate-exercise-seed.mjs",
     "validate:seed": "node scripts/validate-seed.mjs",
     "generate:seed-payload": "node scripts/generate-seed-payload.mjs",
     "seed:freeex": "node scripts/free-exercise-db.seed.mjs",
     "seed:freeex:images": "node scripts/free-exercise-db.seed.mjs --images",
-    "seed:validate": "node scripts/validate-seed.mjs --inapp"
+    "seed:validate": "node scripts/validate-seed.mjs --inapp",
+    "shipmain": "bash scripts/ship.sh",
+    "prmain": "bash scripts/prmain.sh"
   },
   "dependencies": {
     "dexie-react-hooks": "^4.2.0",

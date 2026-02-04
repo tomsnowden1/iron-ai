@@ -20,6 +20,10 @@ src/seed/reports/latestExerciseImportReport.json
 !.vscode/extensions.json
 .idea
 .DS_Store
+**/.DS_Store
+.Spotlight-V100
+.Trashes
+._*
 *.suo
 *.ntvs*
 *.njsproj
