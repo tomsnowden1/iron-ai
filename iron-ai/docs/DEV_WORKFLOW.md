@@ -37,9 +37,12 @@ Diagnostics
 - Or set localStorage: `localStorage.setItem("ironai.diagnosticsEnabled", "true")`.
 - Open the Diagnostics panel from **More → Diagnostics** (only visible when debug is enabled).
 
-Shipping (one-run)
-- One-time: `chmod +x scripts/ship.sh`
-- Run from a feature branch (or pass one to auto-create):
-  - `scripts/ship.sh fix/ship-my-change "chore: ship my change"`
-  - `scripts/ship.sh --auto-branch "chore: ship my change"`
-- Requires `gh` for PR + auto-merge. If `gh` is missing, the script will fall back to `git prmain`/`git shipmain` when available or print manual steps.
+Shipping
+- `npm run shipmain` from a clean feature branch.
+  - Syncs local `main` using `git fetch origin` + `git pull --rebase --autostash origin main`.
+  - Stops with conflict instructions if `main` cannot be rebased cleanly.
+  - Pushes the current branch, then runs `npm run prmain` best effort.
+- `npm run prmain`
+  - Creates or reuses a PR into `main`.
+  - Best-effort creates/applies the `automerge` label.
+  - Attempts `gh pr merge --auto`; if repo settings block it, prints GitHub UI steps and exits successfully.
