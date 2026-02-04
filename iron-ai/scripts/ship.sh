@@ -25,7 +25,12 @@ if ! git show-ref --verify --quiet "refs/heads/${BASE_BRANCH}"; then
 fi
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  fail "Working tree has staged/unstaged changes. Commit or stash before shipping."
+  warn "Working tree has staged/unstaged changes."
+  log "Next steps:"
+  log "  git status --short"
+  log "  git add -A && git commit -m \"<message>\""
+  log "  # or stash everything (including untracked): git stash push -u"
+  exit 1
 fi
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -48,7 +53,14 @@ sync_main() {
     if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
       git checkout "$original_branch" >/dev/null 2>&1 || true
     fi
-    fail "Resolve main rebase conflicts manually, then re-run scripts/ship.sh."
+    warn "Resolve manually, then rerun shipping:"
+    log "  git checkout ${BASE_BRANCH}"
+    log "  git pull --rebase --autostash origin ${BASE_BRANCH}"
+    log "  # resolve conflicts, then: git rebase --continue"
+    if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
+      log "  git checkout ${original_branch}"
+    fi
+    exit 1
   fi
 
   if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
@@ -77,4 +89,7 @@ log "Pushing ${current_branch}..."
 git push -u origin "$current_branch"
 
 log "Opening/refreshing PR to ${BASE_BRANCH}..."
-"$(dirname "$0")/prmain.sh"
+if ! "$(dirname "$0")/prmain.sh"; then
+  warn "PR automation did not complete. Branch is pushed."
+  warn "Run npm run prmain after fixing GitHub CLI auth/settings."
+fi
