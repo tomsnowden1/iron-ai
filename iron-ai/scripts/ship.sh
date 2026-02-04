@@ -54,7 +54,11 @@ sync_main() {
     warn "Resolve manually, then rerun shipping:"
     log "  git checkout ${BASE_BRANCH}"
     log "  git pull --rebase --autostash origin ${BASE_BRANCH}"
-    log "  # resolve conflicts, then: git rebase --continue"
+    log "  git status"
+    log "  # resolve conflicts, then run one:"
+    log "  git rebase --continue"
+    log "  # or abort the rebase:"
+    log "  git rebase --abort"
     if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
       log "  git checkout ${original_branch}"
     fi
