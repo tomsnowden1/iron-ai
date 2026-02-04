@@ -15,11 +15,22 @@ Format the codebase
 Run all checks (lint + format check)
 - `npm run check`
 
+Build
+- `npm run build`
+- The build now runs a guard (`check:src-node-builtins`) to block Node builtins (`fs`, `path`, `crypto`) in `src/`.
+
+Seed generation
+- Regenerate in-app seed slice from `public/seed/exercises.json`:
+  - `npm run generate:exercise-seed`
+
 Pre-commit hook setup
 - `npm run prepare`
 
 Notes
 - The pre-commit hook runs `npm run lint` and `npm run format`.
+- Shipping helpers:
+  - `npm run shipmain` (sync `main`, push branch, open/update PR, best-effort automerge setup)
+  - `npm run prmain` (open/update PR from current branch to `main`, add `automerge` label)
 
 Diagnostics
 - Enable via URL: append `?debug=1` to the app URL (ex: `http://localhost:5173/?debug=1`).

@@ -38,14 +38,13 @@ export function scoreExercise(record) {
 
 export async function sha256Hex(value) {
   const bytes = new TextEncoder().encode(value);
-  if (globalThis.crypto?.subtle) {
-    const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("Web Crypto API is unavailable in this runtime.");
   }
-  const { createHash } = await import("crypto");
-  return createHash("sha256").update(bytes).digest("hex");
+  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 export async function computeStableId({
