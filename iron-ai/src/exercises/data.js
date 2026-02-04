@@ -85,5 +85,5 @@ export function formatEquipmentLabels(requiredEquipmentIds, equipmentMap) {
   return ids
     .map((id) => equipmentMap.get(id))
     .filter(Boolean)
-    .map((item) => item.name ?? id);
+    .map((item) => item.name ?? item.id);
 }

@@ -90,7 +90,7 @@ export async function generateExerciseDetails({ apiKey, name, hints, signal } = 
   let parsed = null;
   try {
     parsed = JSON.parse(rawContent);
-  } catch (error) {
+  } catch {
     throw new Error("AI response could not be parsed. Please try again.");
   }
 

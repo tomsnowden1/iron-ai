@@ -12,7 +12,6 @@ import {
   computeSeedHash,
   computeStableId,
   isNonEmptyArray,
-  isNonEmptyString,
   normalizeString,
   normalizeStringArray,
   scoreExercise,
@@ -803,13 +802,13 @@ export async function importExercises({
       totalSeed: validation.report.total,
       valid: validation.report.validCount,
       invalid: validation.report.invalidCount,
-      warnings: validation.report.warningCount,
+      warningCount: validation.report.warningCount,
       duplicatesCollapsed,
       seedVersion: SEED_DATA_VERSION,
       seedVersionNumber: SEED_VERSION_NUMBER,
       seedHash,
       report: validation.report,
-      warnings,
+      fetchWarnings: warnings,
     };
   }
 

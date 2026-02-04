@@ -283,7 +283,7 @@ function GymForm({ mode, spaceId, onCancel, onSaved, onNotify }) {
             />
             {showNameWarning ? (
               <div className="template-meta">
-                Name is required. This will save as "New Space" if left blank.
+                Name is required. This will save as &quot;New Space&quot; if left blank.
               </div>
             ) : null}
           </div>
@@ -407,13 +407,14 @@ function GymDetail({ spaceId, onBack, onEdit, onDuplicate, onLaunchCoach, onNoti
   const isActive = Boolean(activeSpace && space && activeSpace.id === space.id);
   const expired = isSpaceExpired(space);
 
+  const equipmentIds = space?.equipmentIds;
   const equipmentList = useMemo(() => {
-    if (!space?.equipmentIds?.length) return [];
-    return space.equipmentIds
+    if (!equipmentIds?.length) return [];
+    return equipmentIds
       .map((id) => equipmentMap.get(id))
       .filter(Boolean)
       .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
-  }, [equipmentMap, space?.equipmentIds]);
+  }, [equipmentIds, equipmentMap]);
   const equipmentFiltered = useMemo(() => {
     const lowered = equipmentSearch.trim().toLowerCase();
     if (!lowered) return equipmentList;
