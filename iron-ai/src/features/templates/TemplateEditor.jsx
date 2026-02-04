@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { History } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 
@@ -138,7 +138,7 @@ function TemplateEditorForm({
   const templateSpace = useMemo(() => {
     if (!template?.spaceId) return null;
     return (workoutSpaces ?? []).find((space) => space.id === template.spaceId) ?? null;
-  }, [template?.spaceId, workoutSpaces]);
+  }, [template, workoutSpaces]);
   const equipmentMap = useMemo(
     () => getEquipmentMap(equipmentList ?? []),
     [equipmentList]
