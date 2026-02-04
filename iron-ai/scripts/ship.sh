@@ -25,12 +25,7 @@ if ! git show-ref --verify --quiet "refs/heads/${BASE_BRANCH}"; then
 fi
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  warn "Working tree has staged/unstaged changes."
-  log "Next steps:"
-  log "  git status --short"
-  log "  git add -A && git commit -m \"<message>\""
-  log "  # or stash everything (including untracked): git stash push -u"
-  exit 1
+  fail "Working tree has staged/unstaged changes. Commit or stash before shipping."
 fi
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -41,7 +36,9 @@ sync_main() {
   log "Syncing ${BASE_BRANCH} with origin/${BASE_BRANCH}..."
   git fetch origin
 
-  git checkout "$BASE_BRANCH" >/dev/null 2>&1
+  if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
+    git checkout "$BASE_BRANCH" >/dev/null 2>&1
+  fi
 
   if ! git pull --rebase --autostash origin "$BASE_BRANCH"; then
     warn "Failed to rebase ${BASE_BRANCH} on origin/${BASE_BRANCH}."
@@ -51,18 +48,7 @@ sync_main() {
     if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
       git checkout "$original_branch" >/dev/null 2>&1 || true
     fi
-    warn "Resolve manually, then rerun shipping:"
-    log "  git checkout ${BASE_BRANCH}"
-    log "  git pull --rebase --autostash origin ${BASE_BRANCH}"
-    log "  git status"
-    log "  # resolve conflicts, then run one:"
-    log "  git rebase --continue"
-    log "  # or abort the rebase:"
-    log "  git rebase --abort"
-    if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
-      log "  git checkout ${original_branch}"
-    fi
-    exit 1
+    fail "Resolve main rebase conflicts manually, then re-run scripts/ship.sh."
   fi
 
   if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
@@ -91,7 +77,4 @@ log "Pushing ${current_branch}..."
 git push -u origin "$current_branch"
 
 log "Opening/refreshing PR to ${BASE_BRANCH}..."
-if ! "$(dirname "$0")/prmain.sh"; then
-  warn "PR automation did not complete. Branch is pushed."
-  warn "Run npm run prmain after fixing GitHub CLI auth/settings."
-fi
+"$(dirname "$0")/prmain.sh"
