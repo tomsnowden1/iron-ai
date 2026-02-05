@@ -27,12 +27,10 @@ import { setOpenAIKeyStatus, useCoachMemoryEnabled, useSettings } from "../../st
 import {
   db,
   getAllExercises,
-  getCoachActiveGymMeta,
   listWorkoutSpaces,
   setActiveWorkoutSpace,
-  setCoachActiveGymMeta,
 } from "../../db";
-import { sortSpacesByName, resolveActiveSpace } from "../../workoutSpaces/logic";
+import { sortSpacesByName } from "../../workoutSpaces/logic";
 
 import BottomSheet from "../../components/ui/BottomSheet";
 

@@ -422,12 +422,6 @@ db.version(9)
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
-  const slugify = (value) =>
-    String(value ?? "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
   await db.table("equipment").bulkPut(EQUIPMENT_CATALOG);
   await db.table("workoutSpaces").add({
     name: "Default Gym",
