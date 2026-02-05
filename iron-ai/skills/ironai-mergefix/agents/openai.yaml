@@ -1,0 +1,4 @@
+interface:
+  display_name: "IronAI MergeFix"
+  short_description: "Resolve merge/rebase conflicts safely in IronAI repos"
+  default_prompt: "Resolve current merge/rebase conflicts safely, preserve intent, complete the git operation, and verify the repo is clean."
