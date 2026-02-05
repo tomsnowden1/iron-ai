@@ -418,7 +418,7 @@ function WorkoutView({
   const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
-  const lastActivityAtRef = useRef(Date.now());
+  const lastActivityAtRef = useRef(0);
   const lastBackgroundAtRef = useRef(null);
   const resumeBannerShownRef = useRef(false);
 
@@ -426,17 +426,16 @@ function WorkoutView({
   const workout = workoutBundle?.workout ?? null;
   const items = useMemo(() => {
     const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
-    let warned = false;
+    const hasInvalidSets = rawItems.some((item) => item && !Array.isArray(item.sets));
+    if (hasInvalidSets) {
+      console.error(
+        "Workout items contain invalid set arrays; falling back to empty arrays."
+      );
+    }
     return rawItems
       .filter(Boolean)
       .map((item) => {
         if (!Array.isArray(item.sets)) {
-          if (!warned) {
-            console.error(
-              "Workout items contain invalid set arrays; falling back to empty arrays."
-            );
-            warned = true;
-          }
           return { ...item, sets: [] };
         }
         return item;
@@ -1183,7 +1182,7 @@ function WorkoutView({
             });
           }
           onNotify?.("Exercise restored ✅", { tone: "success", duration: 2000 });
-        } catch (error) {
+        } catch {
           onNotify?.("Unable to restore exercise.", { tone: "error" });
         }
       },
@@ -1322,6 +1321,11 @@ function WorkoutView({
     await deleteWorkout(workoutId);
     setWorkoutId(null);
   };
+
+  const openExercisePicker = useCallback(() => {
+    setPickerPrefill(null);
+    setPickerOpen(true);
+  }, []);
 
   const handleSessionNoteBlur = async () => {
     setSessionNoteFocused(false);
@@ -1471,11 +1475,6 @@ function WorkoutView({
       <PageHeader
         title="Workout"
         subtitle={workoutSubtitle}
-        actions={
-          <Button variant="destructive" size="sm" onClick={handleDeleteWorkout}>
-            Delete
-          </Button>
-        }
       />
 
       {showResumeBanner ? (
@@ -1497,78 +1496,24 @@ function WorkoutView({
         </div>
       ) : null}
 
-      <div className="workout-stats-bar">
-        <div className="workout-stats-title">
-          <span className="ui-section-title">Session</span>
-          {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
-        </div>
-        <div className="workout-stats-chips">
-          <span className="stat-chip">
-            <span className="stat-chip__label">Exercises</span>
-            <span className="stat-chip__value">{items.length}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Sets</span>
-            <span className="stat-chip__value">{totalSets}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Template</span>
-            <span className="stat-chip__value">{templateLabel}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Space</span>
-            <span className="stat-chip__value">{spaceLabel}</span>
-          </span>
-        </div>
+      <div className="ui-row ui-row--between ui-row--wrap">
+        <div className="ui-section-title">Exercises</div>
+        {items.length > 0 ? (
+          <Button variant="secondary" size="sm" onClick={openExercisePicker}>
+            Add exercise
+          </Button>
+        ) : null}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="ui-row ui-row--between">
-            <div className="ui-section-title">Workout notes</div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSessionNoteOpen((prev) => !prev)}
-            >
-              {sessionNoteOpen ? "Hide" : sessionNote ? "Edit" : "Add note"}
+      {items.length === 0 ? (
+        <div className="empty-state">
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <span>No exercises yet. Add your first exercise.</span>
+            <Button variant="secondary" size="sm" onClick={openExercisePicker}>
+              Add exercises
             </Button>
           </div>
-          {!sessionNoteOpen && sessionNote ? (
-            <div className="template-meta">Note saved</div>
-          ) : null}
-        </CardHeader>
-        {sessionNoteOpen ? (
-          <CardBody className="ui-stack">
-            <div>
-              <Label htmlFor="session-note">Workout note</Label>
-              <textarea
-                id="session-note"
-                className="ui-input ui-textarea"
-                rows={3}
-                maxLength={SESSION_NOTE_LIMIT}
-                placeholder="Optional thoughts about today's session."
-                value={sessionNote}
-                onFocus={() => setSessionNoteFocused(true)}
-                onBlur={handleSessionNoteBlur}
-                onChange={(e) => setSessionNote(e.target.value)}
-              />
-              {sessionNoteFocused ? (
-                <div className="template-meta">
-                  Optional | {sessionNote.length}/{SESSION_NOTE_LIMIT}
-                </div>
-              ) : null}
-            </div>
-          </CardBody>
-        ) : null}
-      </Card>
-
-      {items.length === 0 ? (
-        <Card>
-          <CardBody>
-            <div className="empty-state">No exercises yet. Add your first exercise below.</div>
-          </CardBody>
-        </Card>
+        </div>
       ) : (
         <div className="ui-stack">
           {items.map((it, index) => {
@@ -1720,25 +1665,69 @@ function WorkoutView({
 
       <Card>
         <CardHeader>
-          <div className="ui-section-title">Add exercise</div>
-        </CardHeader>
-        <CardBody className="ui-stack">
-          <div className="template-meta">
-            Open the full-page picker to search, filter, and add exercises fast.
+          <div className="ui-row ui-row--between">
+            <div className="ui-section-title">Workout notes</div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSessionNoteOpen((prev) => !prev)}
+            >
+              {sessionNoteOpen ? "Hide" : sessionNote ? "Edit" : "Add note"}
+            </Button>
           </div>
-          <Button
-            variant="secondary"
-            size="md"
-            onClick={() => {
-              setPickerPrefill(null);
-              setPickerOpen(true);
-            }}
-            className="w-full"
-          >
-            Open Exercise Picker
-          </Button>
-        </CardBody>
+          {!sessionNoteOpen && sessionNote ? (
+            <div className="template-meta">Note saved</div>
+          ) : null}
+        </CardHeader>
+        {sessionNoteOpen ? (
+          <CardBody className="ui-stack">
+            <div>
+              <Label htmlFor="session-note">Workout note</Label>
+              <textarea
+                id="session-note"
+                className="ui-input ui-textarea"
+                rows={3}
+                maxLength={SESSION_NOTE_LIMIT}
+                placeholder="Optional thoughts about today's session."
+                value={sessionNote}
+                onFocus={() => setSessionNoteFocused(true)}
+                onBlur={handleSessionNoteBlur}
+                onChange={(e) => setSessionNote(e.target.value)}
+              />
+              {sessionNoteFocused ? (
+                <div className="template-meta">
+                  Optional | {sessionNote.length}/{SESSION_NOTE_LIMIT}
+                </div>
+              ) : null}
+            </div>
+          </CardBody>
+        ) : null}
       </Card>
+
+      <div className="workout-stats-bar">
+        <div className="workout-stats-title">
+          <span className="ui-section-title">Session</span>
+          {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
+        </div>
+        <div className="workout-stats-chips">
+          <span className="stat-chip">
+            <span className="stat-chip__label">Exercises</span>
+            <span className="stat-chip__value">{items.length}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Sets</span>
+            <span className="stat-chip__value">{totalSets}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Template</span>
+            <span className="stat-chip__value">{templateLabel}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Space</span>
+            <span className="stat-chip__value">{spaceLabel}</span>
+          </span>
+        </div>
+      </div>
 
       <Card>
         <CardBody className="ui-stack">
@@ -1752,6 +1741,20 @@ function WorkoutView({
             Finish Workout
           </Button>
           {finishMessage ? <div className="ui-muted">{finishMessage}</div> : null}
+        </CardBody>
+      </Card>
+
+      <Card className="workout-danger-zone">
+        <CardBody className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-section-title">Danger zone</div>
+            <div className="template-meta">
+              Delete this workout session permanently. This cannot be undone.
+            </div>
+          </div>
+          <Button variant="destructive" size="sm" onClick={handleDeleteWorkout}>
+            Delete workout
+          </Button>
         </CardBody>
       </Card>
 
@@ -2364,7 +2367,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     if (!looksLikeOpenAiKey) {
       setOpenAiTestResult({
         tone: "error",
-        message: 'Keys usually start with \"sk-\". Check for typos.',
+        message: 'Keys usually start with "sk-". Check for typos.',
       });
       return;
     }
@@ -2518,7 +2521,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
                 placeholder="sk-..."
               />
               {!looksLikeOpenAiKey && trimmedOpenAiKey ? (
-                <div className="chat-error">Keys usually start with "sk-".</div>
+                <div className="chat-error">
+                  Keys usually start with &quot;sk-&quot;.
+                </div>
               ) : null}
               <div className="ui-row ui-row--wrap">
                 <Button variant="primary" size="sm" type="button" onClick={handleSaveOpenAiKey}>
@@ -3039,7 +3044,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
     });
 
     return sections;
-  }, [details?.items, previousSetsMap]);
+  }, [details, previousSetsMap]);
 
   const recapLine = useMemo(() => {
     if (!summary) return "";
@@ -3059,7 +3064,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
       setSessionReflection(nextValue);
       await updateWorkoutSession(summary.workoutId, { sessionReflection: nextValue });
     },
-    [sessionReflection, summary?.workoutId]
+    [sessionReflection, summary]
   );
 
   const renderExerciseList = (items, muted = false) => {

@@ -165,6 +165,15 @@
     box-shadow: 0 0 0 1px var(--color-primary-glow), var(--shadow-sm);
   }
 
+  .workout-danger-zone {
+    border-color: color-mix(in srgb, var(--color-destructive) 35%, var(--color-border-subtle));
+    background: color-mix(in srgb, var(--color-destructive) 6%, var(--color-surface));
+  }
+
+  .workout-danger-zone .ui-section-title {
+    color: var(--color-destructive);
+  }
+
   .stat-chip {
     display: inline-flex;
     align-items: center;
