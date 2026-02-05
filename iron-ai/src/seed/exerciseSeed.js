@@ -12,7 +12,6 @@ import {
   computeSeedHash,
   computeStableId,
   isNonEmptyArray,
-  isNonEmptyString,
   normalizeString,
   normalizeStringArray,
   scoreExercise,
@@ -123,19 +122,11 @@ function getSampleList(items, limit = 5) {
 }
 
 async function writeImportReportArtifact(report) {
-  if (typeof process === "undefined" || !process.versions?.node) {
-    return { ok: false, error: new Error("Filesystem report writing unavailable.") };
-  }
-  const fsModule = await import("fs");
-  const pathModule = await import("path");
-  try {
-    const absolute = pathModule.resolve(process.cwd(), REPORT_PATH);
-    await fsModule.promises.mkdir(pathModule.dirname(absolute), { recursive: true });
-    await fsModule.promises.writeFile(absolute, JSON.stringify(report, null, 2));
-    return { ok: true, path: REPORT_PATH };
-  } catch (error) {
-    return { ok: false, error };
-  }
+  void report;
+  return {
+    ok: false,
+    error: new Error("Filesystem report writing is unavailable in the browser runtime."),
+  };
 }
 
 function shouldClearPlaceholderMuscles(record, list) {
@@ -811,13 +802,13 @@ export async function importExercises({
       totalSeed: validation.report.total,
       valid: validation.report.validCount,
       invalid: validation.report.invalidCount,
-      warnings: validation.report.warningCount,
+      warningCount: validation.report.warningCount,
       duplicatesCollapsed,
       seedVersion: SEED_DATA_VERSION,
       seedVersionNumber: SEED_VERSION_NUMBER,
       seedHash,
       report: validation.report,
-      warnings,
+      fetchWarnings: warnings,
     };
   }
 

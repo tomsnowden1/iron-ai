@@ -1,0 +1,3 @@
+display_name: IronAI Flow
+short_description: Run iron-ai prep, minimal implementation, validation, commit, and local handoff workflow.
+default_prompt: Execute the iron-ai prep -> implement -> validate -> commit -> local handoff workflow with minimal safe diffs.

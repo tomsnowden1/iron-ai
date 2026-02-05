@@ -732,7 +732,8 @@ export default function SeedDebugPanel({ onBack }) {
           {auditLog.length ? (
             auditLog.map((entry, index) => (
               <div key={`${entry.timestamp ?? index}`} className="template-meta">
-                [{new Date(entry.timestamp ?? Date.now()).toLocaleString()}] {entry.status} - {entry.message}
+                [{entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "Unknown time"}]{" "}
+                {entry.status} - {entry.message}
               </div>
             ))
           ) : (

@@ -300,7 +300,7 @@ export default function ExerciseDetailView({
     return resolved;
   }, [
     allExercises,
-    exercise?.progressions,
+    exercise,
     exerciseMap,
     exerciseSlugMap,
     exerciseStableIdMap,
@@ -333,7 +333,7 @@ export default function ExerciseDetailView({
     return resolved;
   }, [
     allExercises,
-    exercise?.regressions,
+    exercise,
     exerciseMap,
     exerciseSlugMap,
     exerciseStableIdMap,

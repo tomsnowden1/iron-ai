@@ -420,7 +420,7 @@ function WorkoutView({
   const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
-  const lastActivityAtRef = useRef(Date.now());
+  const lastActivityAtRef = useRef(null);
   const lastBackgroundAtRef = useRef(null);
   const resumeBannerShownRef = useRef(false);
 
@@ -428,17 +428,14 @@ function WorkoutView({
   const workout = workoutBundle?.workout ?? null;
   const items = useMemo(() => {
     const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
-    let warned = false;
+    const hasInvalidSets = rawItems.some((item) => item && !Array.isArray(item.sets));
+    if (hasInvalidSets) {
+      console.error("Workout items contain invalid set arrays; falling back to empty arrays.");
+    }
     return rawItems
       .filter(Boolean)
       .map((item) => {
         if (!Array.isArray(item.sets)) {
-          if (!warned) {
-            console.error(
-              "Workout items contain invalid set arrays; falling back to empty arrays."
-            );
-            warned = true;
-          }
           return { ...item, sets: [] };
         }
         return item;
@@ -616,7 +613,7 @@ function WorkoutView({
         lastBackgroundAtRef.current = Date.now();
         return;
       }
-      const idleFor = Date.now() - lastActivityAtRef.current;
+      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState(nextState);
       setIsProlongedIdle(idleFor >= SESSION_PROLONGED_IDLE_MS);
@@ -645,7 +642,7 @@ function WorkoutView({
     if (!workoutId || workout?.finishedAt) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      const idleFor = Date.now() - lastActivityAtRef.current;
+      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState((prev) =>
         prev === "backgrounded" || prev === nextState ? prev : nextState
@@ -1185,7 +1182,7 @@ function WorkoutView({
             });
           }
           onNotify?.("Exercise restored ✅", { tone: "success", duration: 2000 });
-        } catch (error) {
+        } catch {
           onNotify?.("Unable to restore exercise.", { tone: "error" });
         }
       },
@@ -2368,7 +2365,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     if (!looksLikeOpenAiKey) {
       setOpenAiTestResult({
         tone: "error",
-        message: 'Keys usually start with \"sk-\". Check for typos.',
+        message: 'Keys usually start with "sk-". Check for typos.',
       });
       return;
     }
@@ -2522,7 +2519,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
                 placeholder="sk-..."
               />
               {!looksLikeOpenAiKey && trimmedOpenAiKey ? (
-                <div className="chat-error">Keys usually start with "sk-".</div>
+                <div className="chat-error">Keys usually start with &quot;sk-&quot;.</div>
               ) : null}
               <div className="ui-row ui-row--wrap">
                 <Button variant="primary" size="sm" type="button" onClick={handleSaveOpenAiKey}>
@@ -3048,7 +3045,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
     });
 
     return sections;
-  }, [details?.items, previousSetsMap]);
+  }, [details, previousSetsMap]);
 
   const recapLine = useMemo(() => {
     if (!summary) return "";
@@ -3068,7 +3065,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
       setSessionReflection(nextValue);
       await updateWorkoutSession(summary.workoutId, { sessionReflection: nextValue });
     },
-    [sessionReflection, summary?.workoutId]
+    [sessionReflection, summary]
   );
 
   const renderExerciseList = (items, muted = false) => {
