@@ -90,6 +90,7 @@ const EXERCISE_NOTE_LIMIT = 250;
 const SESSION_IDLE_MS = 8 * 60 * 1000;
 const SESSION_PROLONGED_IDLE_MS = 12 * 60 * 1000;
 const RESUME_BANNER_MINUTES_MS = 3 * 60 * 1000;
+const LAST_ACTIVITY_INITIAL_TS = Date.now();
 const NAV_ITEMS = [
   { id: "workout", label: "Workout", icon: Dumbbell },
   { id: "coach", label: "Coach", icon: MessageSquare },
@@ -418,7 +419,7 @@ function WorkoutView({
   const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
-  const lastActivityAtRef = useRef(Date.now());
+  const lastActivityAtRef = useRef(LAST_ACTIVITY_INITIAL_TS);
   const lastBackgroundAtRef = useRef(null);
   const resumeBannerShownRef = useRef(false);
 
@@ -426,17 +427,14 @@ function WorkoutView({
   const workout = workoutBundle?.workout ?? null;
   const items = useMemo(() => {
     const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
-    let warned = false;
+    const hasInvalidSetArrays = rawItems.some((item) => item && !Array.isArray(item.sets));
+    if (hasInvalidSetArrays) {
+      console.error("Workout items contain invalid set arrays; falling back to empty arrays.");
+    }
     return rawItems
       .filter(Boolean)
       .map((item) => {
         if (!Array.isArray(item.sets)) {
-          if (!warned) {
-            console.error(
-              "Workout items contain invalid set arrays; falling back to empty arrays."
-            );
-            warned = true;
-          }
           return { ...item, sets: [] };
         }
         return item;
@@ -1183,7 +1181,7 @@ function WorkoutView({
             });
           }
           onNotify?.("Exercise restored ✅", { tone: "success", duration: 2000 });
-        } catch (error) {
+        } catch {
           onNotify?.("Unable to restore exercise.", { tone: "error" });
         }
       },
@@ -2364,7 +2362,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     if (!looksLikeOpenAiKey) {
       setOpenAiTestResult({
         tone: "error",
-        message: 'Keys usually start with \"sk-\". Check for typos.',
+        message: 'Keys usually start with "sk-". Check for typos.',
       });
       return;
     }
@@ -2518,7 +2516,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
                 placeholder="sk-..."
               />
               {!looksLikeOpenAiKey && trimmedOpenAiKey ? (
-                <div className="chat-error">Keys usually start with "sk-".</div>
+                <div className="chat-error">Keys usually start with &quot;sk-&quot;.</div>
               ) : null}
               <div className="ui-row ui-row--wrap">
                 <Button variant="primary" size="sm" type="button" onClick={handleSaveOpenAiKey}>
@@ -3039,7 +3037,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
     });
 
     return sections;
-  }, [details?.items, previousSetsMap]);
+  }, [details, previousSetsMap]);
 
   const recapLine = useMemo(() => {
     if (!summary) return "";
@@ -3059,7 +3057,7 @@ function SummaryView({ summary, onBackToWorkout, onViewHistory }) {
       setSessionReflection(nextValue);
       await updateWorkoutSession(summary.workoutId, { sessionReflection: nextValue });
     },
-    [sessionReflection, summary?.workoutId]
+    [sessionReflection, summary]
   );
 
   const renderExerciseList = (items, muted = false) => {
