@@ -21,8 +21,9 @@
     "seed:freeex": "node scripts/free-exercise-db.seed.mjs",
     "seed:freeex:images": "node scripts/free-exercise-db.seed.mjs --images",
     "seed:validate": "node scripts/validate-seed.mjs --inapp",
-    "shipmain": "bash scripts/ship.sh",
-    "prmain": "bash scripts/prmain.sh"
+    "shipmain": "bash scripts/shipmain.sh",
+    "prmain": "bash scripts/prmain.sh",
+    "backupmain": "bash scripts/backupmain.sh"
   },
   "dependencies": {
     "dexie-react-hooks": "^4.2.0",
