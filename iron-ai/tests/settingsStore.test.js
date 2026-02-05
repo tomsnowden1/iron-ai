@@ -2,12 +2,14 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { db } from "../src/db";
 import {
+  getCoachChatState,
   clearOpenAIKey,
   getCoachMemoryEnabled,
   getOpenAIKeyMasked,
   getOpenAIKeyStatus,
   getSettings,
   hasOpenAIKey,
+  setCoachChatState,
   setCoachMemoryEnabled,
   setOpenAIKey,
 } from "../src/state/settingsStore";
@@ -89,5 +91,36 @@ describe.sequential("settings store", () => {
         delete globalThis.localStorage;
       }
     }
+  });
+
+  it("persists coach chat state locally", async () => {
+    await setCoachChatState({
+      messages: [
+        {
+          id: 1,
+          role: "user",
+          content: "Build me a push workout",
+          createdAt: 1,
+        },
+        {
+          id: 2,
+          role: "assistant",
+          content: "Try 3x8 bench and 3x10 rows.",
+          meta: { actionDraft: { kind: "create_template" } },
+          createdAt: 2,
+        },
+      ],
+      chatHistory: [
+        { role: "user", content: "Build me a push workout" },
+        { role: "assistant", content: "Try 3x8 bench and 3x10 rows." },
+      ],
+    });
+
+    const saved = await getCoachChatState();
+    expect(saved.version).toBe(1);
+    expect(saved.messages).toHaveLength(2);
+    expect(saved.messages[1]?.meta?.actionDraft?.kind).toBe("create_template");
+    expect(saved.chatHistory).toHaveLength(2);
+    expect(saved.chatHistory[0]?.role).toBe("user");
   });
 });
