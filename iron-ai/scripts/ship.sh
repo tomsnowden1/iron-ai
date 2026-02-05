@@ -1,212 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() {
-  cat <<'USAGE'
-Usage:
-  scripts/ship.sh "Commit message"
-  scripts/ship.sh <branch> "Commit message"
-  scripts/ship.sh --branch <branch> --message "Commit message"
-  scripts/ship.sh --auto-branch "Commit message"
-
-Notes:
-  - Refuses to run on main unless a branch is provided or --auto-branch is set.
-  - Runs: build -> commit -> push -> PR -> auto-merge (best effort).
-USAGE
-}
-
-say() {
-  printf '%s\n' "$*"
-}
-
-require_git_repo() {
-  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    say "Not inside a git repo."
-    exit 1
-  fi
-}
-
-current_branch() {
-  git branch --show-current
-}
-
-has_git_alias() {
-  local name="$1"
-  git config --get "alias.${name}" >/dev/null 2>&1
-}
-
-has_git_cmd() {
-  local name="$1"
-  command -v "git-${name}" >/dev/null 2>&1
-}
-
-print_doctor() {
-  say "Doctor"
-  say "- branch: $(current_branch)"
-  say "- status:"
-  git status -sb
-}
-
-branch_arg=""
-msg_arg=""
-auto_branch=false
-positional=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -b|--branch)
-      branch_arg="${2:-}"
-      shift 2
-      ;;
-    -m|--message)
-      msg_arg="${2:-}"
-      shift 2
-      ;;
-    --auto-branch)
-      auto_branch=true
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --)
-      shift
-      break
-      ;;
-    *)
-      positional+=("$1")
-      shift
-      ;;
-  esac
-done
-
-while [[ $# -gt 0 ]]; do
-  positional+=("$1")
-  shift
-done
-
-if [[ ${#positional[@]} -gt 0 ]]; then
-  if [[ ${#positional[@]} -eq 2 && -z "$branch_arg" && -z "$msg_arg" ]]; then
-    branch_arg="${positional[0]}"
-    msg_arg="${positional[1]}"
-  elif [[ ${#positional[@]} -eq 1 && -z "$msg_arg" ]]; then
-    msg_arg="${positional[0]}"
-  else
-    say "Unexpected arguments."
-    usage
-    exit 1
-  fi
-fi
-
-require_git_repo
-
-branch="$(current_branch)"
-if [[ "$branch" == "main" ]]; then
-  if [[ -n "$branch_arg" ]]; then
-    say "Creating branch $branch_arg"
-    git checkout -b "$branch_arg"
-    branch="$(current_branch)"
-  elif [[ "$auto_branch" == "true" ]]; then
-    branch_arg="fix/ship-$(date +%Y%m%d%H%M)"
-    say "Creating branch $branch_arg"
-    git checkout -b "$branch_arg"
-    branch="$(current_branch)"
-  else
-    say "Refusing to run on main. Provide a branch or use --auto-branch."
-    exit 1
-  fi
-elif [[ -n "$branch_arg" && "$branch_arg" != "$branch" ]]; then
-  if git show-ref --verify --quiet "refs/heads/$branch_arg"; then
-    say "Checking out existing branch $branch_arg"
-    git checkout "$branch_arg"
-  else
-    say "Creating branch $branch_arg"
-    git checkout -b "$branch_arg"
-  fi
-  branch="$(current_branch)"
-fi
-
-print_doctor
-
-if [[ -z "$(git status --porcelain)" ]]; then
-  say "nothing to ship"
-  exit 0
-fi
-
-commit_msg="${msg_arg:-chore: ship}"
-
-say "Running build..."
-npm run build
-
-say "Committing changes..."
-git add -A
-if [[ -z "$(git status --porcelain)" ]]; then
-  say "nothing to ship"
-  exit 0
-fi
-
-git commit -m "$commit_msg"
-
-say "Pushing branch $branch to origin..."
-git push -u origin "$branch"
-
-say "Opening PR to main..."
-gh_handled=false
-pr_number=""
-
-if command -v gh >/dev/null 2>&1; then
-  if gh auth status >/dev/null 2>&1; then
-    gh_handled=true
-    pr_url=""
-    if pr_number=$(gh pr view --json number --jq .number 2>/dev/null); then
-      pr_url=$(gh pr view --json url --jq .url)
-    else
-      if pr_url=$(gh pr create --base main --head "$branch" --title "$commit_msg" --body "Automated ship via scripts/ship.sh"); then
-        pr_number=$(gh pr view --json number --jq .number)
-        pr_url=$(gh pr view --json url --jq .url)
-      else
-        say "gh pr create failed; skipping gh."
-        gh_handled=false
-      fi
-    fi
-
-    if [[ "$gh_handled" == "true" && -n "$pr_number" ]]; then
-      say "PR: $pr_url"
-
-      if gh label list --limit 200 >/dev/null 2>&1; then
-        if gh label list --limit 200 | grep -qE '^automerge\\b'; then
-          gh pr edit "$pr_number" --add-label automerge || true
-        else
-          say "automerge label not found; skipping label"
-        fi
-      else
-        say "Unable to list labels; skipping label"
-      fi
-
-      if gh pr merge "$pr_number" --auto --merge; then
-        say "Auto-merge enabled"
-      else
-        say "Auto-merge not enabled; check repo settings and permissions"
-      fi
-    else
-      gh_handled=false
-    fi
-  else
-    say "gh is installed but not authenticated; skipping gh."
-  fi
-fi
-
-if [[ "$gh_handled" != "true" ]]; then
-  if has_git_alias prmain || has_git_cmd prmain; then
-    say "Using git prmain helper"
-    git prmain
-  elif has_git_alias shipmain || has_git_cmd shipmain; then
-    say "Using git shipmain helper"
-    git shipmain
-  else
-    say "No GitHub CLI or helper command found. Open a PR to main manually."
-  fi
 BASE_BRANCH="main"
 
 log() {
@@ -231,12 +25,7 @@ if ! git show-ref --verify --quiet "refs/heads/${BASE_BRANCH}"; then
 fi
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  warn "Working tree has staged/unstaged changes."
-  log "Next steps:"
-  log "  git status --short"
-  log "  git add -A && git commit -m \"<message>\""
-  log "  # or stash everything (including untracked): git stash push -u"
-  exit 1
+  fail "Working tree has staged/unstaged changes. Commit or stash before shipping."
 fi
 
 current_branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -247,7 +36,9 @@ sync_main() {
   log "Syncing ${BASE_BRANCH} with origin/${BASE_BRANCH}..."
   git fetch origin
 
-  git checkout "$BASE_BRANCH" >/dev/null 2>&1
+  if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
+    git checkout "$BASE_BRANCH" >/dev/null 2>&1
+  fi
 
   if ! git pull --rebase --autostash origin "$BASE_BRANCH"; then
     warn "Failed to rebase ${BASE_BRANCH} on origin/${BASE_BRANCH}."
@@ -257,18 +48,7 @@ sync_main() {
     if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
       git checkout "$original_branch" >/dev/null 2>&1 || true
     fi
-    warn "Resolve manually, then rerun shipping:"
-    log "  git checkout ${BASE_BRANCH}"
-    log "  git pull --rebase --autostash origin ${BASE_BRANCH}"
-    log "  git status"
-    log "  # resolve conflicts, then run one:"
-    log "  git rebase --continue"
-    log "  # or abort the rebase:"
-    log "  git rebase --abort"
-    if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
-      log "  git checkout ${original_branch}"
-    fi
-    exit 1
+    fail "Resolve main rebase conflicts manually, then re-run scripts/ship.sh."
   fi
 
   if [[ "$original_branch" != "$BASE_BRANCH" ]]; then
@@ -297,7 +77,4 @@ log "Pushing ${current_branch}..."
 git push -u origin "$current_branch"
 
 log "Opening/refreshing PR to ${BASE_BRANCH}..."
-if ! "$(dirname "$0")/prmain.sh"; then
-  warn "PR automation did not complete. Branch is pushed."
-  warn "Run npm run prmain after fixing GitHub CLI auth/settings."
-fi
+"$(dirname "$0")/prmain.sh"
