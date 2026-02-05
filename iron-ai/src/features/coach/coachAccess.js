@@ -18,6 +18,6 @@ export function getCoachAccessState({ hasKey, keyStatus }) {
   return {
     canChat: true,
     status: "ready",
-    message: "Key detected. Context sharing is off by default.",
+    message: "Key detected. Chat history is saved on this device.",
   };
 }

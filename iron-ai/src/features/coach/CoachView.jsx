@@ -23,7 +23,13 @@ import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
 import { executeTool, getToolRegistry } from "../../coach/tools";
 import { getCoachAccessState } from "./coachAccess";
 import { resolveTemplateDraftInfo } from "./templateDraft";
-import { setOpenAIKeyStatus, useCoachMemoryEnabled, useSettings } from "../../state/settingsStore";
+import {
+  getCoachChatState,
+  setCoachChatState,
+  setOpenAIKeyStatus,
+  useCoachMemoryEnabled,
+  useSettings,
+} from "../../state/settingsStore";
 import {
   db,
   getAllExercises,
@@ -42,6 +48,15 @@ function createMessage(id, role, content, meta) {
     meta: meta ?? null,
     createdAt: Date.now(),
   };
+}
+
+function getHighestMessageId(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+  return messages.reduce((highest, message) => {
+    const value = Number(message?.id);
+    if (!Number.isFinite(value)) return highest;
+    return Math.max(highest, value);
+  }, 0);
 }
 
 function resolveErrorMessage(err, accessState) {
@@ -222,7 +237,9 @@ export default function CoachView({
   });
   const [messages, setMessages] = useState([]);
   const [chatHistory, setChatHistory] = useState([]);
+  const [chatStateLoaded, setChatStateLoaded] = useState(false);
   const chatHistoryRef = useRef([]);
+  const chatPersistTimerRef = useRef(null);
   const messageIdRef = useRef(0);
   const listRef = useRef(null);
   const streamingIdRef = useRef(null);
@@ -257,6 +274,51 @@ export default function CoachView({
     if (!listRef.current) return;
     listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, sending]);
+
+  useEffect(() => {
+    let active = true;
+    const loadChatState = async () => {
+      try {
+        const saved = await getCoachChatState();
+        if (!active) return;
+        if (saved.messages.length) {
+          setMessages(saved.messages);
+          messageIdRef.current = Math.max(
+            messageIdRef.current,
+            getHighestMessageId(saved.messages)
+          );
+        }
+        if (saved.chatHistory.length) {
+          setChatHistory(saved.chatHistory);
+        }
+      } finally {
+        if (active) {
+          setChatStateLoaded(true);
+        }
+      }
+    };
+    void loadChatState();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatStateLoaded) return;
+    if (chatPersistTimerRef.current) {
+      clearTimeout(chatPersistTimerRef.current);
+      chatPersistTimerRef.current = null;
+    }
+    chatPersistTimerRef.current = setTimeout(() => {
+      void setCoachChatState({ messages, chatHistory });
+    }, 150);
+    return () => {
+      if (chatPersistTimerRef.current) {
+        clearTimeout(chatPersistTimerRef.current);
+        chatPersistTimerRef.current = null;
+      }
+    };
+  }, [chatHistory, chatStateLoaded, messages]);
 
   useEffect(() => {
     if (!contextEnabled && contextPreviewOpen) {
@@ -1349,7 +1411,7 @@ export default function CoachView({
               Send
             </Button>
           </div>
-          <div className="template-meta">Chat history is not saved yet.</div>
+          <div className="template-meta">Chat history is saved on this device.</div>
         </CardFooter>
       </Card>
 

@@ -14,3 +14,9 @@
 ## Features
 - User enters OpenAI/Gemini Key in Settings.
 - App runs 100% offline (local-first).
+
+## Shipping Workflow
+- See `docs/DEV_WORKFLOW.md` for safe shipping commands:
+  - `npm run prmain` (default: PR + CI-gated auto-merge to `main`)
+  - `npm run shipmain` (sync `main` only)
+  - `npm run backupmain` (optional backup tag checkpoint)

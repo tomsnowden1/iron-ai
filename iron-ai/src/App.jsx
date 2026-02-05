@@ -22,7 +22,6 @@ import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
 import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
-import SeedDebugMiniPanel from "./features/debug/SeedDebugMiniPanel";
 import SeedDebugPanel from "./features/debug/SeedDebugPanel";
 import DiagnosticsHub from "./features/debug/DiagnosticsHub";
 import GymsView from "./features/gyms/GymsView";
@@ -54,7 +53,6 @@ import { resolveActiveSpace } from "./workoutSpaces/logic";
 import {
   clearOpenAIKey,
   getOpenAIKeyMasked,
-  useCoachMemoryEnabled,
   setOpenAIKey,
   testOpenAIKey,
   updateSettings,
@@ -87,11 +85,12 @@ import {
   updateWorkoutSet,
 } from "./db";
 
-const SESSION_NOTE_LIMIT = 500 ;
+const SESSION_NOTE_LIMIT = 500;
 const EXERCISE_NOTE_LIMIT = 250;
 const SESSION_IDLE_MS = 8 * 60 * 1000;
 const SESSION_PROLONGED_IDLE_MS = 12 * 60 * 1000;
 const RESUME_BANNER_MINUTES_MS = 3 * 60 * 1000;
+const LAST_ACTIVITY_INITIAL_TS = Date.now();
 const NAV_ITEMS = [
   { id: "workout", label: "Workout", icon: Dumbbell },
   { id: "coach", label: "Coach", icon: MessageSquare },
@@ -420,7 +419,7 @@ function WorkoutView({
   const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
-  const lastActivityAtRef = useRef(null);
+  const lastActivityAtRef = useRef(LAST_ACTIVITY_INITIAL_TS);
   const lastBackgroundAtRef = useRef(null);
   const resumeBannerShownRef = useRef(false);
 
@@ -428,8 +427,8 @@ function WorkoutView({
   const workout = workoutBundle?.workout ?? null;
   const items = useMemo(() => {
     const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
-    const hasInvalidSets = rawItems.some((item) => item && !Array.isArray(item.sets));
-    if (hasInvalidSets) {
+    const hasInvalidSetArrays = rawItems.some((item) => item && !Array.isArray(item.sets));
+    if (hasInvalidSetArrays) {
       console.error("Workout items contain invalid set arrays; falling back to empty arrays.");
     }
     return rawItems
@@ -613,7 +612,7 @@ function WorkoutView({
         lastBackgroundAtRef.current = Date.now();
         return;
       }
-      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
+      const idleFor = Date.now() - lastActivityAtRef.current;
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState(nextState);
       setIsProlongedIdle(idleFor >= SESSION_PROLONGED_IDLE_MS);
@@ -642,7 +641,7 @@ function WorkoutView({
     if (!workoutId || workout?.finishedAt) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
+      const idleFor = Date.now() - lastActivityAtRef.current;
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState((prev) =>
         prev === "backgrounded" || prev === nextState ? prev : nextState
@@ -2286,7 +2285,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [openAiEditing, setOpenAiEditing] = useState(!settings?.openai_api_key);
   const [openAiTesting, setOpenAiTesting] = useState(false);
   const [openAiTestResult, setOpenAiTestResult] = useState(null);
-  const { coachMemoryEnabled, setCoachMemoryEnabled } = useCoachMemoryEnabled();
+  const [coachMemoryEnabled, setCoachMemoryEnabled] = useState(
+    settings?.coach_memory_enabled ?? false
+  );
   const [coachMemory, setCoachMemory] = useState(() =>
     normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory())
   );
@@ -2319,10 +2320,10 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     trimmedOpenAiKey.length === 0 || trimmedOpenAiKey.startsWith("sk-");
   const maskedOpenAiKey = getOpenAIKeyMasked(settings?.openai_api_key);
   const openAiKeyStatus = settings?.openai_api_key_status ?? "missing";
-  const resolvedCoachMemoryEnabled = coachMemoryEnabled ?? false;
 
   useEffect(() => {
     if (memoryEditOpen) return;
+    setCoachMemoryEnabled(settings?.coach_memory_enabled ?? false);
     setCoachMemory(normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory()));
   }, [memoryEditOpen, settings]);
 
@@ -2336,14 +2337,10 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     setOpenAiTestResult(null);
   }, [settings?.openai_api_key]);
 
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    console.debug("[coachMemory] Settings value ->", coachMemoryEnabled);
-  }, [coachMemoryEnabled]);
-
   const saveSettings = async () => {
     await updateSettings({
       coach_persona: persona,
+      coach_memory_enabled: coachMemoryEnabled,
       coach_memory: coachMemory,
       exercise_picker_auto_focus: exercisePickerAutoFocus,
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
@@ -2608,17 +2605,12 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             <div className="template-meta">Let the coach remember preferences.</div>
           </div>
           <Button
-            variant={resolvedCoachMemoryEnabled ? "primary" : "secondary"}
+            variant={coachMemoryEnabled ? "primary" : "secondary"}
             size="sm"
             type="button"
-            onClick={() =>
-              void setCoachMemoryEnabled(!resolvedCoachMemoryEnabled, {
-                caller: "settings-toggle",
-              })
-            }
-            aria-pressed={resolvedCoachMemoryEnabled}
+            onClick={() => setCoachMemoryEnabled((prev) => !prev)}
           >
-            {resolvedCoachMemoryEnabled ? "On" : "Off"}
+            {coachMemoryEnabled ? "On" : "Off"}
           </Button>
         </div>
 
@@ -3226,13 +3218,6 @@ export default function App() {
       window.localStorage.getItem("ironai.diagnosticsEnabled") === "true"
     );
   });
-  const [seedDebugEnabled, setSeedDebugEnabled] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return (
-      params.get("debug") === "1" ||
-      window.localStorage.getItem("debugSeed") === "1"
-    );
-  });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -3313,9 +3298,7 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("debug") === "1") {
       window.localStorage.setItem("ironai.diagnosticsEnabled", "true");
-      window.localStorage.setItem("debugSeed", "1");
       setDiagnosticsEnabled(true);
-      setSeedDebugEnabled(true);
     }
   }, []);
 
@@ -3383,9 +3366,7 @@ export default function App() {
     const runSeed = async () => {
       setExerciseSeedState({ status: "loading" });
       const result = await seedExercisesIfNeeded();
-      if (result?.status === "success" || result?.status === "fallback") {
-        await repairSeededExercises({ force: false });
-      }
+      await repairSeededExercises({ force: false });
       if (cancelled) return;
       setExerciseSeedState({
         status: result?.status ?? "error",
@@ -3410,12 +3391,6 @@ export default function App() {
 
   const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
     const id = await startWorkoutFromTemplate(templateId, options);
-    setWorkoutId(id);
-    setTab("workout");
-  };
-
-  const handleOpenWorkout = (id) => {
-    if (!id) return;
     setWorkoutId(id);
     setTab("workout");
   };
@@ -3514,17 +3489,12 @@ export default function App() {
             launchContext={coachLaunchContext}
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
             onNotify={notify}
-            onOpenTemplate={handleOpenTemplate}
-            onOpenWorkout={handleOpenWorkout}
             onNavigateToGyms={(options = {}) => {
-              const gymView = options.spaceId
-                ? { type: "detail", spaceId: options.spaceId }
-                : options.create
-                  ? { type: "form", mode: "create", spaceId: null }
-                  : null;
               setPendingMoreNavigation({
                 section: "gyms",
-                gymView,
+                gymView: options.create
+                  ? { type: "form", mode: "create", spaceId: null }
+                  : null,
               });
               setTab("more");
             }}
@@ -3595,7 +3565,7 @@ export default function App() {
           ))}
         </div>
       </nav>
-      {seedDebugEnabled ? <SeedDebugMiniPanel /> : null}
     </div>
   );
 }
+123
