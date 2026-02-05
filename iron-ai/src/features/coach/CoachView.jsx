@@ -1899,6 +1899,8 @@ export default function CoachView({
         </div>
       ) : null}
 
+
+
       {actionConfirmOpen ? (
         <div className="coach-modal" role="dialog" aria-modal="true">
           <div
