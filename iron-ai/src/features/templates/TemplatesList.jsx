@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createTemplate, deleteTemplate, listTemplates } from "../../db";
-import { Button, Card, CardBody, PageHeader } from "../../components/ui";
+import { BottomSheet, Button, Card, CardBody, Input, Label, PageHeader } from "../../components/ui";
 
 export default function TemplatesList({ onSelectTemplate, onCreateTemplateAndEdit, onNotify }) {
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [templateName, setTemplateName] = useState("");
+  const inputRef = useRef(null);
 
   const fetchTemplates = useCallback(async () => {
     setError(null);
@@ -44,15 +47,20 @@ export default function TemplatesList({ onSelectTemplate, onCreateTemplateAndEdi
     }
   };
 
-  const handleCreateTemplate = async () => {
-    const name = window.prompt("Enter new template name:");
-    const trimmed = (name ?? "").trim();
+  const handleCreateTemplate = () => {
+    setTemplateName("");
+    setCreateModalOpen(true);
+  };
+
+  const handleConfirmCreate = async () => {
+    const trimmed = templateName.trim();
     if (!trimmed) return;
 
     try {
       const newTemplateId = await createTemplate({ name: trimmed });
-      // Optional: refresh list so it includes the newly created template if user navigates back
       await fetchTemplates();
+      setCreateModalOpen(false);
+      setTemplateName("");
       onCreateTemplateAndEdit?.(newTemplateId);
     } catch (err) {
       onNotify?.(`Error creating template: ${err?.message ?? String(err)}`, {
@@ -60,6 +68,29 @@ export default function TemplatesList({ onSelectTemplate, onCreateTemplateAndEdi
       });
     }
   };
+
+  const handleCloseCreateModal = () => {
+    setCreateModalOpen(false);
+    setTemplateName("");
+  };
+
+  const handleKeyDown = (event) => {
+    if (event.key === "Enter" && templateName.trim()) {
+      event.preventDefault();
+      handleConfirmCreate();
+    }
+  };
+
+  // Auto-focus input when modal opens
+  useEffect(() => {
+    if (createModalOpen && inputRef.current) {
+      // Small delay to ensure modal is rendered
+      const timeout = setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+      return () => clearTimeout(timeout);
+    }
+  }, [createModalOpen]);
 
   const handleDeleteTemplate = async (templateId) => {
     if (!window.confirm("Are you sure you want to delete this template?")) return;
@@ -169,6 +200,41 @@ export default function TemplatesList({ onSelectTemplate, onCreateTemplateAndEdi
           )}
         </div>
       ) : null}
+
+      <BottomSheet
+        open={createModalOpen}
+        onClose={handleCloseCreateModal}
+        title="Create Template"
+        ariaLabel="Create new template"
+      >
+        <div className="ui-stack">
+          <div>
+            <Label htmlFor="template-name">Template Name</Label>
+            <Input
+              id="template-name"
+              ref={inputRef}
+              type="text"
+              value={templateName}
+              onChange={(e) => setTemplateName(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="e.g., Push Day, Leg Day"
+            />
+          </div>
+          <div className="ui-row ui-row--wrap">
+            <Button variant="secondary" size="sm" onClick={handleCloseCreateModal}>
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleConfirmCreate}
+              disabled={!templateName.trim()}
+            >
+              Create
+            </Button>
+          </div>
+        </div>
+      </BottomSheet>
     </div>
   );
 }

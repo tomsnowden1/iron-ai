@@ -1279,24 +1279,6 @@ export default function CoachView({
                             <span>Fingerprint: {trustFingerprintLabel}</span>
                           </div>
                         ) : null}
-                        <div className="ui-row ui-row--wrap">
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleMakeTemplate(message)}
-                            disabled={makeTemplateDisabled}
-                          >
-                            Make template
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => setGymPickerOpen(true)}
-                            disabled={changeGymDisabled}
-                          >
-                            Change gym
-                          </Button>
-                        </div>
                         {showRequesting ? (
                           <div className="chat-actions__status">
                             Requesting template JSON…
