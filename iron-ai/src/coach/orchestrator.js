@@ -297,7 +297,11 @@ export async function runCoachTurn({
     const assistantToolCallMessage = buildAssistantToolCallMessage(streamResult.toolCalls);
     history = [...history, assistantToolCallMessage];
     conversation = [
-      ...buildSystemMessages({ contextSnapshot, requestContext }),
+      ...buildSystemMessages({
+        contextSnapshot,
+        memorySummary: memorySummaryData,
+        requestContext,
+      }),
       ...history,
     ];
 
@@ -410,7 +414,11 @@ export async function runCoachTurn({
 
     history = [...history, ...pendingToolMessages];
     conversation = [
-      ...buildSystemMessages({ contextSnapshot, requestContext }),
+      ...buildSystemMessages({
+        contextSnapshot,
+        memorySummary: memorySummaryData,
+        requestContext,
+      }),
       ...history,
     ];
   }

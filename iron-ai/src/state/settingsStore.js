@@ -6,11 +6,18 @@ import { testOpenAIKey as testOpenAIKeyRequest } from "../services/openai";
 
 const SETTINGS_ID = 1;
 const COACH_MEMORY_ENABLED_KEY = "ironai.coachMemoryEnabled";
+const COACH_CHAT_STATE_VERSION = 1;
+const MAX_COACH_MESSAGES = 80;
+const MAX_COACH_HISTORY = 160;
+const MAX_COACH_TEXT_LENGTH = 8000;
 const LEGACY_COACH_MEMORY_ENABLED_KEYS = [
   "ironai.coach_memory_enabled",
   "coachMemoryEnabled",
   "coach_memory_enabled",
 ];
+
+const COACH_MESSAGE_ROLES = new Set(["user", "assistant"]);
+const COACH_HISTORY_ROLES = new Set(["user", "assistant", "tool"]);
 
 function getLocalStorage() {
   if (typeof globalThis === "undefined") return null;
@@ -115,6 +122,103 @@ export async function setCoachMemoryEnabled(nextValue, options = {}) {
   await updateSettings({ coach_memory_enabled: value });
   writeCoachMemoryEnabledToStorage(value);
   return value;
+}
+
+function truncateText(value) {
+  const text = String(value ?? "");
+  if (text.length <= MAX_COACH_TEXT_LENGTH) return text;
+  return text.slice(0, MAX_COACH_TEXT_LENGTH);
+}
+
+function normalizeCoachMessage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const role = String(raw.role ?? "").trim();
+  if (!COACH_MESSAGE_ROLES.has(role)) return null;
+  return {
+    id: Number.isFinite(Number(raw.id)) ? Number(raw.id) : Date.now(),
+    role,
+    content: truncateText(raw.content),
+    meta: raw.meta && typeof raw.meta === "object" ? raw.meta : null,
+    createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
+  };
+}
+
+function normalizeToolCall(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = String(raw.function?.name ?? raw.name ?? "").trim();
+  if (!name) return null;
+  return {
+    id: String(raw.id ?? "").trim() || `tool_${Date.now()}`,
+    type: "function",
+    function: {
+      name,
+      arguments: truncateText(raw.function?.arguments ?? raw.arguments ?? ""),
+    },
+  };
+}
+
+function normalizeCoachHistoryMessage(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const role = String(raw.role ?? "").trim();
+  if (!COACH_HISTORY_ROLES.has(role)) return null;
+  const normalized = {
+    role,
+    content: truncateText(raw.content),
+  };
+  if (role === "tool") {
+    const toolCallId = String(raw.tool_call_id ?? "").trim();
+    if (!toolCallId) return null;
+    normalized.tool_call_id = toolCallId;
+  }
+  if (role === "assistant" && Array.isArray(raw.tool_calls)) {
+    const toolCalls = raw.tool_calls
+      .map((entry) => normalizeToolCall(entry))
+      .filter(Boolean);
+    if (toolCalls.length) {
+      normalized.tool_calls = toolCalls;
+      normalized.content = typeof raw.content === "string" ? truncateText(raw.content) : "";
+    }
+  }
+  return normalized;
+}
+
+function normalizeCoachChatState(raw) {
+  const state = raw && typeof raw === "object" ? raw : {};
+  const messages = Array.isArray(state.messages)
+    ? state.messages
+        .map((entry) => normalizeCoachMessage(entry))
+        .filter(Boolean)
+        .slice(-MAX_COACH_MESSAGES)
+    : [];
+  const chatHistory = Array.isArray(state.chatHistory)
+    ? state.chatHistory
+        .map((entry) => normalizeCoachHistoryMessage(entry))
+        .filter(Boolean)
+        .slice(-MAX_COACH_HISTORY)
+    : [];
+  return {
+    version: COACH_CHAT_STATE_VERSION,
+    messages,
+    chatHistory,
+    savedAt: Date.now(),
+  };
+}
+
+export async function getCoachChatState() {
+  const settings = await getSettings();
+  return normalizeCoachChatState(settings?.coach_chat_state);
+}
+
+export async function setCoachChatState(nextState) {
+  const normalized = normalizeCoachChatState(nextState);
+  await updateSettings({ coach_chat_state: normalized });
+  return normalized;
+}
+
+export async function clearCoachChatState() {
+  await updateSettings({
+    coach_chat_state: null,
+  });
 }
 
 export async function setOpenAIKey(nextKey) {

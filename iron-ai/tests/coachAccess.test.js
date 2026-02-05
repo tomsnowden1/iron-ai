@@ -18,6 +18,6 @@ describe("coach access", () => {
   it("allows chat when key is present", () => {
     const state = getCoachAccessState({ hasKey: true, keyStatus: "valid" });
     expect(state.canChat).toBe(true);
-    expect(state.message).toMatch(/Key detected/i);
+    expect(state.message).toMatch(/saved on this device/i);
   });
 });
