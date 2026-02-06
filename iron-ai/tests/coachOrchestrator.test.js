@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   createChatCompletion: vi.fn(),
   getCoachRequestContext: vi.fn(),
   getCoachContextSnapshot: vi.fn(),
+  getCoachExerciseCandidates: vi.fn(),
+  getAllExercises: vi.fn(),
   buildContextFingerprint: vi.fn(),
 }));
 
@@ -25,6 +27,11 @@ vi.mock("../src/coach/tools", () => ({
 vi.mock("../src/coach/context", () => ({
   getCoachRequestContext: mocks.getCoachRequestContext,
   getCoachContextSnapshot: mocks.getCoachContextSnapshot,
+  getCoachExerciseCandidates: mocks.getCoachExerciseCandidates,
+}));
+
+vi.mock("../src/db", () => ({
+  getAllExercises: mocks.getAllExercises,
 }));
 
 vi.mock("../src/coach/memory", () => ({
@@ -80,6 +87,16 @@ describe("coach orchestrator", () => {
         buildMs: 1,
       },
     });
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 1, name: "Goblet Squat" },
+      { exerciseId: 2, name: "Leg Press" },
+      { exerciseId: 3, name: "Lunge" },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 1, name: "Goblet Squat" },
+      { id: 2, name: "Leg Press" },
+      { id: 3, name: "Lunge" },
+    ]);
     mocks.buildContextFingerprint.mockResolvedValue({
       algorithm: "sha256",
       hash: "abc123",
@@ -97,6 +114,7 @@ describe("coach orchestrator", () => {
         selectedGym: null,
         equipmentSummary: [],
       },
+      exerciseCandidates: [{ exerciseId: 1, name: "Goblet Squat" }],
     });
     expect(SYSTEM_PROMPT).toMatch(/contextEnabled is false/i);
     const contextMessage = messages.find((entry) =>
@@ -104,6 +122,10 @@ describe("coach orchestrator", () => {
     );
     expect(contextMessage?.content).toContain('"contextEnabled":false');
     expect(contextMessage?.content).toContain('"equipmentSummary":[]');
+    const candidateMessage = messages.find((entry) =>
+      entry.content.startsWith("Exercise candidates (authoritative JSON")
+    );
+    expect(candidateMessage?.content).toContain('"exerciseId":1');
   });
 
   it("retries once with repair prompt when workout output is invalid", async () => {
@@ -118,7 +140,7 @@ describe("coach orchestrator", () => {
         {
           message: {
             content: `\`\`\`json
-{"name":"Leg Day","exercises":[{"name":"Goblet Squat","sets":3,"reps":12}]}
+{"contractVersion":"coach_action_v1","assistantText":"Leg day is ready.","actionDraft":{"kind":"create_workout","confidence":0.9,"risk":"low","title":"Leg Day","summary":"Leg workout","payload":{"name":"Leg Day","exercises":[{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]},{"exerciseId":3,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]}]}}}
 \`\`\``,
           },
         },
@@ -145,7 +167,10 @@ describe("coach orchestrator", () => {
     });
 
     expect(mocks.createChatCompletion).toHaveBeenCalledTimes(1);
+    const repairMessages = mocks.createChatCompletion.mock.calls[0]?.[0]?.messages ?? [];
+    const repairPrompt = repairMessages[repairMessages.length - 1]?.content ?? "";
+    expect(repairPrompt).toMatch(/candidate/i);
     expect(result.responseValidation.status).toBe("repaired");
-    expect(result.assistant).toMatch(/Goblet Squat/);
+    expect(result.actionDraft?.payload?.exercises?.length).toBeGreaterThan(0);
   });
 });

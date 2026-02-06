@@ -47,6 +47,19 @@ function parsePositiveInteger(value, fallback = null) {
   return parsed;
 }
 
+function resolveSetsRepsFromSetArray(setEntries) {
+  const setsArray = Array.isArray(setEntries) ? setEntries : [];
+  if (!setsArray.length) return { sets: null, reps: null };
+  const sets = setsArray.length;
+  const repsFromEntries = setsArray
+    .map((set) => parsePositiveInteger(set?.reps, null))
+    .filter((value) => value != null);
+  return {
+    sets,
+    reps: repsFromEntries.length ? repsFromEntries[0] : null,
+  };
+}
+
 function extractJsonObjectCandidate(text) {
   const value = String(text ?? "").trim();
   if (!value) return null;
@@ -61,7 +74,112 @@ function extractJsonObjectCandidate(text) {
   return null;
 }
 
-function validateTemplateDraft(raw, fallbackName, templateTool) {
+function cleanExerciseName(value) {
+  return String(value ?? "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
+}
+
+function parseWorkoutListLine(line) {
+  const raw = String(line ?? "").trim();
+  if (!raw) return null;
+  const withoutPrefix = raw.replace(/^\s*(?:[-*]\s+|\d+[.)]\s+)/, "").trim();
+  if (!withoutPrefix) return null;
+
+  const setsOfRepsMatch = withoutPrefix.match(
+    /^(.+?)\s*[:\-–]?\s*(\d+)\s*sets?\s*(?:of)?\s*(\d+)(?:\s*[-–]\s*\d+)?\s*reps?\b/i
+  );
+  if (setsOfRepsMatch) {
+    const name = cleanExerciseName(setsOfRepsMatch[1]);
+    const sets = parsePositiveInteger(setsOfRepsMatch[2], null);
+    const reps = parsePositiveInteger(setsOfRepsMatch[3], null);
+    if (!name || sets == null || reps == null) return null;
+    return { name, exerciseName: name, sets, reps };
+  }
+
+  const timesMatch = withoutPrefix.match(/^(.+?)\s*[:\-–]?\s*(\d+)\s*[x×]\s*(\d+)\b/i);
+  if (timesMatch) {
+    const name = cleanExerciseName(timesMatch[1]);
+    const sets = parsePositiveInteger(timesMatch[2], null);
+    const reps = parsePositiveInteger(timesMatch[3], null);
+    if (!name || sets == null || reps == null) return null;
+    return { name, exerciseName: name, sets, reps };
+  }
+
+  return null;
+}
+
+function resolveTemplateDraftFromPlainText(text) {
+  const lines = String(text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return { draft: null, found: false, error: null, source: "assistantText:list", rawJson: null };
+  }
+
+  const exercises = lines.map(parseWorkoutListLine).filter(Boolean);
+  if (exercises.length < 3) {
+    return { draft: null, found: false, error: null, source: "assistantText:list", rawJson: null };
+  }
+
+  const headingLine =
+    lines.find((line) => /workout/i.test(line) && /here|today|draft|plan|routine/i.test(line)) ??
+    null;
+  const inferredName = headingLine
+    ? cleanExerciseName(
+        headingLine
+          .replace(/^.*?\b(?:a|an|the)\b\s*/i, "")
+          .replace(/[:\-–].*$/, "")
+      )
+    : "Coach Workout Draft";
+  const name = inferredName || "Coach Workout Draft";
+
+  return {
+    draft: {
+      name,
+      exercises,
+      needsReview: exercises.map((entry) => ({
+        requestedName: entry.name ?? entry.exerciseName ?? "Unknown exercise",
+        suggestions: [],
+      })),
+    },
+    found: true,
+    error: null,
+    source: "assistantText:list",
+    rawJson: null,
+    requiresReview: true,
+  };
+}
+
+function normalizeNeedsReviewEntries(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  return list
+    .map((entry) => {
+      const requestedName = String(entry?.requestedName ?? "").trim();
+      if (!requestedName) return null;
+      const suggestions = Array.isArray(entry?.suggestions)
+        ? entry.suggestions
+            .map((suggestion) => {
+              const exerciseId = parsePositiveInteger(suggestion?.exerciseId, null);
+              const name = String(suggestion?.name ?? "").trim();
+              if (exerciseId == null || !name) return null;
+              return { exerciseId, name };
+            })
+            .filter(Boolean)
+        : [];
+      return { requestedName, suggestions };
+    })
+    .filter(Boolean);
+}
+
+function validateTemplateDraft(
+  raw,
+  fallbackName,
+  templateTool,
+  { strictExerciseIds = false } = {}
+) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { draft: null, error: "Template draft must be an object." };
   }
@@ -77,15 +195,18 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
   if (!name) {
     return { draft: null, error: "Template name is required." };
   }
-  if (!Array.isArray(raw.exercises) || raw.exercises.length === 0) {
+  const rawExercises = Array.isArray(raw.exercises) ? raw.exercises : [];
+  const normalizedNeedsReview = normalizeNeedsReviewEntries(raw.needsReview);
+  if (!rawExercises.length && normalizedNeedsReview.length === 0) {
     return {
       draft: null,
-      error: "Template exercises must be a non-empty array.",
+      error: "Template draft must include exercises or needsReview entries.",
     };
   }
+  const unresolvedNeedsReview = [];
   const exercises = [];
-  for (let i = 0; i < raw.exercises.length; i += 1) {
-    const entry = raw.exercises[i];
+  for (let i = 0; i < rawExercises.length; i += 1) {
+    const entry = rawExercises[i];
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       return {
         draft: null,
@@ -105,14 +226,21 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
         error: `exercises[${i}] must include exerciseId or name.`,
       };
     }
-    const sets = parseIntegerValue(entry.sets);
+    const setsFromArray = resolveSetsRepsFromSetArray(entry.sets);
+    const sets =
+      parseIntegerValue(entry.sets) ??
+      parseIntegerValue(entry.targetSets) ??
+      setsFromArray.sets;
     if (sets == null) {
       return {
         draft: null,
         error: `exercises[${i}].sets must be a number.`,
       };
     }
-    const reps = parseIntegerValue(entry.reps);
+    const reps =
+      parseIntegerValue(entry.reps) ??
+      parseIntegerValue(entry.targetReps) ??
+      setsFromArray.reps;
     if (reps == null) {
       return {
         draft: null,
@@ -136,6 +264,11 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
     };
     if (exerciseId != null) {
       normalizedExercise.exerciseId = exerciseId;
+    } else if (strictExerciseIds && exerciseName) {
+      unresolvedNeedsReview.push({
+        requestedName: exerciseName,
+        suggestions: [],
+      });
     }
     if (exerciseName) {
       normalizedExercise.name = exerciseName;
@@ -153,18 +286,31 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
   const draft = {
     name,
     exercises,
+    ...(normalizedNeedsReview.length || unresolvedNeedsReview.length
+      ? {
+          needsReview: [...normalizedNeedsReview, ...unresolvedNeedsReview],
+        }
+      : {}),
     ...(spaceId != null ? { spaceId } : {}),
   };
-  if (templateTool) {
+  const requiresReview =
+    strictExerciseIds &&
+    Array.isArray(draft.needsReview) &&
+    draft.needsReview.length > 0;
+  if (templateTool && !requiresReview) {
     const validation = validateToolInput(templateTool, draft);
     if (!validation.valid) {
       return { draft: null, error: validation.errors.join("; ") };
     }
   }
-  return { draft, error: null };
+  return { draft, error: null, requiresReview };
 }
 
-function resolveTemplateDraftFromActionDraft(actionDraft, templateTool) {
+function resolveTemplateDraftFromActionDraft(
+  actionDraft,
+  templateTool,
+  { strictExerciseIds = false } = {}
+) {
   if (!actionDraft) return { draft: null, error: null, found: false, rawJson: null };
   if (
     actionDraft.kind !== ActionDraftKinds.create_template &&
@@ -176,7 +322,9 @@ function resolveTemplateDraftFromActionDraft(actionDraft, templateTool) {
   const fallbackName = payload.name ?? payload.title ?? actionDraft.title ?? null;
   const raw = { ...payload };
   if (!raw.name && fallbackName) raw.name = fallbackName;
-  const result = validateTemplateDraft(raw, fallbackName, templateTool);
+  const result = validateTemplateDraft(raw, fallbackName, templateTool, {
+    strictExerciseIds,
+  });
   return {
     ...result,
     found: true,
@@ -184,7 +332,11 @@ function resolveTemplateDraftFromActionDraft(actionDraft, templateTool) {
   };
 }
 
-function resolveTemplateDraftFromText(text, templateTool) {
+function resolveTemplateDraftFromText(
+  text,
+  templateTool,
+  { strictExerciseIds = false } = {}
+) {
   const blocks = extractFencedCodeBlocks(text);
 
   const evaluateBlocks = (targetBlocks, source) => {
@@ -202,7 +354,8 @@ function resolveTemplateDraftFromText(text, templateTool) {
       if (parsed?.actionDraft) {
         const fromAction = resolveTemplateDraftFromActionDraft(
           parsed.actionDraft,
-          templateTool
+          templateTool,
+          { strictExerciseIds }
         );
         if (fromAction.draft) {
           return {
@@ -211,11 +364,14 @@ function resolveTemplateDraftFromText(text, templateTool) {
             error: null,
             source,
             rawJson: block.content,
+            requiresReview: Boolean(fromAction.requiresReview),
           };
         }
         if (fromAction.error) lastError = fromAction.error;
       }
-      const normalized = validateTemplateDraft(parsed, null, templateTool);
+      const normalized = validateTemplateDraft(parsed, null, templateTool, {
+        strictExerciseIds,
+      });
       if (normalized.draft) {
         return {
           draft: normalized.draft,
@@ -223,22 +379,44 @@ function resolveTemplateDraftFromText(text, templateTool) {
           error: null,
           source,
           rawJson: block.content,
+          requiresReview: Boolean(normalized.requiresReview),
         };
       }
       if (normalized.error) lastError = normalized.error;
     }
-    return { draft: null, found: foundCandidate, error: lastError, source, rawJson };
+    return {
+      draft: null,
+      found: foundCandidate,
+      error: lastError,
+      source,
+      rawJson,
+      requiresReview: false,
+    };
   };
 
   const jsonBlocks = blocks.filter((block) => block.language === "json");
   const jsonResult = jsonBlocks.length
     ? evaluateBlocks(jsonBlocks, "codeFence:json")
-    : { draft: null, found: false, error: null, source: null, rawJson: null };
+    : {
+        draft: null,
+        found: false,
+        error: null,
+        source: null,
+        rawJson: null,
+        requiresReview: false,
+      };
   if (jsonResult.draft) return jsonResult;
 
   const anyResult = blocks.length
     ? evaluateBlocks(blocks, "codeFence:any")
-    : { draft: null, found: false, error: null, source: null, rawJson: null };
+    : {
+        draft: null,
+        found: false,
+        error: null,
+        source: null,
+        rawJson: null,
+        requiresReview: false,
+      };
   if (anyResult.draft) return anyResult;
 
   const rawJsonCandidate = extractJsonObjectCandidate(text);
@@ -256,7 +434,8 @@ function resolveTemplateDraftFromText(text, templateTool) {
     if (parsed?.actionDraft) {
       const fromAction = resolveTemplateDraftFromActionDraft(
         parsed.actionDraft,
-        templateTool
+        templateTool,
+        { strictExerciseIds }
       );
       if (fromAction.draft) {
         return {
@@ -265,10 +444,13 @@ function resolveTemplateDraftFromText(text, templateTool) {
           error: null,
           source: "raw:json",
           rawJson: rawJsonCandidate,
+          requiresReview: Boolean(fromAction.requiresReview),
         };
       }
     }
-    const normalized = validateTemplateDraft(parsed, null, templateTool);
+    const normalized = validateTemplateDraft(parsed, null, templateTool, {
+      strictExerciseIds,
+    });
     if (normalized.draft) {
       return {
         draft: normalized.draft,
@@ -276,6 +458,7 @@ function resolveTemplateDraftFromText(text, templateTool) {
         error: null,
         source: "raw:json",
         rawJson: rawJsonCandidate,
+        requiresReview: Boolean(normalized.requiresReview),
       };
     }
     return {
@@ -287,35 +470,48 @@ function resolveTemplateDraftFromText(text, templateTool) {
     };
   }
 
+  const plainTextResult = resolveTemplateDraftFromPlainText(text);
+  if (plainTextResult.draft) return plainTextResult;
+
   return {
     draft: null,
     found: jsonResult.found || anyResult.found,
     error: jsonResult.error ?? anyResult.error,
     source: jsonResult.source ?? anyResult.source,
     rawJson: jsonResult.rawJson ?? anyResult.rawJson ?? rawJsonCandidate,
+    requiresReview: false,
   };
 }
 
 export function resolveTemplateDraftInfo({ actionDraft, text, templateTool }) {
-  const actionResult = resolveTemplateDraftFromActionDraft(actionDraft, templateTool);
+  const strictExerciseIds = true;
+  const actionResult = resolveTemplateDraftFromActionDraft(actionDraft, templateTool, {
+    strictExerciseIds,
+  });
   if (actionResult.draft) {
     return {
       draft: actionResult.draft,
       found: true,
-      valid: true,
-      error: null,
+      valid: !actionResult.requiresReview,
+      error: actionResult.requiresReview
+        ? "Some exercises need review before saving."
+        : null,
       source: "actionDraft",
       rawJson: actionResult.rawJson,
     };
   }
 
-  const textResult = resolveTemplateDraftFromText(text, templateTool);
+  const textResult = resolveTemplateDraftFromText(text, templateTool, {
+    strictExerciseIds,
+  });
   if (textResult.draft) {
     return {
       draft: textResult.draft,
       found: true,
-      valid: true,
-      error: null,
+      valid: !textResult.requiresReview,
+      error: textResult.requiresReview
+        ? "Some exercises need review before saving."
+        : null,
       source: textResult.source,
       rawJson: textResult.rawJson,
     };

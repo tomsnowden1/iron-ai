@@ -1,14 +1,8 @@
 import { getAllExercises } from "../db";
 import { createCustomExercise } from "../exercises/customExercise";
-import { getExerciseAliases } from "../exercises/data";
-import { slugify } from "../seed/seedUtils";
+import { resolveExerciseId } from "./exerciseResolver";
 
 const NAME_FIELDS = ["name", "exerciseName", "exercise", "title", "label"];
-
-function normalizeName(value) {
-  const normalized = slugify(value);
-  return normalized ? normalized.toLowerCase() : "";
-}
 
 function extractDraftName(draft) {
   if (typeof draft === "string") return draft;
@@ -34,35 +28,62 @@ function parseCount(value) {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function addLookupEntry(lookup, label, exercise) {
-  const key = normalizeName(label);
-  if (!key || lookup.has(key)) return;
-  lookup.set(key, exercise);
+function normalizeCandidateExercise(candidate, byId) {
+  if (!candidate || typeof candidate !== "object") return null;
+  if (candidate.id != null && byId.has(candidate.id)) {
+    return byId.get(candidate.id);
+  }
+  const candidateId = Number.parseInt(candidate.exerciseId, 10);
+  if (Number.isFinite(candidateId) && byId.has(candidateId)) {
+    return byId.get(candidateId);
+  }
+  if (candidate.id != null || candidate.exerciseId != null) {
+    const id = Number(candidate.id ?? candidate.exerciseId);
+    if (Number.isFinite(id) && id > 0) {
+      return {
+        id,
+        name: String(candidate.name ?? "").trim() || `Exercise ${id}`,
+        aliases: Array.isArray(candidate.aliases) ? candidate.aliases : [],
+      };
+    }
+  }
+  return null;
 }
 
-function buildExerciseLookup(exercises) {
-  const lookup = new Map();
-  exercises.forEach((exercise) => {
-    addLookupEntry(lookup, exercise?.name, exercise);
-    getExerciseAliases(exercise).forEach((alias) => {
-      addLookupEntry(lookup, alias, exercise);
-    });
-  });
-  return lookup;
+function resolveCandidatePool(candidates, byId, fallbackExercises) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const normalized = list
+    .map((candidate) => normalizeCandidateExercise(candidate, byId))
+    .filter(Boolean);
+  if (normalized.length) return normalized;
+  return fallbackExercises;
 }
 
-export async function resolveTemplateExercises(draftExercises, { createMissing } = {}) {
+export async function resolveTemplateExercises(
+  draftExercises,
+  { createMissing, candidates, allExercises, maxSuggestions } = {}
+) {
   const list = Array.isArray(draftExercises) ? draftExercises : [];
   if (!list.length) {
-    return { resolvedExercises: [], mapping: [], mappedCount: 0, createdCustomCount: 0 };
+    return {
+      resolvedExercises: [],
+      mapping: [],
+      mappedCount: 0,
+      createdCustomCount: 0,
+      unresolvedCount: 0,
+      needsReview: [],
+    };
   }
 
-  const exercises = await getAllExercises();
+  const exercises = Array.isArray(allExercises) && allExercises.length
+    ? allExercises
+    : await getAllExercises();
   const byId = new Map(exercises.map((exercise) => [exercise.id, exercise]));
-  const byName = buildExerciseLookup(exercises);
+  const candidatePool = resolveCandidatePool(candidates, byId, exercises);
 
   const resolvedExercises = [];
   const mapping = [];
+  const needsReview = [];
   let createdCustomCount = 0;
 
   for (const draft of list) {
@@ -71,15 +92,33 @@ export async function resolveTemplateExercises(draftExercises, { createMissing }
     let resolved = null;
     let matchSource = null;
     let createdCustom = false;
+    let review = null;
 
-    if (draftName) {
-      resolved = byName.get(normalizeName(draftName)) ?? null;
-      if (resolved) matchSource = "name";
-    }
-
-    if (!resolved && draftId != null) {
+    if (draftId != null) {
       resolved = byId.get(draftId) ?? null;
       if (resolved) matchSource = "id";
+    }
+
+    if (!resolved && draftName) {
+      const result = resolveExerciseId(draftName, {
+        candidates: candidatePool,
+        allExercises: exercises,
+        maxSuggestions,
+      });
+      if (result.status === "resolved") {
+        resolved = byId.get(result.exerciseId) ?? null;
+        matchSource = result.matchedBy ?? "name";
+      } else {
+        review = result;
+      }
+    }
+
+    if (!resolved && !review && draftId != null) {
+      review = {
+        status: "needsReview",
+        requestedName: draftName || `Exercise #${draftId}`,
+        suggestions: [],
+      };
     }
 
     if (!resolved && draftName && createMissing) {
@@ -88,8 +127,14 @@ export async function resolveTemplateExercises(draftExercises, { createMissing }
       createdCustom = true;
       matchSource = "custom";
       createdCustomCount += 1;
-      addLookupEntry(byName, draftName, resolved);
       byId.set(newId, resolved);
+    }
+
+    if (review && !createdCustom) {
+      needsReview.push({
+        requestedName: review.requestedName || draftName || "Unknown exercise",
+        suggestions: Array.isArray(review.suggestions) ? review.suggestions : [],
+      });
     }
 
     resolvedExercises.push({
@@ -107,10 +152,24 @@ export async function resolveTemplateExercises(draftExercises, { createMissing }
       resolvedName: resolved?.name ?? null,
       createdCustom,
       matchSource,
+      needsReview: review
+        ? {
+            requestedName: review.requestedName || draftName || "Unknown exercise",
+            suggestions: Array.isArray(review.suggestions) ? review.suggestions : [],
+          }
+        : null,
     });
   }
 
   const mappedCount = resolvedExercises.filter((item) => item.exerciseId != null).length;
+  const unresolvedCount = Math.max(0, resolvedExercises.length - mappedCount);
 
-  return { resolvedExercises, mapping, mappedCount, createdCustomCount };
+  return {
+    resolvedExercises,
+    mapping,
+    mappedCount,
+    createdCustomCount,
+    unresolvedCount,
+    needsReview,
+  };
 }

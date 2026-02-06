@@ -5,7 +5,10 @@ import {
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
+  isStartWorkoutIntentText,
+  isTemplateIntentText,
   resolveCoachErrorMessage,
+  sanitizeCoachAssistantText,
   resolveCoachDisplayText,
 } from "../src/features/coach/coachViewUiModel";
 
@@ -79,5 +82,20 @@ describe("coach view UX model", () => {
       accessState: { canChat: true, keyMode: "server" },
     });
     expect(message).toMatch(/Coach server error/i);
+  });
+
+  it("removes JSON plumbing text from assistant display", () => {
+    const cleaned = sanitizeCoachAssistantText(`Here is the template in JSON format:
+\`\`\`json
+{"name":"Leg Day","exercises":[{"name":"Squat","sets":3,"reps":8}]}
+\`\`\`
+Use this template payload.`);
+    expect(cleaned).toBe("");
+  });
+
+  it("detects quick-action intent text for start/template", () => {
+    expect(isTemplateIntentText("make it a template")).toBe(true);
+    expect(isStartWorkoutIntentText("start workout")).toBe(true);
+    expect(isTemplateIntentText("how are you")).toBe(false);
   });
 });

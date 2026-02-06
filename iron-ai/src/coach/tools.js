@@ -623,13 +623,16 @@ export const toolDefinitions = [
         mapping,
         mappedCount,
         createdCustomCount,
-      } = await resolveTemplateExercises(draftExercises, { createMissing: true });
+        needsReview,
+      } = await resolveTemplateExercises(draftExercises, { createMissing: false });
 
       if (mappedCount !== draftExercises.length) {
         console.warn(
           `template_create mapping mismatch (${mappedCount}/${draftExercises.length}).`
         );
-        throw new Error("Unable to resolve all exercises for this template.");
+        throw new Error(
+          `Unable to resolve all exercises for this template.${needsReview?.length ? " Review unresolved exercises first." : ""}`
+        );
       }
 
       console.info(
@@ -714,7 +717,7 @@ export const toolDefinitions = [
       }
       let resolvedExercises = exercises ?? null;
       if (!templateId && Array.isArray(exercises) && exercises.length) {
-        const result = await resolveTemplateExercises(exercises, { createMissing: true });
+        const result = await resolveTemplateExercises(exercises, { createMissing: false });
         if (result.mappedCount !== exercises.length) {
           console.warn(
             `planned_workout mapping mismatch (${result.mappedCount}/${exercises.length}).`

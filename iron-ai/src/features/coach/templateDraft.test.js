@@ -65,14 +65,16 @@ All set.`;
       text,
       templateTool,
     });
-    expect(result.valid).toBe(true);
+    expect(result.valid).toBe(false);
+    expect(result.error).toMatch(/need review/i);
     expect(result.draft?.exercises?.[0]?.exerciseId).toBeUndefined();
     expect(result.draft?.exercises?.[0]?.name).toBe("Goblet Squat");
+    expect(result.draft?.needsReview?.[0]?.requestedName).toBe("Goblet Squat");
   });
 
   it("accepts raw JSON without fenced blocks", () => {
     const text =
-      '{"name":"Leg Day","exercises":[{"name":"Romanian Deadlift","sets":4,"reps":8}]}';
+      '{"name":"Leg Day","exercises":[{"exerciseId":12,"name":"Romanian Deadlift","sets":4,"reps":8}]}';
     const result = resolveTemplateDraftInfo({
       actionDraft: null,
       text,
@@ -89,7 +91,7 @@ All set.`;
         title: "Leg Draft",
         payload: {
           name: "Leg Draft",
-          exercises: [{ name: "Leg Press", sets: 3, reps: 12 }],
+          exercises: [{ exerciseId: 7, name: "Leg Press", sets: 3, reps: 12 }],
         },
       },
       text: "",
@@ -97,6 +99,59 @@ All set.`;
     });
     expect(result.valid).toBe(true);
     expect(result.draft?.name).toBe("Leg Draft");
+  });
+
+  it("normalizes action draft set arrays into numeric sets/reps", () => {
+    const result = resolveTemplateDraftInfo({
+      actionDraft: {
+        kind: "create_workout",
+        title: "Push Draft",
+        payload: {
+          name: "Push Draft",
+          exercises: [
+            {
+              exerciseId: 3,
+              sets: [{ reps: 10 }, { reps: 10 }, { reps: 8 }],
+            },
+          ],
+        },
+      },
+      text: "",
+      templateTool,
+    });
+    expect(result.valid).toBe(true);
+    expect(result.draft?.exercises?.[0]?.sets).toBe(3);
+    expect(result.draft?.exercises?.[0]?.reps).toBe(10);
+  });
+
+  it("builds draft from plain-text workout list so card matches assistant text", () => {
+    const text = `Here's a generic leg workout you can try:
+
+1. **Squats**: 3 sets of 10-12 reps
+2. **Lunges**: 3 sets of 10 reps per leg
+3. **Leg Press**: 3 sets of 10-12 reps
+4. **Calf Raises**: 3 sets of 15 reps
+5. **Deadlifts**: 3 sets of 8-10 reps`;
+
+    const result = resolveTemplateDraftInfo({
+      actionDraft: null,
+      text,
+      templateTool,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.source).toBe("assistantText:list");
+    expect(result.draft?.exercises?.map((entry) => entry.name)).toEqual([
+      "Squats",
+      "Lunges",
+      "Leg Press",
+      "Calf Raises",
+      "Deadlifts",
+    ]);
+    expect(result.draft?.exercises?.map((entry) => entry.sets)).toEqual([3, 3, 3, 3, 3]);
+    expect(result.draft?.exercises?.map((entry) => entry.reps)).toEqual([10, 10, 10, 15, 8]);
+    expect(Array.isArray(result.draft?.needsReview)).toBe(true);
+    expect(result.draft?.needsReview?.length).toBe(5);
   });
 });
 
