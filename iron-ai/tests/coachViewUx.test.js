@@ -5,6 +5,7 @@ import {
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
+  resolveCoachErrorMessage,
   resolveCoachDisplayText,
 } from "../src/features/coach/coachViewUiModel";
 
@@ -62,5 +63,21 @@ describe("coach view UX model", () => {
     expect(draft?.spaceId).toBe(11);
     expect(Array.isArray(draft?.exercises)).toBe(true);
     expect(draft?.exercises?.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces a clear server-key message when OPENAI_API_KEY is missing", () => {
+    const message = resolveCoachErrorMessage({
+      err: { status: 500, message: "Server is missing OPENAI_API_KEY." },
+      accessState: { canChat: true, keyMode: "server" },
+    });
+    expect(message).toMatch(/missing OPENAI_API_KEY/i);
+  });
+
+  it("keeps specific server errors actionable in server-key mode", () => {
+    const message = resolveCoachErrorMessage({
+      err: { status: 500, message: "OpenAI request failed." },
+      accessState: { canChat: true, keyMode: "server" },
+    });
+    expect(message).toMatch(/Coach server error/i);
   });
 });

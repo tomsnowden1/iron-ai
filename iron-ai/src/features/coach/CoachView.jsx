@@ -33,7 +33,11 @@ import {
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
+  isStartWorkoutIntentText,
+  isTemplateIntentText,
   isInternalPromptMessage,
+  resolveCoachErrorMessage,
+  sanitizeCoachAssistantText,
   resolveCoachDisplayText,
 } from "./coachViewUiModel";
 import {
@@ -74,26 +78,6 @@ function getHighestMessageId(messages) {
     if (!Number.isFinite(value)) return highest;
     return Math.max(highest, value);
   }, 0);
-}
-
-function resolveErrorMessage(err, accessState) {
-  if (!accessState?.canChat) return accessState?.message ?? "";
-  if (accessState?.keyMode === "server" && (err?.status === 401 || err?.status === 403)) {
-    return "Coach server access is not enabled. Ask an admin to set ALLOW_COACH_PROD=true.";
-  }
-  if (err?.status === 401 || err?.status === 403) {
-    return "That API key was rejected. Update it in Settings.";
-  }
-  if (err?.status === 429) {
-    return "OpenAI rate limit hit. Please wait and try again.";
-  }
-  if (err?.status >= 500) {
-    return "OpenAI is having trouble right now. Please try again soon.";
-  }
-  if (!err?.status) {
-    return "Network error. Check your connection and try again.";
-  }
-  return "Couldn't reach the coach. Check your connection and try again.";
 }
 
 function summarizeProposalResult(result) {
@@ -185,13 +169,6 @@ const ADJUSTMENT_CHIPS = [
   "Shorter 30 min",
   "Add warmup sets",
 ];
-
-const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
-
-function stripJsonCodeBlocks(value) {
-  const text = String(value ?? "");
-  return text.replace(JSON_CODE_BLOCK_REGEX, "").trim();
-}
 
 function normalizeExerciseName(value) {
   return String(value ?? "").trim().toLowerCase();
@@ -553,7 +530,10 @@ export default function CoachView({
       const previous = i > 0 ? messages[i - 1] : null;
       const followsInternalPrompt =
         message?.role === "assistant" && isInternalPromptMessage(previous);
-      if (followsInternalPrompt && !stripJsonCodeBlocks(message?.content ?? "").trim()) {
+      if (
+        followsInternalPrompt &&
+        !sanitizeCoachAssistantText(message?.content ?? "").trim()
+      ) {
         continue;
       }
       next.push(message);
@@ -728,6 +708,7 @@ export default function CoachView({
         clearInput = false,
         responseMode = "general",
         forceContextEnabled = null,
+        skipUserMessage = false,
       } = options;
 
       setError("");
@@ -735,14 +716,16 @@ export default function CoachView({
       setSending(true);
       if (clearInput) setInput("");
 
-      const userId = (messageIdRef.current += 1);
-      setMessages((prev) => [
-        ...prev,
-        createMessage(userId, "user", trimmed, {
-          displayText: trimmed,
-          status: "ready",
-        }),
-      ]);
+      const userId = skipUserMessage ? null : (messageIdRef.current += 1);
+      if (userId != null) {
+        setMessages((prev) => [
+          ...prev,
+          createMessage(userId, "user", trimmed, {
+            displayText: trimmed,
+            status: "ready",
+          }),
+        ]);
+      }
 
       let streamedId = null;
       try {
@@ -814,7 +797,7 @@ export default function CoachView({
           setRetryMessage("");
         }
 
-        if (result.payloadFingerprint || result.contextContract) {
+        if (userId != null && (result.payloadFingerprint || result.contextContract)) {
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === userId
@@ -856,7 +839,7 @@ export default function CoachView({
           actionDraft: result.actionDraft,
           text: result.assistant,
         });
-        assistantMeta.displayText = stripJsonCodeBlocks(result.assistant);
+        assistantMeta.displayText = sanitizeCoachAssistantText(result.assistant);
         assistantMeta.workoutDraftPayload = draftState.payload;
         assistantMeta.workoutDraftSource = draftState.source;
         assistantMeta.workoutDraftRawJson = draftState.rawJson;
@@ -906,7 +889,7 @@ export default function CoachView({
         if (coachKeyMode === "user" && (err?.status === 401 || err?.status === 403)) {
           void setOpenAIKeyStatus("invalid");
         }
-        setError(resolveErrorMessage(err, accessState));
+        setError(resolveCoachErrorMessage({ err, accessState }));
         setRetryMessage(trimmed);
         if (streamedId) {
           setMessages((prev) => prev.filter((msg) => msg.id !== streamedId));
@@ -944,7 +927,7 @@ export default function CoachView({
   const handleRetry = useCallback(async () => {
     const nextMessage = retryMessage || latestUserContent;
     if (!nextMessage || sending) return;
-    await sendCoachMessage(nextMessage);
+    await sendCoachMessage(nextMessage, { skipUserMessage: true });
   }, [latestUserContent, retryMessage, sendCoachMessage, sending]);
 
   const handleKeyDown = (event) => {
@@ -1773,7 +1756,7 @@ export default function CoachView({
                 message?.meta?.contextSnapshot?.equipmentCount ??
                 gymEquipmentCount;
               const cleanedAssistantText = isAssistant
-                ? stripJsonCodeBlocks(message?.meta?.displayText ?? message.content)
+                ? sanitizeCoachAssistantText(message?.meta?.displayText ?? message.content)
                 : message.content;
               const displayText = resolveCoachDisplayText({
                 role: message.role,

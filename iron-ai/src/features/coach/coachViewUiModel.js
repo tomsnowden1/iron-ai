@@ -24,6 +24,63 @@ export function getCoachWorkoutActionConfig({ debugEnabled }) {
   };
 }
 
+const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
+const JSON_PLUMBING_LINE_REGEX =
+  /^.*(\bjson\b|fenced|code block|template format|template payload).*$\n?/gim;
+const TEMPLATE_INTENT_REGEX =
+  /\b(make|create|save|turn)\b[\w\s]*\btemplate\b|\btemplate\b[\w\s]*\b(save|create|make)\b/i;
+const START_WORKOUT_INTENT_REGEX =
+  /\b(start|begin|launch|run)\b[\w\s]*\b(workout|session)\b|\badd\b[\w\s]*\btoday\b/i;
+
+export function sanitizeCoachAssistantText(value) {
+  const text = String(value ?? "");
+  const withoutBlocks = text.replace(JSON_CODE_BLOCK_REGEX, "");
+  const withoutPlumbing = withoutBlocks.replace(JSON_PLUMBING_LINE_REGEX, "");
+  return withoutPlumbing.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+export function isTemplateIntentText(value) {
+  return TEMPLATE_INTENT_REGEX.test(String(value ?? ""));
+}
+
+export function isStartWorkoutIntentText(value) {
+  return START_WORKOUT_INTENT_REGEX.test(String(value ?? ""));
+}
+
+export function resolveCoachErrorMessage({ err, accessState }) {
+  if (!accessState?.canChat) return accessState?.message ?? "";
+
+  const status = Number(err?.status);
+  const rawMessage = String(err?.message ?? "").trim();
+
+  if (accessState?.keyMode === "server" && (status === 401 || status === 403)) {
+    return "Coach server access is not enabled. Ask an admin to set ALLOW_COACH_PROD=true.";
+  }
+
+  if (accessState?.keyMode === "server" && status >= 500) {
+    if (/openai_api_key/i.test(rawMessage)) {
+      return "Coach server is missing OPENAI_API_KEY. Add it to your local env and restart the dev server.";
+    }
+    if (rawMessage) {
+      return `Coach server error: ${rawMessage}`;
+    }
+  }
+
+  if (status === 401 || status === 403) {
+    return "That API key was rejected. Update it in Settings.";
+  }
+  if (status === 429) {
+    return "OpenAI rate limit hit. Please wait and try again.";
+  }
+  if (status >= 500) {
+    return rawMessage || "OpenAI is having trouble right now. Please try again soon.";
+  }
+  if (!status) {
+    return "Network error. Check your connection and try again.";
+  }
+  return "Couldn't reach the coach. Check your connection and try again.";
+}
+
 export function isInternalPromptMessage(message) {
   if (!message || message.role !== "user") return false;
   return String(message.content ?? "").includes(TEMPLATE_REQUEST_PROMPT_PREFIX);
