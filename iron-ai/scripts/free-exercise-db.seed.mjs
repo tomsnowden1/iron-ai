@@ -168,15 +168,19 @@ async function main() {
     throw new Error("Dataset JSON is not an array");
   }
 
-  writeAtomic(OUT_RAW, JSON.stringify(rawArr, null, 2));
+  const isJunkExerciseName = (name) => /^Exercise\s+\d+$/.test(String(name || "").trim());
+  const filteredRaw = rawArr.filter((ex) => !isJunkExerciseName(ex?.name));
 
-  console.log(`Raw count: ${rawArr.length}`);
-  console.log(`First 3: ${rawArr.slice(0, 3).map((x) => x?.name).join(" | ")}`);
+  writeAtomic(OUT_RAW, JSON.stringify(filteredRaw, null, 2));
+
+  const removedCount = rawArr.length - filteredRaw.length;
+  console.log(`Raw count: ${rawArr.length} (removed junk: ${removedCount})`);
+  console.log(`First 3: ${filteredRaw.slice(0, 3).map((x) => x?.name).join(" | ")}`);
   console.log(
-    `Last 3: ${rawArr.slice(-3).map((x) => x?.name).join(" | ")}`
+    `Last 3: ${filteredRaw.slice(-3).map((x) => x?.name).join(" | ")}`
   );
 
-  const transformedFull = rawArr.map(transformExercise);
+  const transformedFull = filteredRaw.map(transformExercise);
   writeAtomic(OUT_FULL, JSON.stringify(transformedFull, null, 2));
 
   const inApp = transformedFull.slice(0, INAPP_LIMIT);

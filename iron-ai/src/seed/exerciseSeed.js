@@ -49,8 +49,8 @@ const META_KEYS = {
 const AUDIT_LOG_LIMIT = 20;
 const REPAIR_VERSION = "2026-01-14-repair-v2";
 const REPORT_PATH = "src/seed/reports/latestExerciseImportReport.json";
-const SEED_DATA_VERSION = "2026-01-16-inapp-300-v1";
-const SEED_FILE_PATH = "seed/exercises.inapp.300.json";
+const SEED_DATA_VERSION = "2026-02-06-full-seed-v1";
+const SEED_FILE_PATH = "seed/exercises.json";
 
 const PLACEHOLDER_INSTRUCTIONS = new Set([
   "Step 1: Perform the movement with control.",
