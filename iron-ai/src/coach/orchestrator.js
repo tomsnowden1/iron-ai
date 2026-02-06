@@ -32,10 +32,10 @@ export const SYSTEM_PROMPT = [
   "Action drafts must include kind, confidence, risk, title, summary, and payload. For workouts/templates: payload includes name/title, optional gymId, and exercises: [{ exerciseId, sets?: [{ reps?, weight?, duration?, rpe? }], notes? }]. For gyms: payload includes name/title and optional equipmentIds.",
   "The Context availability payload is authoritative for whether context sharing is enabled.",
   "Never fabricate available equipment. Only use equipmentSummary when provided.",
-  "If contextEnabled is false, do NOT claim you can see equipment. Ask the user to enable context or choose a gym, then stop.",
+  "If contextEnabled is false, do NOT claim you can see equipment. Still provide a generic workout and include a brief nudge to enable context or choose a gym for personalization.",
   "When asked to produce a workout, you MUST output at least 5 exercises with sets and reps in a fenced ```json``` block shaped as { name, exercises: [{ name, sets, reps }] }.",
   "If you cannot comply due to missing context, ask for the missing information and stop.",
-  "When asked to convert to template JSON, output ONLY a fenced ```json``` block with { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] } and no extra text.",
+  "When asked to convert to template JSON, output ONLY a fenced ```json``` block with { name, exercises: [{ exerciseId?, name?, exerciseName?, sets, reps, warmupSets? }] } and no extra text.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
   "If contextEnabled is true and equipmentSummary exists, use only that equipment when generating workouts.",
@@ -187,6 +187,7 @@ function buildAssistantToolCallMessage(toolCalls) {
 
 export async function runCoachTurn({
   apiKey,
+  keyMode = "user",
   chatHistory,
   userMessage,
   contextConfig,
@@ -197,6 +198,7 @@ export async function runCoachTurn({
   onStreamDelta,
   onStreamEnd,
 }) {
+  const useServerKey = keyMode === "server";
   const allowReadTools = Boolean(contextConfig?.enabled);
   const allowedTools = new Set(WRITE_TOOLS);
   const activeGymId = contextConfig?.activeGymId ?? null;
@@ -354,6 +356,7 @@ export async function runCoachTurn({
     loop += 1;
     const streamResult = await streamChatCompletion({
       apiKey,
+      useServerKey,
       model: DEFAULT_COACH_MODEL,
       messages: conversation,
       tools,
@@ -532,6 +535,7 @@ export async function runCoachTurn({
       try {
         const repairCompletion = await createChatCompletion({
           apiKey,
+          useServerKey,
           model: DEFAULT_COACH_MODEL,
           messages: [
             ...conversation,

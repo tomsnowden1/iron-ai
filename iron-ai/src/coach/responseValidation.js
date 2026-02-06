@@ -15,11 +15,17 @@ export const WorkoutPlanSchema = z.object({
 });
 
 const TemplateExerciseSchema = z.object({
-  exerciseId: z.number().int().positive(),
+  exerciseId: z.number().int().positive().optional(),
+  name: z.string().min(1).optional(),
+  exerciseName: z.string().min(1).optional(),
   sets: z.number().int().positive(),
   reps: z.number().int().positive(),
   warmupSets: z.number().int().nonnegative().optional(),
-});
+})
+  .refine(
+    (value) => value.exerciseId != null || value.name || value.exerciseName,
+    "Each exercise needs exerciseId or name."
+  );
 
 export const TemplateJsonSchema = z.object({
   name: z.string().min(1),
@@ -50,11 +56,26 @@ function normalizeZodErrors(error) {
 function extractJsonFences(text) {
   const value = String(text ?? "");
   const fences = [];
+  JSON_FENCE_REGEX.lastIndex = 0;
   let match = null;
   while ((match = JSON_FENCE_REGEX.exec(value)) !== null) {
     fences.push(match[1] ?? "");
   }
   return fences;
+}
+
+function extractJsonObjectCandidate(text) {
+  const value = String(text ?? "").trim();
+  if (!value) return null;
+  if (value.startsWith("{") && value.endsWith("}")) {
+    return value;
+  }
+  const first = value.indexOf("{");
+  const last = value.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    return value.slice(first, last + 1);
+  }
+  return null;
 }
 
 function validateContextOffWorkout(text) {
@@ -76,16 +97,9 @@ function validateContextOffWorkout(text) {
   return { valid: true, error: null };
 }
 
-function validateWorkoutPlanOutput(text) {
+export function extractWorkoutPlanOutput(text) {
   const fences = extractJsonFences(text);
-  if (!fences.length) {
-    return {
-      valid: false,
-      error:
-        "Workout responses must include a fenced ```json block with a WorkoutPlan object.",
-    };
-  }
-  let lastSchemaError = "Workout plan JSON is invalid.";
+  let lastSchemaError = null;
   for (const raw of fences) {
     const parsed = safeParseJson(raw);
     if (!parsed) {
@@ -94,11 +108,53 @@ function validateWorkoutPlanOutput(text) {
     }
     const validation = WorkoutPlanSchema.safeParse(parsed);
     if (validation.success) {
-      return { valid: true, parsed: validation.data, error: null };
+      return {
+        valid: true,
+        parsed: validation.data,
+        error: null,
+        source: "codeFence:json",
+        rawJson: raw,
+      };
     }
     lastSchemaError = normalizeZodErrors(validation.error);
   }
-  return { valid: false, parsed: null, error: lastSchemaError };
+  const rawJsonCandidate = extractJsonObjectCandidate(text);
+  if (rawJsonCandidate) {
+    const parsed = safeParseJson(rawJsonCandidate);
+    if (parsed) {
+      const validation = WorkoutPlanSchema.safeParse(parsed);
+      if (validation.success) {
+        return {
+          valid: true,
+          parsed: validation.data,
+          error: null,
+          source: "raw:json",
+          rawJson: rawJsonCandidate,
+        };
+      }
+      lastSchemaError = normalizeZodErrors(validation.error);
+    } else {
+      lastSchemaError = "Workout plan JSON could not be parsed.";
+    }
+  }
+  return {
+    valid: false,
+    parsed: null,
+    error:
+      lastSchemaError ??
+      "Workout responses must include JSON with a WorkoutPlan object.",
+    source: null,
+    rawJson: rawJsonCandidate,
+  };
+}
+
+function validateWorkoutPlanOutput(text) {
+  const extracted = extractWorkoutPlanOutput(text);
+  return {
+    valid: extracted.valid,
+    parsed: extracted.parsed,
+    error: extracted.error,
+  };
 }
 
 export function validateTemplateJsonOutput(text) {
@@ -151,12 +207,17 @@ export function validateCoachResponse({
   }
 
   if (mode === "workout") {
-    if (!contextEnabled) {
-      const result = validateContextOffWorkout(text);
-      return { ...result, parsed: null, mode };
+    const workoutResult = validateWorkoutPlanOutput(text);
+    if (!workoutResult.valid) {
+      return { ...workoutResult, mode };
     }
-    const result = validateWorkoutPlanOutput(text);
-    return { ...result, mode };
+    if (!contextEnabled) {
+      const contextResult = validateContextOffWorkout(text);
+      if (!contextResult.valid) {
+        return { ...contextResult, parsed: workoutResult.parsed, mode };
+      }
+    }
+    return { ...workoutResult, mode };
   }
 
   return { valid: true, parsed: null, error: null, mode };
@@ -165,7 +226,7 @@ export function validateCoachResponse({
 const WORKOUT_PLAN_SCHEMA_TEXT =
   "{ name?: string, exercises: [{ name: string, sets: number|string, reps: number|string }] }";
 const TEMPLATE_JSON_SCHEMA_TEXT =
-  "{ name: string, exercises: [{ exerciseId: number, sets: number, reps: number, warmupSets?: number }] }";
+  "{ name: string, exercises: [{ exerciseId?: number, name?: string, exerciseName?: string, sets: number, reps: number, warmupSets?: number }] }";
 
 export function buildRepairPrompt({
   validationMode,
@@ -191,8 +252,9 @@ export function buildRepairPrompt({
     return [
       "REPAIR TASK: Context sharing is OFF.",
       "Do NOT claim you can see equipment.",
-      "Ask the user to enable context or choose/select a gym, then stop.",
-      "Do not include a workout list in this response.",
+      "Return a generic workout in a fenced ```json block with at least 5 exercises.",
+      `Schema: ${WORKOUT_PLAN_SCHEMA_TEXT}`,
+      "Include a brief line asking the user to enable context or choose a gym for personalization.",
       "Invalid content:",
       invalid,
       "Rule: return ONLY the corrected output.",
