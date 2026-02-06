@@ -200,6 +200,7 @@ export default function CoachView({
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [retryMessage, setRetryMessage] = useState("");
   const [contextEnabled, setContextEnabled] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
@@ -410,6 +411,7 @@ export default function CoachView({
   }, [coachDiagnosticsEnabled, state.proposals]);
 
   const hasGyms = sortedSpaces.length > 0;
+  const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
     [sortedSpaces, activeGymId]
@@ -421,8 +423,26 @@ export default function CoachView({
   const contextPillLabel = selectedGym
     ? `${gymNameLabel} · ${gymEquipmentLabel} · ${exerciseCountLabel}`
     : `No gym selected · ${exerciseCountLabel}`;
+  const equipmentSummaryForPrompt = useMemo(() => {
+    if (!effectiveContextEnabled || !selectedGym) return [];
+    const equipmentIds = Array.isArray(selectedGym.equipmentIds)
+      ? selectedGym.equipmentIds.filter((id) => id && id !== "bodyweight")
+      : [];
+    if (!equipmentIds.length) return "No equipment listed for selected gym.";
+    return equipmentIds.join(", ");
+  }, [effectiveContextEnabled, selectedGym]);
+  const promptContextState = useMemo(
+    () => ({
+      contextEnabled: effectiveContextEnabled,
+      selectedGym: selectedGym
+        ? { id: selectedGym.id ?? null, name: selectedGym.name ?? null }
+        : null,
+      equipmentSummary: effectiveContextEnabled ? equipmentSummaryForPrompt : [],
+    }),
+    [effectiveContextEnabled, equipmentSummaryForPrompt, selectedGym]
+  );
   const trustBadgeEnabled =
-    Boolean(contextContract) && (contextEnabled || Boolean(pendingLaunchContext));
+    Boolean(contextContract) && effectiveContextEnabled;
   const trustSummary = trustBadgeEnabled
     ? `${formatCount(contextContract.recentWorkoutsCount)} workouts, ${formatCount(
         contextContract.templatesCount
@@ -484,6 +504,12 @@ export default function CoachView({
     if (latestAssistantId == null) return null;
     return messages.find((message) => message.id === latestAssistantId) ?? null;
   }, [latestAssistantId, messages]);
+  const latestUserMessage = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "user") return messages[i];
+    }
+    return null;
+  }, [messages]);
   const actionDraft = actionState.draft;
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
@@ -588,9 +614,14 @@ export default function CoachView({
         return;
       }
 
-      const { clearInput = false, autoTemplateRequest = false } = options;
+      const {
+        clearInput = false,
+        autoTemplateRequest = false,
+        responseMode = "general",
+      } = options;
 
       setError("");
+      setRetryMessage("");
       setSending(true);
       if (clearInput) setInput("");
       if (autoTemplateRequest) setPendingTemplateRequest(true);
@@ -603,18 +634,19 @@ export default function CoachView({
         }),
       ]);
 
-      const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
       let streamedId = null;
       try {
         const result = await runCoachTurn({
           apiKey,
           chatHistory: chatHistoryRef.current,
           userMessage: trimmed,
+          responseMode,
           contextConfig: {
             enabled: effectiveContextEnabled,
             scopes: contextScopes,
             launchContext: pendingLaunchContext,
             activeGymId,
+            contextState: promptContextState,
           },
           memoryEnabled,
           memorySummary: memory,
@@ -648,6 +680,14 @@ export default function CoachView({
         setContextContract(result.contextContract ?? null);
         setPayloadFingerprint(result.payloadFingerprint ?? null);
         setPayloadSummary(result.payloadSummary ?? null);
+        if (result.responseValidation?.status === "failed") {
+          setError(
+            "Coach had trouble formatting that response. Please tap Retry to regenerate."
+          );
+          setRetryMessage(trimmed);
+        } else {
+          setRetryMessage("");
+        }
 
         if (result.payloadFingerprint || result.contextContract) {
           setMessages((prev) =>
@@ -735,11 +775,13 @@ export default function CoachView({
       apiKey,
       contextEnabled,
       contextScopes,
+      effectiveContextEnabled,
       keyStatus,
       memory,
       memoryEnabled,
       onLaunchContextConsumed,
       pendingLaunchContext,
+      promptContextState,
       sending,
     ]
   );
@@ -801,7 +843,10 @@ export default function CoachView({
         return;
       }
       if (pendingTemplateRequest || templateCreating) return;
-      await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, { autoTemplateRequest: true });
+      await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, {
+        autoTemplateRequest: true,
+        responseMode: "template_json",
+      });
     },
     [
       latestAssistantId,
