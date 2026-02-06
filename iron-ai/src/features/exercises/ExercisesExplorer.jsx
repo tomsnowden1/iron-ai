@@ -24,6 +24,7 @@ import {
   getExerciseEquipment,
   getExercisePrimaryMuscles,
   getExerciseType,
+  isPlaceholderExercise,
 } from "../../exercises/data";
 import {
   resetExerciseSeedVersion,
@@ -121,9 +122,16 @@ export default function ExercisesExplorer({
   }, [searchInput]);
 
   const searchQuery = search.trim().toLowerCase();
+  const visibleExercises = useMemo(
+    () =>
+      Array.isArray(exercises)
+        ? exercises.filter((exercise) => !isPlaceholderExercise(exercise))
+        : [],
+    [exercises]
+  );
 
   const filteredExercises = useMemo(() => {
-    let filtered = Array.isArray(exercises) ? exercises.slice() : [];
+    let filtered = visibleExercises.slice();
     if (searchQuery) {
       filtered = filtered.filter((exercise) =>
         buildExerciseSearchText(exercise).includes(searchQuery)
@@ -186,7 +194,7 @@ export default function ExercisesExplorer({
   }, [
     activeSpace,
     equipmentMap,
-    exercises,
+    visibleExercises,
     filterByActiveGym,
     hasActiveGym,
     searchQuery,
@@ -199,13 +207,16 @@ export default function ExercisesExplorer({
   ]);
 
   const muscleOptions = useMemo(
-    () => buildMuscleOptions(exercises ?? []),
-    [exercises]
+    () => buildMuscleOptions(visibleExercises),
+    [visibleExercises]
   );
-  const typeOptions = useMemo(() => buildTypeOptions(exercises ?? []), [exercises]);
+  const typeOptions = useMemo(
+    () => buildTypeOptions(visibleExercises),
+    [visibleExercises]
+  );
   const equipmentOptions = useMemo(
-    () => buildEquipmentOptions(exercises ?? [], equipmentMap),
-    [equipmentMap, exercises]
+    () => buildEquipmentOptions(visibleExercises, equipmentMap),
+    [equipmentMap, visibleExercises]
   );
 
   const isLoading = isSeeding && (!exercises || exercises.length === 0);
