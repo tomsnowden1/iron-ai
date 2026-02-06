@@ -41,6 +41,26 @@ function parseIntegerValue(value) {
   return null;
 }
 
+function parsePositiveInteger(value, fallback = null) {
+  const parsed = parseIntegerValue(value);
+  if (parsed == null || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function extractJsonObjectCandidate(text) {
+  const value = String(text ?? "").trim();
+  if (!value) return null;
+  if (value.startsWith("{") && value.endsWith("}")) {
+    return value;
+  }
+  const first = value.indexOf("{");
+  const last = value.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    return value.slice(first, last + 1);
+  }
+  return null;
+}
+
 function validateTemplateDraft(raw, fallbackName, templateTool) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { draft: null, error: "Template draft must be an object." };
@@ -73,10 +93,16 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
       };
     }
     const exerciseId = parseIntegerValue(entry.exerciseId);
-    if (exerciseId == null) {
+    const exerciseName =
+      typeof entry.name === "string" && entry.name.trim()
+        ? entry.name.trim()
+        : typeof entry.exerciseName === "string" && entry.exerciseName.trim()
+          ? entry.exerciseName.trim()
+          : "";
+    if (exerciseId == null && !exerciseName) {
       return {
         draft: null,
-        error: `exercises[${i}].exerciseId must be a number.`,
+        error: `exercises[${i}] must include exerciseId or name.`,
       };
     }
     const sets = parseIntegerValue(entry.sets);
@@ -103,12 +129,19 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
         };
       }
     }
-    exercises.push({
-      exerciseId,
+    const normalizedExercise = {
       sets,
       reps,
       ...(warmupSets != null ? { warmupSets } : {}),
-    });
+    };
+    if (exerciseId != null) {
+      normalizedExercise.exerciseId = exerciseId;
+    }
+    if (exerciseName) {
+      normalizedExercise.name = exerciseName;
+      normalizedExercise.exerciseName = exerciseName;
+    }
+    exercises.push(normalizedExercise);
   }
   let spaceId = null;
   if (raw.spaceId != null) {
@@ -132,32 +165,35 @@ function validateTemplateDraft(raw, fallbackName, templateTool) {
 }
 
 function resolveTemplateDraftFromActionDraft(actionDraft, templateTool) {
-  if (!actionDraft) return { draft: null, error: null, found: false };
+  if (!actionDraft) return { draft: null, error: null, found: false, rawJson: null };
   if (
     actionDraft.kind !== ActionDraftKinds.create_template &&
     actionDraft.kind !== ActionDraftKinds.create_workout
   ) {
-    return { draft: null, error: null, found: false };
+    return { draft: null, error: null, found: false, rawJson: null };
   }
   const payload = actionDraft.payload ?? {};
   const fallbackName = payload.name ?? payload.title ?? actionDraft.title ?? null;
   const raw = { ...payload };
   if (!raw.name && fallbackName) raw.name = fallbackName;
   const result = validateTemplateDraft(raw, fallbackName, templateTool);
-  return { ...result, found: true };
+  return {
+    ...result,
+    found: true,
+    rawJson: JSON.stringify(raw, null, 2),
+  };
 }
 
 function resolveTemplateDraftFromText(text, templateTool) {
   const blocks = extractFencedCodeBlocks(text);
-  if (!blocks.length) {
-    return { draft: null, error: null, found: false, source: null };
-  }
 
   const evaluateBlocks = (targetBlocks, source) => {
     let lastError = null;
     let foundCandidate = false;
+    let rawJson = null;
     for (const block of targetBlocks) {
       foundCandidate = true;
+      rawJson = block.content;
       const { parsed, error } = parseJsonCandidate(block.content);
       if (!parsed) {
         lastError = error;
@@ -169,31 +205,94 @@ function resolveTemplateDraftFromText(text, templateTool) {
           templateTool
         );
         if (fromAction.draft) {
-          return { draft: fromAction.draft, found: true, error: null, source };
+          return {
+            draft: fromAction.draft,
+            found: true,
+            error: null,
+            source,
+            rawJson: block.content,
+          };
         }
         if (fromAction.error) lastError = fromAction.error;
       }
       const normalized = validateTemplateDraft(parsed, null, templateTool);
       if (normalized.draft) {
-        return { draft: normalized.draft, found: true, error: null, source };
+        return {
+          draft: normalized.draft,
+          found: true,
+          error: null,
+          source,
+          rawJson: block.content,
+        };
       }
       if (normalized.error) lastError = normalized.error;
     }
-    return { draft: null, found: foundCandidate, error: lastError, source };
+    return { draft: null, found: foundCandidate, error: lastError, source, rawJson };
   };
 
   const jsonBlocks = blocks.filter((block) => block.language === "json");
-  const jsonResult = evaluateBlocks(jsonBlocks, "codeFence:json");
+  const jsonResult = jsonBlocks.length
+    ? evaluateBlocks(jsonBlocks, "codeFence:json")
+    : { draft: null, found: false, error: null, source: null, rawJson: null };
   if (jsonResult.draft) return jsonResult;
 
-  const anyResult = evaluateBlocks(blocks, "codeFence:any");
+  const anyResult = blocks.length
+    ? evaluateBlocks(blocks, "codeFence:any")
+    : { draft: null, found: false, error: null, source: null, rawJson: null };
   if (anyResult.draft) return anyResult;
+
+  const rawJsonCandidate = extractJsonObjectCandidate(text);
+  if (rawJsonCandidate) {
+    const { parsed, error } = parseJsonCandidate(rawJsonCandidate);
+    if (!parsed) {
+      return {
+        draft: null,
+        found: true,
+        error,
+        source: "raw:json",
+        rawJson: rawJsonCandidate,
+      };
+    }
+    if (parsed?.actionDraft) {
+      const fromAction = resolveTemplateDraftFromActionDraft(
+        parsed.actionDraft,
+        templateTool
+      );
+      if (fromAction.draft) {
+        return {
+          draft: fromAction.draft,
+          found: true,
+          error: null,
+          source: "raw:json",
+          rawJson: rawJsonCandidate,
+        };
+      }
+    }
+    const normalized = validateTemplateDraft(parsed, null, templateTool);
+    if (normalized.draft) {
+      return {
+        draft: normalized.draft,
+        found: true,
+        error: null,
+        source: "raw:json",
+        rawJson: rawJsonCandidate,
+      };
+    }
+    return {
+      draft: null,
+      found: true,
+      error: normalized.error,
+      source: "raw:json",
+      rawJson: rawJsonCandidate,
+    };
+  }
 
   return {
     draft: null,
     found: jsonResult.found || anyResult.found,
     error: jsonResult.error ?? anyResult.error,
     source: jsonResult.source ?? anyResult.source,
+    rawJson: jsonResult.rawJson ?? anyResult.rawJson ?? rawJsonCandidate,
   };
 }
 
@@ -206,6 +305,7 @@ export function resolveTemplateDraftInfo({ actionDraft, text, templateTool }) {
       valid: true,
       error: null,
       source: "actionDraft",
+      rawJson: actionResult.rawJson,
     };
   }
 
@@ -217,6 +317,7 @@ export function resolveTemplateDraftInfo({ actionDraft, text, templateTool }) {
       valid: true,
       error: null,
       source: textResult.source,
+      rawJson: textResult.rawJson,
     };
   }
 
@@ -226,5 +327,39 @@ export function resolveTemplateDraftInfo({ actionDraft, text, templateTool }) {
     valid: false,
     error: actionResult.error ?? textResult.error,
     source: actionResult.found ? "actionDraft" : textResult.source,
+    rawJson: actionResult.rawJson ?? textResult.rawJson ?? null,
+  };
+}
+
+export function buildTemplateDraftFromWorkoutPlan(workoutPlan, options = {}) {
+  if (!workoutPlan || typeof workoutPlan !== "object") return null;
+  const exercises = Array.isArray(workoutPlan.exercises) ? workoutPlan.exercises : [];
+  if (!exercises.length) return null;
+
+  const normalizedExercises = exercises
+    .map((entry) => {
+      const name = String(entry?.name ?? entry?.exerciseName ?? "").trim();
+      if (!name) return null;
+      const sets = parsePositiveInteger(entry?.sets, 3);
+      const reps = parsePositiveInteger(entry?.reps, 10);
+      return {
+        name,
+        exerciseName: name,
+        sets,
+        reps,
+      };
+    })
+    .filter(Boolean);
+
+  if (!normalizedExercises.length) return null;
+  const fallbackName = String(options.fallbackName ?? "Coach Template").trim() || "Coach Template";
+  const name =
+    String(workoutPlan.name ?? workoutPlan.title ?? fallbackName).trim() || fallbackName;
+  const spaceId = parsePositiveInteger(options.spaceId, null);
+
+  return {
+    name,
+    exercises: normalizedExercises,
+    ...(spaceId != null ? { spaceId } : {}),
   };
 }

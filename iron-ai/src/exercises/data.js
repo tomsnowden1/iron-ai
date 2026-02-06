@@ -1,5 +1,17 @@
 import { normalizeExerciseEquipment } from "../equipment/engine";
 
+const PLACEHOLDER_EXERCISE_NAME = /^Exercise\s+\d+$/i;
+
+export function isPlaceholderExerciseName(name) {
+  return PLACEHOLDER_EXERCISE_NAME.test(String(name ?? "").trim());
+}
+
+export function isPlaceholderExercise(exercise) {
+  if (!isPlaceholderExerciseName(exercise?.name)) return false;
+  if (exercise?.is_custom || exercise?.isCustom) return false;
+  return String(exercise?.source ?? "").trim().toLowerCase() !== "user";
+}
+
 export function getExercisePrimaryMuscles(exercise) {
   const primary = Array.isArray(exercise?.primaryMuscles)
     ? exercise.primaryMuscles.filter(Boolean)

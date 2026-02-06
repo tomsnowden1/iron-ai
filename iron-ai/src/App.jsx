@@ -50,6 +50,7 @@ import { formatCoachMemory, getDefaultCoachMemory, normalizeCoachMemory } from "
 import { getEquipmentMap } from "./equipment/catalog";
 import { getMissingEquipmentForExercise } from "./equipment/engine";
 import { resolveActiveSpace } from "./workoutSpaces/logic";
+import { getCoachKeyMode } from "./config/coachKeyMode";
 import {
   clearOpenAIKey,
   getOpenAIKeyMasked,
@@ -2285,6 +2286,8 @@ function HistoryView() {
 }
 
 function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMode }) {
+  const coachKeyMode = getCoachKeyMode();
+  const isServerKeyMode = coachKeyMode === "server";
   const [persona, setPersona] = useState(settings?.coach_persona ?? "");
   const [openAiKeyDraft, setOpenAiKeyDraft] = useState("");
   const [openAiEditing, setOpenAiEditing] = useState(!settings?.openai_api_key);
@@ -2357,6 +2360,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleSaveOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!trimmedOpenAiKey) {
       setOpenAiTestResult({
         tone: "error",
@@ -2382,6 +2392,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleRemoveOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!window.confirm("Remove the saved OpenAI API key from this device?")) return;
     await clearOpenAIKey();
     setOpenAiKeyDraft("");
@@ -2394,6 +2411,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleTestOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "success",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!settings?.openai_api_key) {
       setOpenAiTestResult({
         tone: "error",
@@ -2509,7 +2533,23 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
 
         <div>
           <Label htmlFor={openAiKeyId}>OpenAI API key</Label>
-          {openAiEditing ? (
+          {isServerKeyMode ? (
+            <div className="ui-stack">
+              <Input
+                id={openAiKeyId}
+                type="password"
+                value={maskedOpenAiKey}
+                readOnly
+                disabled
+                className="flex-1"
+                placeholder="Disabled in testing mode"
+              />
+              <div className="template-meta">Testing mode: using server key.</div>
+              <div className="template-meta">
+                Set VITE_COACH_KEY_MODE=user to re-enable local BYOK controls.
+              </div>
+            </div>
+          ) : openAiEditing ? (
             <div className="ui-stack">
               <Input
                 id={openAiKeyId}
@@ -2573,30 +2613,36 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             </div>
           )}
           <div className="template-meta">
-            Unlocks AI Coach chat and tool-powered coaching. Stored locally on this device.
+            {isServerKeyMode
+              ? "Coach chats use the server key in testing mode."
+              : "Unlocks AI Coach chat and tool-powered coaching. Stored locally on this device."}
           </div>
           <div className="template-meta">
             Status:{" "}
-            {openAiKeyStatus === "valid"
-              ? "Verified"
-              : openAiKeyStatus === "invalid"
-                ? "Invalid"
-                : openAiKeyStatus === "missing"
-                  ? "Missing"
-                  : "Not tested"}
+            {isServerKeyMode
+              ? "Testing mode: using server key"
+              : openAiKeyStatus === "valid"
+                ? "Verified"
+                : openAiKeyStatus === "invalid"
+                  ? "Invalid"
+                  : openAiKeyStatus === "missing"
+                    ? "Missing"
+                    : "Not tested"}
           </div>
-          <div className="ui-row ui-row--wrap">
-            <Button
-              variant="secondary"
-              size="sm"
-              type="button"
-              onClick={handleTestOpenAiKey}
-              loading={openAiTesting}
-              disabled={!settings?.openai_api_key}
-            >
-              Test API Key
-            </Button>
-          </div>
+          {!isServerKeyMode ? (
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={handleTestOpenAiKey}
+                loading={openAiTesting}
+                disabled={!settings?.openai_api_key}
+              >
+                Test API Key
+              </Button>
+            </div>
+          ) : null}
           {openAiTestResult ? (
             <div
               className={openAiTestResult.tone === "error" ? "chat-error" : "template-meta"}

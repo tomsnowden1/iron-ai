@@ -1168,13 +1168,113 @@
     gap: var(--space-1);
   }
 
-  .chat-actions[data-stale="true"] {
-    opacity: 0.7;
-  }
-
   .chat-actions__status {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+  }
+
+  .coach-workout-card {
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .coach-workout-card__title {
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--color-text);
+  }
+
+  .coach-workout-card__hint {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .coach-workout-card__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .coach-workout-card__exercise {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .coach-workout-card__exercise-name {
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .coach-workout-card__exercise-meta {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .coach-workout-card__trust {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .coach-adjust-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface-muted);
+  }
+
+  .coach-adjust-panel__label {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .coach-adjust-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+  }
+
+  .coach-adjust-chip {
+    border: 1px solid var(--color-border-subtle);
+    background: var(--color-surface);
+    color: var(--color-text);
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    padding: 4px 10px;
+    cursor: pointer;
+  }
+
+  .coach-adjust-chip:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .coach-template-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius-md);
+    border: 1px solid color-mix(in srgb, var(--color-destructive) 35%, transparent);
+    background: color-mix(in srgb, var(--color-destructive) 10%, var(--color-surface));
+    color: var(--color-destructive);
+    font-size: var(--text-xs);
   }
 
   .chat-empty {
