@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifyCoachResponseMode,
   extractWorkoutPlanOutput,
   validateCoachResponse,
   validateTemplateJsonOutput,
@@ -125,5 +126,14 @@ describe("coach response validation", () => {
       libraryIdSet,
     });
     expect(result.valid).toBe(true);
+  });
+
+  it("treats explicit responseMode=workout as workout validation even without workout keywords", () => {
+    expect(
+      classifyCoachResponseMode({
+        userMessage: "add 2 push exercises",
+        responseMode: "workout",
+      })
+    ).toBe("workout");
   });
 });

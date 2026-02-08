@@ -336,6 +336,7 @@ export function validateTemplateJsonOutput(
 
 export function classifyCoachResponseMode({ userMessage, responseMode }) {
   if (responseMode === "template_json") return "template_json";
+  if (responseMode === "workout") return "workout";
   if (WORKOUT_REQUEST_REGEX.test(String(userMessage ?? ""))) return "workout";
   return "general";
 }

@@ -1368,7 +1368,8 @@ export default function CoachView({
         onNotify?.("Workout draft is not ready yet.", { tone: "warning" });
         return;
       }
-      if (Array.isArray(draft.needsReview) && draft.needsReview.length > 0) {
+      const activeNeedsReview = resolveActiveNeedsReviewEntries(draft);
+      if (activeNeedsReview.length > 0) {
         onNotify?.("Resolve pending exercise mappings before starting this workout.", {
           tone: "warning",
         });
@@ -1451,7 +1452,8 @@ export default function CoachView({
         });
         return;
       }
-      if (Array.isArray(draft.needsReview) && draft.needsReview.length > 0) {
+      const activeNeedsReview = resolveActiveNeedsReviewEntries(draft);
+      if (activeNeedsReview.length > 0) {
         onNotify?.("Resolve pending exercise mappings before saving as a template.", {
           tone: "warning",
         });

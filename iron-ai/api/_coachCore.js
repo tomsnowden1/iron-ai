@@ -66,7 +66,10 @@ async function parseOpenAiError(response) {
 }
 
 function isProductionBlocked(env) {
-  return env?.VERCEL_ENV === "production" && env?.ALLOW_COACH_PROD !== "true";
+  if (env?.VERCEL_ENV !== "production") return false;
+  const raw = String(env?.ALLOW_COACH_PROD ?? "").trim().toLowerCase();
+  if (!raw) return false;
+  return raw === "false" || raw === "0" || raw === "no";
 }
 
 function buildOpenAiBody(payload) {
@@ -93,7 +96,7 @@ export async function handleCoachRequest({ payload, env, fetchImpl = fetch }) {
   if (isProductionBlocked(env)) {
     return errorResponse(
       403,
-      "Coach is disabled in production. Set ALLOW_COACH_PROD=true to enable it."
+      "Coach is disabled in production (ALLOW_COACH_PROD=false)."
     );
   }
 
@@ -115,14 +118,22 @@ export async function handleCoachRequest({ payload, env, fetchImpl = fetch }) {
     return errorResponse(400, "messages must be an array.");
   }
 
-  const response = await fetchImpl(OPENAI_CHAT_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${openAiKey}`,
-    },
-    body: JSON.stringify(buildOpenAiBody(requestPayload)),
-  });
+  let response = null;
+  try {
+    response = await fetchImpl(OPENAI_CHAT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiKey}`,
+      },
+      body: JSON.stringify(buildOpenAiBody(requestPayload)),
+    });
+  } catch (err) {
+    return errorResponse(
+      502,
+      `Unable to reach OpenAI.${err?.message ? ` ${err.message}` : ""}`.trim()
+    );
+  }
 
   if (!response.ok) {
     return parseOpenAiError(response);
@@ -138,4 +149,3 @@ export async function handleCoachRequest({ payload, env, fetchImpl = fetch }) {
 
   return jsonResponse(200, completion);
 }
-

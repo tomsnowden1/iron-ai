@@ -64,7 +64,7 @@ export function resolveCoachErrorMessage({ err, accessState }) {
   const rawMessage = String(err?.message ?? "").trim();
 
   if (accessState?.keyMode === "server" && (status === 401 || status === 403)) {
-    return "Coach server access is not enabled. Ask an admin to set ALLOW_COACH_PROD=true.";
+    return "Coach server is disabled in production. Remove ALLOW_COACH_PROD=false in Vercel to enable Coach.";
   }
 
   if (accessState?.keyMode === "server" && status >= 500) {
