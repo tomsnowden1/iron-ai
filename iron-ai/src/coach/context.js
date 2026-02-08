@@ -321,7 +321,6 @@ function resolveCoachActiveSpace(spaces, activeGymId) {
 
 export async function getCoachExerciseCandidates({
   activeGymId,
-  contextEnabled,
   userMessage,
   maxCandidates = DEFAULT_CANDIDATE_LIMIT,
 } = {}) {
@@ -331,7 +330,9 @@ export async function getCoachExerciseCandidates({
     1,
     MAX_CANDIDATE_LIMIT
   );
-  const useGymFilteredPool = Boolean(contextEnabled && activeGymId != null);
+  // Always honor the selected gym for candidate retrieval so generated plans
+  // don't include exercises requiring unavailable equipment.
+  const useGymFilteredPool = Boolean(activeGymId != null);
   const pool = useGymFilteredPool
     ? await getAvailableExercises(activeGymId)
     : await getAllExercises();

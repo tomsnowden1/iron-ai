@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { db } from "../src/db";
 import {
+  getCoachContextEnabled,
   getCoachChatState,
   clearOpenAIKey,
   getCoachMemoryEnabled,
@@ -10,6 +11,7 @@ import {
   getSettings,
   hasOpenAIKey,
   setCoachChatState,
+  setCoachContextEnabled,
   setCoachMemoryEnabled,
   setOpenAIKey,
 } from "../src/state/settingsStore";
@@ -72,6 +74,17 @@ describe.sequential("settings store", () => {
 
     await setCoachMemoryEnabled(false, { caller: "test" });
     expect(await getCoachMemoryEnabled()).toBe(false);
+  });
+
+  it("defaults coach context sharing to enabled and allows toggling", async () => {
+    expect(await getCoachContextEnabled()).toBe(true);
+    let settings = await getSettings();
+    expect(settings?.coach_context_enabled).toBe(true);
+
+    await setCoachContextEnabled(false);
+    expect(await getCoachContextEnabled()).toBe(false);
+    settings = await getSettings();
+    expect(settings?.coach_context_enabled).toBe(false);
   });
 
   it("migrates coach memory enabled from storage", async () => {

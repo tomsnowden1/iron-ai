@@ -114,6 +114,22 @@ export async function getCoachMemoryEnabled() {
   return false;
 }
 
+export async function getCoachContextEnabled() {
+  const settings = await getSettings();
+  if (typeof settings?.coach_context_enabled === "boolean") {
+    return settings.coach_context_enabled;
+  }
+  // Default to enabled for safer, equipment-aware coaching.
+  await updateSettings({ coach_context_enabled: true });
+  return true;
+}
+
+export async function setCoachContextEnabled(nextValue) {
+  const value = Boolean(nextValue);
+  await updateSettings({ coach_context_enabled: value });
+  return value;
+}
+
 export async function setCoachMemoryEnabled(nextValue, options = {}) {
   const value = Boolean(nextValue);
   if (import.meta.env.DEV) {
@@ -313,6 +329,10 @@ export function useSettings() {
     keyStatus,
     maskedOpenAIKey: maskOpenAIKey(apiKey),
     coachMemoryEnabled: Boolean(settings?.coach_memory_enabled),
+    coachContextEnabled:
+      typeof settings?.coach_context_enabled === "boolean"
+        ? settings.coach_context_enabled
+        : true,
   };
 }
 

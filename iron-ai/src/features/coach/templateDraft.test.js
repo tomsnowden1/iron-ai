@@ -124,6 +124,31 @@ All set.`;
     expect(result.draft?.exercises?.[0]?.reps).toBe(10);
   });
 
+  it("coerces string set/rep formats into numeric values", () => {
+    const result = resolveTemplateDraftInfo({
+      actionDraft: {
+        kind: "create_workout",
+        title: "Push Draft",
+        payload: {
+          name: "Push Draft",
+          exercises: [
+            {
+              exerciseId: 3,
+              name: "Bench Press",
+              sets: "3x10",
+              reps: "10",
+            },
+          ],
+        },
+      },
+      text: "",
+      templateTool,
+    });
+    expect(result.valid).toBe(true);
+    expect(result.draft?.exercises?.[0]?.sets).toBe(3);
+    expect(result.draft?.exercises?.[0]?.reps).toBe(10);
+  });
+
   it("builds draft from plain-text workout list so card matches assistant text", () => {
     const text = `Here's a generic leg workout you can try:
 

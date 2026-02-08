@@ -103,6 +103,8 @@ export async function resolveTemplateExercises(
       const result = resolveExerciseId(draftName, {
         candidates: candidatePool,
         allExercises: exercises,
+        threshold: 0.58,
+        tieMargin: 0.06,
         maxSuggestions,
       });
       if (result.status === "resolved") {
@@ -131,8 +133,9 @@ export async function resolveTemplateExercises(
     }
 
     if (review && !createdCustom) {
+      const requestedName = review.requestedName || draftName || "Unknown exercise";
       needsReview.push({
-        requestedName: review.requestedName || draftName || "Unknown exercise",
+        requestedName,
         suggestions: Array.isArray(review.suggestions) ? review.suggestions : [],
       });
     }

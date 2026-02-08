@@ -43,6 +43,8 @@ export const TemplateJsonSchema = z.object({
 const CONTEXT_CLAIM_REGEX =
   /available equipment|using .*equipment|based on .*equipment|i can see .*equipment|with your equipment/i;
 const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan)\b/i;
+const WORKOUT_LIST_LINE_REGEX =
+  /^\s*(?:[-*]|\d+[.)])\s+.+?(\d+\s*(?:sets?\s*(?:of)?\s*\d+\s*reps?|[x×]\s*\d+))/gim;
 
 function safeParseJson(value) {
   try {
@@ -94,6 +96,13 @@ function validateContextOffWorkout(text) {
     };
   }
   return { valid: true, error: null };
+}
+
+function hasPlainWorkoutList(text) {
+  const value = String(text ?? "");
+  if (!value.trim()) return false;
+  const matches = value.match(WORKOUT_LIST_LINE_REGEX);
+  return Array.isArray(matches) && matches.length >= 3;
 }
 
 function parsePositiveInt(value) {
@@ -231,15 +240,6 @@ export function extractWorkoutPlanOutput(text) {
       "Workout responses must include JSON with a WorkoutPlan object.",
     source: null,
     rawJson: rawJsonCandidate,
-  };
-}
-
-function validateWorkoutPlanOutput(text) {
-  const extracted = extractWorkoutPlanOutput(text);
-  return {
-    valid: extracted.valid,
-    parsed: extracted.parsed,
-    error: extracted.error,
   };
 }
 
@@ -383,6 +383,9 @@ export function validateCoachResponse({
       if (!contextResult.valid) {
         return { ...contextResult, parsed: null, mode };
       }
+    }
+    if (hasPlainWorkoutList(text)) {
+      return { valid: true, parsed: null, error: null, mode };
     }
     return {
       valid: false,

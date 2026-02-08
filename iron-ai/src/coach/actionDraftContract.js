@@ -38,7 +38,13 @@ const ActionDraftSetSchema = z
 const ActionDraftExerciseSchema = z
   .object({
     exerciseId: NumericId,
-    sets: z.array(ActionDraftSetSchema).optional(),
+    name: z.string().min(1).optional(),
+    exerciseName: z.string().min(1).optional(),
+    sets: z.union([z.array(ActionDraftSetSchema), NumericValue]).optional(),
+    reps: NumericValue.optional(),
+    targetSets: NumericValue.optional(),
+    targetReps: NumericValue.optional(),
+    warmupSets: NumericValue.optional(),
     notes: z.string().optional(),
   })
   .passthrough();

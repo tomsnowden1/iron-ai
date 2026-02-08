@@ -47,12 +47,39 @@ function parsePositiveInteger(value, fallback = null) {
   return parsed;
 }
 
+function extractSetsRepsFromText(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return { sets: null, reps: null };
+  const times = text.match(/(\d+)\s*[x×]\s*(\d+)/i);
+  if (times) {
+    return {
+      sets: parsePositiveInteger(times[1], null),
+      reps: parsePositiveInteger(times[2], null),
+    };
+  }
+  const setsOfReps = text.match(/(\d+)\s*sets?\s*(?:of)?\s*(\d+)/i);
+  if (setsOfReps) {
+    return {
+      sets: parsePositiveInteger(setsOfReps[1], null),
+      reps: parsePositiveInteger(setsOfReps[2], null),
+    };
+  }
+  return { sets: null, reps: null };
+}
+
 function resolveSetsRepsFromSetArray(setEntries) {
   const setsArray = Array.isArray(setEntries) ? setEntries : [];
   if (!setsArray.length) return { sets: null, reps: null };
   const sets = setsArray.length;
   const repsFromEntries = setsArray
-    .map((set) => parsePositiveInteger(set?.reps, null))
+    .map((set) => {
+      const direct =
+        parsePositiveInteger(set?.reps, null) ??
+        parsePositiveInteger(set?.targetReps, null);
+      if (direct != null) return direct;
+      const fromText = extractSetsRepsFromText(set?.reps ?? set?.targetReps);
+      return fromText.reps;
+    })
     .filter((value) => value != null);
   return {
     sets,
@@ -178,7 +205,7 @@ function validateTemplateDraft(
   raw,
   fallbackName,
   templateTool,
-  { strictExerciseIds = false } = {}
+  { strictExerciseIds = false, allowMissingPrescription = false } = {}
 ) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { draft: null, error: "Template draft must be an object." };
@@ -227,11 +254,15 @@ function validateTemplateDraft(
       };
     }
     const setsFromArray = resolveSetsRepsFromSetArray(entry.sets);
+    const setsRepsFromSetsText = extractSetsRepsFromText(entry.sets);
+    const setsRepsFromRepsText = extractSetsRepsFromText(entry.reps);
     const sets =
       parseIntegerValue(entry.sets) ??
       parseIntegerValue(entry.targetSets) ??
+      setsRepsFromSetsText.sets ??
+      setsRepsFromRepsText.sets ??
       setsFromArray.sets;
-    if (sets == null) {
+    if (sets == null && !allowMissingPrescription) {
       return {
         draft: null,
         error: `exercises[${i}].sets must be a number.`,
@@ -240,8 +271,10 @@ function validateTemplateDraft(
     const reps =
       parseIntegerValue(entry.reps) ??
       parseIntegerValue(entry.targetReps) ??
+      setsRepsFromSetsText.reps ??
+      setsRepsFromRepsText.reps ??
       setsFromArray.reps;
-    if (reps == null) {
+    if (reps == null && !allowMissingPrescription) {
       return {
         draft: null,
         error: `exercises[${i}].reps must be a number.`,
@@ -258,8 +291,8 @@ function validateTemplateDraft(
       }
     }
     const normalizedExercise = {
-      sets,
-      reps,
+      sets: sets ?? 3,
+      reps: reps ?? 10,
       ...(warmupSets != null ? { warmupSets } : {}),
     };
     if (exerciseId != null) {
@@ -324,6 +357,7 @@ function resolveTemplateDraftFromActionDraft(
   if (!raw.name && fallbackName) raw.name = fallbackName;
   const result = validateTemplateDraft(raw, fallbackName, templateTool, {
     strictExerciseIds,
+    allowMissingPrescription: true,
   });
   return {
     ...result,
@@ -371,6 +405,7 @@ function resolveTemplateDraftFromText(
       }
       const normalized = validateTemplateDraft(parsed, null, templateTool, {
         strictExerciseIds,
+        allowMissingPrescription: false,
       });
       if (normalized.draft) {
         return {
@@ -450,6 +485,7 @@ function resolveTemplateDraftFromText(
     }
     const normalized = validateTemplateDraft(parsed, null, templateTool, {
       strictExerciseIds,
+      allowMissingPrescription: false,
     });
     if (normalized.draft) {
       return {

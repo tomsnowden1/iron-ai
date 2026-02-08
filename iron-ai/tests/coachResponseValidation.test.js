@@ -60,6 +60,23 @@ describe("coach response validation", () => {
     expect(result.valid).toBe(false);
   });
 
+  it("accepts plain-text workout lists as fallback when parsable", () => {
+    const result = validateCoachResponse({
+      userMessage: "make push workout",
+      assistantText: `Here's a push workout:
+1. Bench Press: 3 sets of 10 reps
+2. Incline Push-Up: 3 sets of 12 reps
+3. Dumbbell Shoulder Press: 3 x 10
+4. Cable Fly: 3 sets of 12 reps
+5. Triceps Pushdown: 3 sets of 12 reps`,
+      responseMode: "general",
+      contextEnabled: true,
+      allowedCandidateIds,
+      libraryIdSet,
+    });
+    expect(result.valid).toBe(true);
+  });
+
   it("rejects workout actionDraft IDs outside candidate list", () => {
     const invalid = validateCoachResponse({
       userMessage: "make legs workout",

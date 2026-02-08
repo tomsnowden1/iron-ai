@@ -10,6 +10,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldForceWorkoutResponseMode,
 } from "../src/features/coach/coachViewUiModel";
 
 describe("coach view UX model", () => {
@@ -97,5 +98,26 @@ Use this template payload.`);
     expect(isTemplateIntentText("make it a template")).toBe(true);
     expect(isStartWorkoutIntentText("start workout")).toBe(true);
     expect(isTemplateIntentText("how are you")).toBe(false);
+  });
+
+  it("forces workout response mode for follow-up adjustments when a draft is visible", () => {
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "more quads and make it 8 exercises",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(true);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "start workout",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "how are you today",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
   });
 });

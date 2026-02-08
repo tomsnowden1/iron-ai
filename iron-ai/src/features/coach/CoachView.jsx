@@ -35,6 +35,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldForceWorkoutResponseMode,
 } from "./coachViewUiModel";
 import {
   buildTemplateDraftFromWorkoutPlan,
@@ -158,6 +159,36 @@ function hasCoachContextCounts(contract) {
   return counts.some((value) => Number(value) > 0);
 }
 
+function normalizeExerciseNameKey(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function resolveActiveNeedsReviewEntries(draft) {
+  const exercises = Array.isArray(draft?.exercises) ? draft.exercises : [];
+  if (!Array.isArray(draft?.needsReview) || draft.needsReview.length === 0) return [];
+  const unresolvedNameCounts = new Map();
+  exercises.forEach((entry) => {
+    const exerciseId = Number.parseInt(entry?.exerciseId, 10);
+    if (Number.isFinite(exerciseId) && exerciseId > 0) return;
+    const key = normalizeExerciseNameKey(entry?.name ?? entry?.exerciseName ?? "");
+    if (!key) return;
+    unresolvedNameCounts.set(key, (unresolvedNameCounts.get(key) ?? 0) + 1);
+  });
+  if (unresolvedNameCounts.size === 0) return [];
+  const remaining = new Map(unresolvedNameCounts);
+  return draft.needsReview.filter((entry) => {
+    const key = normalizeExerciseNameKey(entry?.requestedName ?? "");
+    if (!key) return false;
+    const count = remaining.get(key) ?? 0;
+    if (count <= 0) return false;
+    remaining.set(key, count - 1);
+    return true;
+  });
+}
+
 const ADJUSTMENT_CHIPS = [
   "Make it 8 exercises",
   "More quads",
@@ -172,6 +203,7 @@ export default function CoachView({
   onNotify,
   onOpenTemplate,
   onOpenWorkout,
+  onOpenSettings,
   onNavigateToGyms,
 }) {
   const coachKeyMode = getCoachKeyMode();
@@ -207,7 +239,7 @@ export default function CoachView({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [retryMessage, setRetryMessage] = useState("");
-  const [contextEnabled, setContextEnabled] = useState(false);
+  const contextEnabled = settings?.coach_context_enabled ?? true;
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextPreview, setContextPreview] = useState(null);
@@ -230,6 +262,7 @@ export default function CoachView({
   const [createdTemplateByMessageId, setCreatedTemplateByMessageId] = useState({});
   const [startedWorkoutByMessageId, setStartedWorkoutByMessageId] = useState({});
   const [needsReviewBusyKey, setNeedsReviewBusyKey] = useState("");
+  const [expandedNeedsReviewByMessageId, setExpandedNeedsReviewByMessageId] = useState({});
   const [actionEditMode, setActionEditMode] = useState(false);
   const [actionEditDraft, setActionEditDraft] = useState({ title: "", gymId: "" });
   const [actionErrors, setActionErrors] = useState([]);
@@ -273,7 +306,6 @@ export default function CoachView({
   useEffect(() => {
     if (!launchContext) return;
     setPendingLaunchContext(launchContext);
-    setContextEnabled(true);
     setContextScopes((prev) => ({ ...prev, spaces: true }));
   }, [launchContext]);
 
@@ -421,7 +453,7 @@ export default function CoachView({
   }, [coachDiagnosticsEnabled, state.proposals]);
 
   const hasGyms = sortedSpaces.length > 0;
-  const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
+  const effectiveContextEnabled = contextEnabled;
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
     [sortedSpaces, activeGymId]
@@ -968,8 +1000,20 @@ export default function CoachView({
   );
 
   const handleSend = async () => {
-    if (!input.trim()) return;
-    await sendCoachMessage(input, { clearInput: true });
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    const hasVisibleWorkoutDraft = Boolean(
+      latestAssistantMessage &&
+        Array.isArray(latestAssistantMessage?.meta?.workoutDraftPayload?.exercises) &&
+        latestAssistantMessage.meta.workoutDraftPayload.exercises.length
+    );
+    const responseMode = shouldForceWorkoutResponseMode({
+      userMessage: trimmed,
+      hasVisibleWorkoutDraft,
+    })
+      ? "workout"
+      : "general";
+    await sendCoachMessage(trimmed, { clearInput: true, responseMode });
   };
 
   const handleRetry = useCallback(async () => {
@@ -1025,7 +1069,7 @@ export default function CoachView({
   const applyNeedsReviewResolution = useCallback(
     (message, requestedName, selection) => {
       if (!message || message.role !== "assistant") return;
-      const targetName = String(requestedName ?? "").trim().toLowerCase();
+      const targetName = normalizeExerciseNameKey(requestedName);
       const selectedId = Number.parseInt(selection?.exerciseId, 10);
       if (!Number.isFinite(selectedId) || selectedId <= 0) return;
       const selectedName =
@@ -1043,9 +1087,9 @@ export default function CoachView({
             const currentId = Number.parseInt(entry?.exerciseId, 10);
             if (Number.isFinite(currentId) && currentId > 0) return entry;
             if (resolvedOne) return entry;
-            const currentName = String(entry?.name ?? entry?.exerciseName ?? "")
-              .trim()
-              .toLowerCase();
+            const currentName = normalizeExerciseNameKey(
+              entry?.name ?? entry?.exerciseName ?? ""
+            );
             if (!targetName || currentName === targetName) {
               resolvedOne = true;
               return {
@@ -1071,7 +1115,7 @@ export default function CoachView({
           const previousNeedsReview = Array.isArray(draft.needsReview) ? draft.needsReview : [];
           let removed = false;
           const nextNeedsReview = previousNeedsReview.filter((entry) => {
-            const current = String(entry?.requestedName ?? "").trim().toLowerCase();
+            const current = normalizeExerciseNameKey(entry?.requestedName ?? "");
             if (!removed && current === targetName) {
               removed = true;
               return false;
@@ -1084,14 +1128,19 @@ export default function CoachView({
             exercises: nextExercises,
             ...(nextNeedsReview.length ? { needsReview: nextNeedsReview } : {}),
           };
+          const activeNeedsReview = resolveActiveNeedsReviewEntries(nextDraft);
+          const finalizedDraft = {
+            ...nextDraft,
+            ...(activeNeedsReview.length ? { needsReview: activeNeedsReview } : {}),
+          };
 
           return {
             ...msg,
             meta: {
               ...(msg.meta ?? {}),
-              workoutDraftPayload: nextDraft,
+              workoutDraftPayload: finalizedDraft,
               workoutDraftError: null,
-              status: nextNeedsReview.length ? "error" : "ready",
+              status: activeNeedsReview.length ? "error" : "ready",
             },
           };
         })
@@ -1222,6 +1271,11 @@ export default function CoachView({
           exercises: nextExercises,
           ...(nextNeedsReview.length ? { needsReview: nextNeedsReview } : {}),
         };
+        const activeNeedsReview = resolveActiveNeedsReviewEntries(nextDraft);
+        const finalizedDraft = {
+          ...nextDraft,
+          ...(activeNeedsReview.length ? { needsReview: activeNeedsReview } : {}),
+        };
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === message.id
@@ -1229,16 +1283,16 @@ export default function CoachView({
                   ...msg,
                   meta: {
                     ...(msg.meta ?? {}),
-                    workoutDraftPayload: nextDraft,
+                    workoutDraftPayload: finalizedDraft,
                     workoutDraftSource: "resolved:mapping",
                     workoutDraftError: null,
-                    status: "ready",
+                    status: activeNeedsReview.length ? "error" : "ready",
                   },
                 }
               : msg
           )
         );
-        if (mapped.unresolvedCount > 0 || nextNeedsReview.length > 0) {
+        if (mapped.unresolvedCount > 0 || activeNeedsReview.length > 0) {
           onNotify?.(
             "Some exercises still need review. Pick a suggestion or create a custom exercise.",
             { tone: "warning" }
@@ -1795,18 +1849,12 @@ export default function CoachView({
         </div>
         {!effectiveContextEnabled ? (
           <div className="coach-context-warning">
-            <span>Context is off. Coach will generate generic workouts.</span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setContextEnabled(true);
-                setContextScopes((prev) => ({ ...prev, spaces: true }));
-              }}
-              disabled={sending}
-            >
-              Enable
-            </Button>
+            <span>Context is off. Turn it on in Settings for personalized coaching.</span>
+            {onOpenSettings ? (
+              <Button variant="secondary" size="sm" onClick={onOpenSettings} disabled={sending}>
+                Open settings
+              </Button>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -1885,15 +1933,18 @@ export default function CoachView({
             <div className="ui-row ui-row--between ui-row--wrap">
               <div>
                 <div className="ui-strong">Share workout data</div>
-                <div className="template-meta">Choose what the coach can access.</div>
+                <div className="template-meta">
+                  Context sharing is controlled in Settings.
+                </div>
               </div>
-              <Button
-                variant={contextEnabled ? "primary" : "secondary"}
-                size="sm"
-                onClick={() => setContextEnabled((prev) => !prev)}
-              >
-                {contextEnabled ? "On" : "Off"}
-              </Button>
+              <div className="ui-row ui-row--wrap">
+                <span className="template-meta">Status: {contextEnabled ? "On" : "Off"}</span>
+                {onOpenSettings ? (
+                  <Button variant="secondary" size="sm" onClick={onOpenSettings}>
+                    Open settings
+                  </Button>
+                ) : null}
+              </div>
             </div>
 
             <div className="coach-context__grid">
@@ -2018,9 +2069,7 @@ export default function CoachView({
                       };
                     })
                   : [];
-              const needsReviewEntries = Array.isArray(templateDraft?.needsReview)
-                ? templateDraft.needsReview
-                : [];
+              const needsReviewEntries = resolveActiveNeedsReviewEntries(templateDraft);
               const hasWorkoutCard =
                 hasWorkoutCardPayload(message.role, workoutExercises) ||
                 (isAssistant && needsReviewEntries.length > 0);
@@ -2028,6 +2077,12 @@ export default function CoachView({
               const hasUnmappedExercises =
                 mappingStatus.total > 0 && mappingStatus.matched < mappingStatus.total;
               const hasNeedsReview = needsReviewEntries.length > 0;
+              const needsReviewExpanded = Boolean(
+                expandedNeedsReviewByMessageId[message.id]
+              );
+              const visibleNeedsReviewEntries = needsReviewExpanded
+                ? needsReviewEntries
+                : needsReviewEntries.slice(0, 3);
               const isResolvingMissingExercises =
                 resolvingMissingMessageId === message.id;
               const draftReady =
@@ -2035,8 +2090,7 @@ export default function CoachView({
                 hasWorkoutCard &&
                 !templateError &&
                 !hasNeedsReview &&
-                !hasUnmappedExercises &&
-                Boolean(templateDraftInfo?.valid);
+                !hasUnmappedExercises;
               const cardGymName =
                 message?.meta?.contextSnapshot?.gymName ??
                 selectedGym?.name ??
@@ -2118,9 +2172,28 @@ export default function CoachView({
                                   Resolve unmatched exercises
                                 </div>
                                 <div className="template-meta">
-                                  Pick an existing exercise or create one explicitly.
+                                  We auto-matched high-confidence names. Review only the uncertain items.
                                 </div>
-                                {needsReviewEntries.map((entry, index) => {
+                                <div className="ui-row ui-row--wrap">
+                                  <Button
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() =>
+                                      setExpandedNeedsReviewByMessageId((prev) => ({
+                                        ...prev,
+                                        [message.id]: !prev[message.id],
+                                      }))
+                                    }
+                                  >
+                                    {needsReviewExpanded
+                                      ? "Hide review list"
+                                      : `Review ${needsReviewEntries.length} item${
+                                          needsReviewEntries.length === 1 ? "" : "s"
+                                        }`}
+                                  </Button>
+                                </div>
+                                {needsReviewExpanded
+                                  ? visibleNeedsReviewEntries.map((entry, index) => {
                                   const requestedName =
                                     String(entry?.requestedName ?? "").trim() ||
                                     `Exercise ${index + 1}`;
@@ -2172,7 +2245,8 @@ export default function CoachView({
                                       </div>
                                     </div>
                                   );
-                                })}
+                                  })
+                                  : null}
                               </div>
                             ) : null}
                             <div className="ui-row ui-row--wrap">
@@ -2230,7 +2304,6 @@ export default function CoachView({
                                 onClick={() => void handleCreateTemplateFromMessage(message)}
                                 loading={isCreatingTemplate}
                                 disabled={
-                                  !isLatestAssistant ||
                                   !draftReady ||
                                   isCreatingTemplate ||
                                   createdTemplate?.id != null
