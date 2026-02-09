@@ -29,13 +29,16 @@ import { extractWorkoutPlanOutput } from "../../coach/responseValidation";
 import { getCoachAccessState } from "./coachAccess";
 import { getCoachKeyMode } from "../../config/coachKeyMode";
 import {
+  buildHeuristicWorkoutDraft,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
+  hasWorkoutIntent,
+  isStartWorkoutIntentText,
+  isTemplateIntentText,
   isInternalPromptMessage,
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
-  shouldForceWorkoutResponseMode,
 } from "./coachViewUiModel";
 import {
   buildTemplateDraftFromWorkoutPlan,
@@ -55,7 +58,6 @@ import {
   setActiveWorkoutSpace,
 } from "../../db";
 import { sortSpacesByName } from "../../workoutSpaces/logic";
-import { createCustomExercise } from "../../exercises/customExercise";
 
 import BottomSheet from "../../components/ui/BottomSheet";
 
@@ -159,36 +161,6 @@ function hasCoachContextCounts(contract) {
   return counts.some((value) => Number(value) > 0);
 }
 
-function normalizeExerciseNameKey(value) {
-  return String(value ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function resolveActiveNeedsReviewEntries(draft) {
-  const exercises = Array.isArray(draft?.exercises) ? draft.exercises : [];
-  if (!Array.isArray(draft?.needsReview) || draft.needsReview.length === 0) return [];
-  const unresolvedNameCounts = new Map();
-  exercises.forEach((entry) => {
-    const exerciseId = Number.parseInt(entry?.exerciseId, 10);
-    if (Number.isFinite(exerciseId) && exerciseId > 0) return;
-    const key = normalizeExerciseNameKey(entry?.name ?? entry?.exerciseName ?? "");
-    if (!key) return;
-    unresolvedNameCounts.set(key, (unresolvedNameCounts.get(key) ?? 0) + 1);
-  });
-  if (unresolvedNameCounts.size === 0) return [];
-  const remaining = new Map(unresolvedNameCounts);
-  return draft.needsReview.filter((entry) => {
-    const key = normalizeExerciseNameKey(entry?.requestedName ?? "");
-    if (!key) return false;
-    const count = remaining.get(key) ?? 0;
-    if (count <= 0) return false;
-    remaining.set(key, count - 1);
-    return true;
-  });
-}
-
 const ADJUSTMENT_CHIPS = [
   "Make it 8 exercises",
   "More quads",
@@ -197,13 +169,16 @@ const ADJUSTMENT_CHIPS = [
   "Shorter 30 min",
   "Add warmup sets",
 ];
+
+function normalizeExerciseName(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
   onNotify,
   onOpenTemplate,
   onOpenWorkout,
-  onOpenSettings,
   onNavigateToGyms,
 }) {
   const coachKeyMode = getCoachKeyMode();
@@ -235,11 +210,20 @@ export default function CoachView({
     () => new Map((allExercises ?? []).map((exercise) => [exercise.id, exercise])),
     [allExercises]
   );
+  const exerciseNameLookup = useMemo(
+    () =>
+      new Map(
+        (allExercises ?? [])
+          .map((exercise) => [normalizeExerciseName(exercise?.name), exercise?.id])
+          .filter(([name, id]) => name && id != null)
+      ),
+    [allExercises]
+  );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [retryMessage, setRetryMessage] = useState("");
-  const contextEnabled = settings?.coach_context_enabled ?? true;
+  const [contextEnabled, setContextEnabled] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextPreview, setContextPreview] = useState(null);
@@ -258,11 +242,8 @@ export default function CoachView({
   const [adjustMessageId, setAdjustMessageId] = useState(null);
   const [startingWorkoutMessageId, setStartingWorkoutMessageId] = useState(null);
   const [templateCreatingMessageId, setTemplateCreatingMessageId] = useState(null);
-  const [resolvingMissingMessageId, setResolvingMissingMessageId] = useState(null);
   const [createdTemplateByMessageId, setCreatedTemplateByMessageId] = useState({});
   const [startedWorkoutByMessageId, setStartedWorkoutByMessageId] = useState({});
-  const [needsReviewBusyKey, setNeedsReviewBusyKey] = useState("");
-  const [expandedNeedsReviewByMessageId, setExpandedNeedsReviewByMessageId] = useState({});
   const [actionEditMode, setActionEditMode] = useState(false);
   const [actionEditDraft, setActionEditDraft] = useState({ title: "", gymId: "" });
   const [actionErrors, setActionErrors] = useState([]);
@@ -306,6 +287,7 @@ export default function CoachView({
   useEffect(() => {
     if (!launchContext) return;
     setPendingLaunchContext(launchContext);
+    setContextEnabled(true);
     setContextScopes((prev) => ({ ...prev, spaces: true }));
   }, [launchContext]);
 
@@ -453,7 +435,7 @@ export default function CoachView({
   }, [coachDiagnosticsEnabled, state.proposals]);
 
   const hasGyms = sortedSpaces.length > 0;
-  const effectiveContextEnabled = contextEnabled;
+  const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
     [sortedSpaces, activeGymId]
@@ -634,82 +616,20 @@ export default function CoachView({
   };
 
   const buildWorkoutDraftForMessage = useCallback(
-    async ({ actionDraft, text }) => {
-      const finalizeWithLibraryMapping = async (draftState) => {
-        const payload = draftState?.payload;
-        if (!payload || !Array.isArray(payload.exercises) || payload.exercises.length === 0) {
-          return draftState;
-        }
-        const hasMissingIds = payload.exercises.some((entry) => {
-          const entryId = Number.parseInt(entry?.exerciseId, 10);
-          return !Number.isFinite(entryId) || entryId <= 0;
-        });
-        const hasNeedsReview =
-          Array.isArray(payload.needsReview) && payload.needsReview.length > 0;
-        if (!hasMissingIds && !hasNeedsReview) {
-          return draftState;
-        }
-
-        try {
-          const mapped = await resolveTemplateExercises(payload.exercises, {
-            createMissing: false,
-            allExercises,
-          });
-          const nextExercises = mapped.resolvedExercises.map((entry, index) => {
-            const previous = payload.exercises[index] ?? {};
-            const resolvedId = Number.parseInt(entry?.exerciseId, 10);
-            const sets = Number.parseInt(entry?.sets ?? previous?.sets, 10);
-            const reps = Number.parseInt(entry?.reps ?? previous?.reps, 10);
-            return {
-              ...(Number.isFinite(resolvedId) && resolvedId > 0
-                ? { exerciseId: resolvedId }
-                : {}),
-              name:
-                String(previous?.name ?? previous?.exerciseName ?? "").trim() ||
-                `Exercise ${index + 1}`,
-              exerciseName:
-                String(previous?.exerciseName ?? previous?.name ?? "").trim() ||
-                `Exercise ${index + 1}`,
-              sets: Number.isFinite(sets) && sets > 0 ? sets : 3,
-              reps: Number.isFinite(reps) && reps > 0 ? reps : 10,
-              ...(Number.isFinite(entry?.warmupSets) && entry.warmupSets >= 0
-                ? { warmupSets: entry.warmupSets }
-                : {}),
-            };
-          });
-          const nextNeedsReview = mapped.mapping
-            .map((entry) => entry?.needsReview)
-            .filter(Boolean);
-          return {
-            ...draftState,
-            payload: {
-              ...payload,
-              exercises: nextExercises,
-              ...(nextNeedsReview.length ? { needsReview: nextNeedsReview } : {}),
-            },
-            status: nextNeedsReview.length ? "error" : "ready",
-            error: nextNeedsReview.length
-              ? "Some exercises need review before saving."
-              : null,
-          };
-        } catch {
-          return draftState;
-        }
-      };
-
+    ({ actionDraft, text }) => {
       const templateInfo = resolveTemplateDraftInfo({
         actionDraft: actionDraft ?? null,
         text: text ?? "",
         templateTool,
       });
       if (templateInfo.draft) {
-        return finalizeWithLibraryMapping({
+        return {
           payload: templateInfo.draft,
-          status: templateInfo.valid ? "ready" : "error",
+          status: "ready",
           source: templateInfo.source ?? null,
-          error: templateInfo.valid ? null : templateInfo.error,
+          error: null,
           rawJson: templateInfo.rawJson ?? null,
-        });
+        };
       }
       const workoutPlan = extractWorkoutPlanOutput(text ?? "");
       if (workoutPlan.valid && workoutPlan.parsed) {
@@ -718,13 +638,13 @@ export default function CoachView({
           spaceId: activeGymId,
         });
         if (draft) {
-          return finalizeWithLibraryMapping({
+          return {
             payload: draft,
             status: "ready",
             source: workoutPlan.source ?? null,
             error: null,
             rawJson: workoutPlan.rawJson ?? null,
-          });
+          };
         }
       }
       return {
@@ -735,7 +655,7 @@ export default function CoachView({
         rawJson: templateInfo.rawJson ?? workoutPlan.rawJson ?? null,
       };
     },
-    [activeGymId, allExercises, templateTool]
+    [activeGymId, templateTool]
   );
 
   useEffect(() => {
@@ -915,7 +835,7 @@ export default function CoachView({
           },
           requestUserMessage: trimmed,
         };
-        const draftState = await buildWorkoutDraftForMessage({
+        const draftState = buildWorkoutDraftForMessage({
           actionDraft: result.actionDraft,
           text: result.assistant,
         });
@@ -1000,20 +920,8 @@ export default function CoachView({
   );
 
   const handleSend = async () => {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    const hasVisibleWorkoutDraft = Boolean(
-      latestAssistantMessage &&
-        Array.isArray(latestAssistantMessage?.meta?.workoutDraftPayload?.exercises) &&
-        latestAssistantMessage.meta.workoutDraftPayload.exercises.length
-    );
-    const responseMode = shouldForceWorkoutResponseMode({
-      userMessage: trimmed,
-      hasVisibleWorkoutDraft,
-    })
-      ? "workout"
-      : "general";
-    await sendCoachMessage(trimmed, { clearInput: true, responseMode });
+    if (!input.trim()) return;
+    await sendCoachMessage(input, { clearInput: true });
   };
 
   const handleRetry = useCallback(async () => {
@@ -1066,119 +974,6 @@ export default function CoachView({
     [activeGymId, resolveDraftInfoForMessage]
   );
 
-  const applyNeedsReviewResolution = useCallback(
-    (message, requestedName, selection) => {
-      if (!message || message.role !== "assistant") return;
-      const targetName = normalizeExerciseNameKey(requestedName);
-      const selectedId = Number.parseInt(selection?.exerciseId, 10);
-      if (!Number.isFinite(selectedId) || selectedId <= 0) return;
-      const selectedName =
-        String(selection?.name ?? exerciseMap.get(selectedId)?.name ?? "").trim() ||
-        `Exercise ${selectedId}`;
-
-      setMessages((prev) =>
-        prev.map((msg) => {
-          if (msg.id !== message.id) return msg;
-          const draft = resolveTemplateDraftForMessage(msg);
-          if (!draft || !Array.isArray(draft.exercises)) return msg;
-
-          let resolvedOne = false;
-          const nextExercises = draft.exercises.map((entry) => {
-            const currentId = Number.parseInt(entry?.exerciseId, 10);
-            if (Number.isFinite(currentId) && currentId > 0) return entry;
-            if (resolvedOne) return entry;
-            const currentName = normalizeExerciseNameKey(
-              entry?.name ?? entry?.exerciseName ?? ""
-            );
-            if (!targetName || currentName === targetName) {
-              resolvedOne = true;
-              return {
-                ...entry,
-                exerciseId: selectedId,
-                name: selectedName,
-                exerciseName: selectedName,
-              };
-            }
-            return entry;
-          });
-
-          if (!resolvedOne) {
-            nextExercises.push({
-              exerciseId: selectedId,
-              name: selectedName,
-              exerciseName: selectedName,
-              sets: 3,
-              reps: 10,
-            });
-          }
-
-          const previousNeedsReview = Array.isArray(draft.needsReview) ? draft.needsReview : [];
-          let removed = false;
-          const nextNeedsReview = previousNeedsReview.filter((entry) => {
-            const current = normalizeExerciseNameKey(entry?.requestedName ?? "");
-            if (!removed && current === targetName) {
-              removed = true;
-              return false;
-            }
-            return true;
-          });
-
-          const nextDraft = {
-            ...draft,
-            exercises: nextExercises,
-            ...(nextNeedsReview.length ? { needsReview: nextNeedsReview } : {}),
-          };
-          const activeNeedsReview = resolveActiveNeedsReviewEntries(nextDraft);
-          const finalizedDraft = {
-            ...nextDraft,
-            ...(activeNeedsReview.length ? { needsReview: activeNeedsReview } : {}),
-          };
-
-          return {
-            ...msg,
-            meta: {
-              ...(msg.meta ?? {}),
-              workoutDraftPayload: finalizedDraft,
-              workoutDraftError: null,
-              status: activeNeedsReview.length ? "error" : "ready",
-            },
-          };
-        })
-      );
-    },
-    [exerciseMap, resolveTemplateDraftForMessage]
-  );
-
-  const handlePickNeedsReviewSuggestion = useCallback(
-    (message, requestedName, suggestion) => {
-      applyNeedsReviewResolution(message, requestedName, suggestion);
-      onNotify?.("Exercise resolved.", { tone: "success" });
-    },
-    [applyNeedsReviewResolution, onNotify]
-  );
-
-  const handleCreateExerciseForNeedsReview = useCallback(
-    async (message, requestedName) => {
-      const key = `${message?.id ?? "unknown"}:${requestedName ?? ""}`;
-      setNeedsReviewBusyKey(key);
-      try {
-        const name = String(requestedName ?? "").trim();
-        if (!name) throw new Error("Exercise name is required.");
-        const newId = await createCustomExercise({ name });
-        applyNeedsReviewResolution(message, name, { exerciseId: newId, name });
-        onNotify?.(`Created custom exercise: ${name}`, { tone: "success" });
-      } catch (err) {
-        onNotify?.(
-          `Unable to create custom exercise: ${err?.message ?? "Unknown error"}`,
-          { tone: "warning" }
-        );
-      } finally {
-        setNeedsReviewBusyKey("");
-      }
-    },
-    [applyNeedsReviewResolution, onNotify]
-  );
-
   const latestTemplateDraftInfo = useMemo(() => {
     if (!latestAssistantMessage) return null;
     return resolveDraftInfoForMessage(latestAssistantMessage);
@@ -1209,107 +1004,17 @@ export default function CoachView({
         const entryId = Number.parseInt(entry?.exerciseId, 10);
         if (Number.isFinite(entryId) && exerciseMap.has(entryId)) {
           matched += 1;
+          return;
+        }
+        const entryName = normalizeExerciseName(entry?.name ?? entry?.exerciseName);
+        if (entryName && exerciseNameLookup.has(entryName)) {
+          matched += 1;
         }
       });
       const label = matched === 0 ? "Needs mapping" : `Matched ${matched}/${total} to library`;
       return { matched, total, label };
     },
-    [exerciseMap]
-  );
-
-  const handleResolveMissingExercises = useCallback(
-    async (message) => {
-      if (!message || message.role !== "assistant") return;
-      const draft = resolveTemplateDraftForMessage(message);
-      if (!draft || !Array.isArray(draft.exercises) || !draft.exercises.length) {
-        onNotify?.("No workout draft is available yet.", { tone: "warning" });
-        return;
-      }
-
-      setResolvingMissingMessageId(message.id);
-      try {
-        const mapped = await resolveTemplateExercises(draft.exercises, {
-          createMissing: false,
-        });
-        const nextExercises = mapped.resolvedExercises.map((entry, index) => {
-          const mappingEntry = mapped.mapping[index] ?? {};
-          const previous = draft.exercises[index] ?? {};
-          const name =
-            String(
-              mappingEntry.resolvedName ??
-                mappingEntry.draftName ??
-                previous.name ??
-                previous.exerciseName ??
-                ""
-            ).trim() || `Exercise ${index + 1}`;
-          return {
-            ...(entry.exerciseId != null ? { exerciseId: entry.exerciseId } : {}),
-            name,
-            exerciseName: name,
-            sets:
-              Number.isFinite(entry.sets) && entry.sets > 0
-                ? entry.sets
-                : Number.isFinite(Number(previous.sets))
-                  ? Number(previous.sets)
-                  : 3,
-            reps:
-              Number.isFinite(entry.reps) && entry.reps > 0
-                ? entry.reps
-                : Number.isFinite(Number(previous.reps))
-                  ? Number(previous.reps)
-                  : 10,
-            ...(Number.isFinite(entry.warmupSets) && entry.warmupSets >= 0
-              ? { warmupSets: entry.warmupSets }
-              : {}),
-          };
-        });
-        const nextNeedsReview = mapped.mapping
-          .map((entry) => entry?.needsReview)
-          .filter(Boolean);
-        const nextDraft = {
-          ...draft,
-          exercises: nextExercises,
-          ...(nextNeedsReview.length ? { needsReview: nextNeedsReview } : {}),
-        };
-        const activeNeedsReview = resolveActiveNeedsReviewEntries(nextDraft);
-        const finalizedDraft = {
-          ...nextDraft,
-          ...(activeNeedsReview.length ? { needsReview: activeNeedsReview } : {}),
-        };
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === message.id
-              ? {
-                  ...msg,
-                  meta: {
-                    ...(msg.meta ?? {}),
-                    workoutDraftPayload: finalizedDraft,
-                    workoutDraftSource: "resolved:mapping",
-                    workoutDraftError: null,
-                    status: activeNeedsReview.length ? "error" : "ready",
-                  },
-                }
-              : msg
-          )
-        );
-        if (mapped.unresolvedCount > 0 || activeNeedsReview.length > 0) {
-          onNotify?.(
-            "Some exercises still need review. Pick a suggestion or create a custom exercise.",
-            { tone: "warning" }
-          );
-        } else {
-          onNotify?.("All exercises are mapped to your library.", { tone: "success" });
-        }
-      } catch (err) {
-        onNotify?.(
-          `Unable to resolve missing exercises: ${err?.message ?? "Unknown error"}`,
-          { tone: "warning" }
-        );
-      } finally {
-        setResolvingMissingMessageId(null);
-      }
-    },
-    [onNotify, resolveTemplateDraftForMessage]
+    [exerciseMap, exerciseNameLookup]
   );
 
   const copyTextToClipboard = useCallback(
@@ -1368,21 +1073,14 @@ export default function CoachView({
         onNotify?.("Workout draft is not ready yet.", { tone: "warning" });
         return;
       }
-      const activeNeedsReview = resolveActiveNeedsReviewEntries(draft);
-      if (activeNeedsReview.length > 0) {
-        onNotify?.("Resolve pending exercise mappings before starting this workout.", {
-          tone: "warning",
-        });
-        return;
-      }
 
       setStartingWorkoutMessageId(message.id);
       try {
         const mapped = await resolveTemplateExercises(draft.exercises, {
-          createMissing: false,
+          createMissing: true,
         });
         if (mapped.mappedCount !== draft.exercises.length) {
-          throw new Error("Unable to map all exercises for workout start. Review unresolved items.");
+          throw new Error("Unable to map all exercises for workout start.");
         }
         const workoutPayloadExercises = mapped.resolvedExercises.map((entry) => {
           const reps = Number.parseInt(entry?.reps, 10);
@@ -1452,69 +1150,19 @@ export default function CoachView({
         });
         return;
       }
-      const activeNeedsReview = resolveActiveNeedsReviewEntries(draft);
-      if (activeNeedsReview.length > 0) {
-        onNotify?.("Resolve pending exercise mappings before saving as a template.", {
-          tone: "warning",
-        });
-        return;
-      }
       setTemplateCreatingMessageId(message.id);
       try {
-        const mapped = await resolveTemplateExercises(draft.exercises, {
-          createMissing: false,
-        });
-        if (mapped.mappedCount !== draft.exercises.length) {
-          throw new Error(
-            "Unable to map all exercises for template creation. Review unresolved items."
-          );
-        }
-        const normalizedDraft = {
-          ...draft,
-          exercises: mapped.resolvedExercises.map((entry, index) => {
-            const mappingEntry = mapped.mapping[index] ?? {};
-            const previous = draft.exercises[index] ?? {};
-            const name =
-              String(
-                mappingEntry.resolvedName ??
-                  mappingEntry.draftName ??
-                  previous.name ??
-                  previous.exerciseName ??
-                  ""
-              ).trim() || `Exercise ${index + 1}`;
-            return {
-              ...(entry.exerciseId != null ? { exerciseId: entry.exerciseId } : {}),
-              name,
-              exerciseName: name,
-              sets:
-                Number.isFinite(entry.sets) && entry.sets > 0
-                  ? entry.sets
-                  : Number.isFinite(Number(previous.sets))
-                    ? Number(previous.sets)
-                    : 3,
-              reps:
-                Number.isFinite(entry.reps) && entry.reps > 0
-                  ? entry.reps
-                  : Number.isFinite(Number(previous.reps))
-                    ? Number(previous.reps)
-                    : 10,
-              ...(Number.isFinite(entry.warmupSets) && entry.warmupSets >= 0
-                ? { warmupSets: entry.warmupSets }
-                : {}),
-            };
-          }),
-        };
-        const result = await executeTool("create_template", normalizedDraft);
+        const result = await executeTool("create_template", draft);
         const createdTemplateId = result?.templateId ?? result?.id ?? null;
         setCreatedTemplateByMessageId((prev) => ({
           ...prev,
           [message.id]: {
             id: createdTemplateId,
-            name: normalizedDraft.name ?? "",
+            name: draft.name ?? "",
           },
         }));
         onNotify?.(
-          `Template created${normalizedDraft.name ? `: ${normalizedDraft.name}` : "."}`,
+          `Template created${draft.name ? `: ${draft.name}` : "."}`,
           {
             tone: "success",
             ...(createdTemplateId != null && onOpenTemplate
@@ -1851,12 +1499,18 @@ export default function CoachView({
         </div>
         {!effectiveContextEnabled ? (
           <div className="coach-context-warning">
-            <span>Context is off. Turn it on in Settings for personalized coaching.</span>
-            {onOpenSettings ? (
-              <Button variant="secondary" size="sm" onClick={onOpenSettings} disabled={sending}>
-                Open settings
-              </Button>
-            ) : null}
+            <span>Context is off. Coach will generate generic workouts.</span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setContextEnabled(true);
+                setContextScopes((prev) => ({ ...prev, spaces: true }));
+              }}
+              disabled={sending}
+            >
+              Enable
+            </Button>
           </div>
         ) : null}
       </div>
@@ -1935,18 +1589,15 @@ export default function CoachView({
             <div className="ui-row ui-row--between ui-row--wrap">
               <div>
                 <div className="ui-strong">Share workout data</div>
-                <div className="template-meta">
-                  Context sharing is controlled in Settings.
-                </div>
+                <div className="template-meta">Choose what the coach can access.</div>
               </div>
-              <div className="ui-row ui-row--wrap">
-                <span className="template-meta">Status: {contextEnabled ? "On" : "Off"}</span>
-                {onOpenSettings ? (
-                  <Button variant="secondary" size="sm" onClick={onOpenSettings}>
-                    Open settings
-                  </Button>
-                ) : null}
-              </div>
+              <Button
+                variant={contextEnabled ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => setContextEnabled((prev) => !prev)}
+              >
+                {contextEnabled ? "On" : "Off"}
+              </Button>
             </div>
 
             <div className="coach-context__grid">
@@ -2030,7 +1681,20 @@ export default function CoachView({
                       spaceId: activeGymId,
                     })
                   : null;
-              const templateDraft = templateDraftInfo?.draft ?? inferredTemplateDraft ?? null;
+              const fallbackDraft =
+                isAssistant && !templateDraftInfo?.draft && !workoutPlanInfo?.valid
+                  ? buildHeuristicWorkoutDraft({
+                      userMessage:
+                        message?.meta?.requestUserMessage ||
+                        (isLatestAssistant ? latestUserContent : "") ||
+                        message?.content ||
+                        "",
+                      exercises: allExercises ?? [],
+                      spaceId: activeGymId,
+                    })
+                  : null;
+              const templateDraft =
+                templateDraftInfo?.draft ?? inferredTemplateDraft ?? fallbackDraft ?? null;
               const createdTemplate = createdTemplateByMessageId[message.id] ?? null;
               const startedWorkout = startedWorkoutByMessageId[message.id] ?? null;
               const isCreatingTemplate = templateCreatingMessageId === message.id;
@@ -2071,28 +1735,19 @@ export default function CoachView({
                       };
                     })
                   : [];
-              const needsReviewEntries = resolveActiveNeedsReviewEntries(templateDraft);
-              const hasWorkoutCard =
-                hasWorkoutCardPayload(message.role, workoutExercises) ||
-                (isAssistant && needsReviewEntries.length > 0);
+              const hasWorkoutCard = hasWorkoutCardPayload(message.role, workoutExercises);
               const mappingStatus = getDraftMappingStatus(templateDraft);
-              const hasUnmappedExercises =
-                mappingStatus.total > 0 && mappingStatus.matched < mappingStatus.total;
-              const hasNeedsReview = needsReviewEntries.length > 0;
-              const needsReviewExpanded = Boolean(
-                expandedNeedsReviewByMessageId[message.id]
-              );
-              const visibleNeedsReviewEntries = needsReviewExpanded
-                ? needsReviewEntries
-                : needsReviewEntries.slice(0, 3);
-              const isResolvingMissingExercises =
-                resolvingMissingMessageId === message.id;
               const draftReady =
                 Boolean(templateDraft) &&
                 hasWorkoutCard &&
                 !templateError &&
-                !hasNeedsReview &&
-                !hasUnmappedExercises;
+                (templateDraftInfo?.valid ||
+                  hasWorkoutIntent(
+                    message?.meta?.requestUserMessage ||
+                      latestUserContent ||
+                      message?.content ||
+                      ""
+                  ));
               const cardGymName =
                 message?.meta?.contextSnapshot?.gymName ??
                 selectedGym?.name ??
@@ -2139,223 +1794,9 @@ export default function CoachView({
                             <span>Fingerprint: {trustFingerprintLabel}</span>
                           </div>
                         ) : null}
-                        {hasWorkoutCard ? (
-                          <div className="coach-workout-card">
-                            <div className="coach-workout-card__title">{workoutName}</div>
-                            <div className="coach-workout-card__hint">
-                              Review & adjust before saving.
-                            </div>
-                            <div className="coach-workout-card__list">
-                              {workoutExercises.map((entry) => (
-                                <div key={entry.key} className="coach-workout-card__exercise">
-                                  <span className="coach-workout-card__exercise-name">
-                                    {entry.name}
-                                  </span>
-                                  <span className="coach-workout-card__exercise-meta">
-                                    {entry.sets} x {entry.reps}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                            <div className="coach-workout-card__trust">
-                              <span>{mappingStatus.label}</span>
-                              <span>
-                                Gym: {cardGymName} · equipment: {formatCount(cardEquipmentCount)}
-                              </span>
-                            </div>
-                            {hasUnmappedExercises ? (
-                              <div className="coach-workout-card__hint">
-                                Some exercises are not in your library yet.
-                              </div>
-                            ) : null}
-                            {hasNeedsReview ? (
-                              <div className="coach-adjust-panel">
-                                <div className="coach-adjust-panel__label">
-                                  Resolve unmatched exercises
-                                </div>
-                                <div className="template-meta">
-                                  We auto-matched high-confidence names. Review only the uncertain items.
-                                </div>
-                                <div className="ui-row ui-row--wrap">
-                                  <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    onClick={() =>
-                                      setExpandedNeedsReviewByMessageId((prev) => ({
-                                        ...prev,
-                                        [message.id]: !prev[message.id],
-                                      }))
-                                    }
-                                  >
-                                    {needsReviewExpanded
-                                      ? "Hide review list"
-                                      : `Review ${needsReviewEntries.length} item${
-                                          needsReviewEntries.length === 1 ? "" : "s"
-                                        }`}
-                                  </Button>
-                                </div>
-                                {needsReviewExpanded
-                                  ? visibleNeedsReviewEntries.map((entry, index) => {
-                                  const requestedName =
-                                    String(entry?.requestedName ?? "").trim() ||
-                                    `Exercise ${index + 1}`;
-                                  const busyKey = `${message.id}:${requestedName}`;
-                                  const suggestions = Array.isArray(entry?.suggestions)
-                                    ? entry.suggestions
-                                    : [];
-                                  return (
-                                    <div key={`${message.id}-needs-review-${index}`} className="ui-stack">
-                                      <div className="ui-strong">{requestedName}</div>
-                                      <div className="ui-row ui-row--wrap">
-                                        {suggestions.length ? (
-                                          suggestions.map((suggestion) => (
-                                            <Button
-                                              key={`${message.id}-${requestedName}-${suggestion.exerciseId}`}
-                                              variant="secondary"
-                                              size="sm"
-                                              onClick={() =>
-                                                handlePickNeedsReviewSuggestion(
-                                                  message,
-                                                  requestedName,
-                                                  suggestion
-                                                )
-                                              }
-                                              disabled={sending || Boolean(needsReviewBusyKey)}
-                                            >
-                                              {suggestion.name}
-                                            </Button>
-                                          ))
-                                        ) : (
-                                          <span className="template-meta">
-                                            No close matches available.
-                                          </span>
-                                        )}
-                                        <Button
-                                          variant="ghost"
-                                          size="sm"
-                                          onClick={() =>
-                                            void handleCreateExerciseForNeedsReview(
-                                              message,
-                                              requestedName
-                                            )
-                                          }
-                                          loading={needsReviewBusyKey === busyKey}
-                                          disabled={Boolean(needsReviewBusyKey)}
-                                        >
-                                          Create exercise
-                                        </Button>
-                                      </div>
-                                    </div>
-                                  );
-                                  })
-                                  : null}
-                              </div>
-                            ) : null}
-                            <div className="ui-row ui-row--wrap">
-                              {startedWorkout?.id != null ? (
-                                <Button
-                                  variant="primary"
-                                  size="sm"
-                                  onClick={() => onOpenWorkout?.(startedWorkout.id)}
-                                >
-                                  Open workout
-                                </Button>
-                              ) : (
-                                <Button
-                                  variant="primary"
-                                  size="sm"
-                                  onClick={() => void handleStartWorkoutFromMessage(message)}
-                                  loading={isStartingWorkout}
-                                  disabled={
-                                    !draftReady ||
-                                    isStartingWorkout ||
-                                    sending
-                                  }
-                                >
-                                  {workoutActionConfig.primary}
-                                </Button>
-                              )}
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() =>
-                                  setAdjustMessageId((prev) =>
-                                    prev === message.id ? null : message.id
-                                  )
-                                }
-                                disabled={!isLatestAssistant || sending}
-                              >
-                                {workoutActionConfig.secondaryAdjust}
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                onClick={() =>
-                                  handleAdjustChip(
-                                    message.id,
-                                    "Give me an alternative option for this workout."
-                                  )
-                                }
-                                disabled={!isLatestAssistant || sending}
-                              >
-                                {workoutActionConfig.secondaryAlternative}
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => void handleCreateTemplateFromMessage(message)}
-                                loading={isCreatingTemplate}
-                                disabled={
-                                  !draftReady ||
-                                  isCreatingTemplate ||
-                                  createdTemplate?.id != null
-                                }
-                              >
-                                {workoutActionConfig.tertiaryTemplate}
-                              </Button>
-                              {hasUnmappedExercises ? (
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() => void handleResolveMissingExercises(message)}
-                                  loading={isResolvingMissingExercises}
-                                  disabled={isResolvingMissingExercises || sending}
-                                >
-                                  Resolve exercise IDs
-                                </Button>
-                              ) : null}
-                            </div>
-                            {createdTemplate?.id != null ? (
-                              <div className="ui-row">
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  onClick={() => onOpenTemplate?.(createdTemplate.id)}
-                                >
-                                  Open template
-                                </Button>
-                              </div>
-                            ) : null}
-                            {isAdjustOpen ? (
-                              <div className="coach-adjust-panel">
-                                <div className="coach-adjust-panel__label">
-                                  Quick adjustments
-                                </div>
-                                <div className="coach-adjust-chips">
-                                  {ADJUSTMENT_CHIPS.map((chip) => (
-                                    <button
-                                      key={`${message.id}-${chip}`}
-                                      type="button"
-                                      className="coach-adjust-chip"
-                                      onClick={() => handleAdjustChip(message.id, chip)}
-                                      disabled={!isLatestAssistant || sending}
-                                    >
-                                      {chip}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
+                        {showRequesting ? (
+                          <div className="chat-actions__status">
+                            Requesting template JSON…
                           </div>
                         ) : (
                           <div className="ui-row ui-row--wrap">
@@ -2445,7 +1886,7 @@ export default function CoachView({
         </CardFooter>
       </Card>
 
-      {coachDiagnosticsEnabled && actionDraft ? (
+      {actionDraft ? (
         <Card className="coach-action-tray">
           <CardHeader>
             <div className="ui-row ui-row--between ui-row--wrap">
@@ -2657,7 +2098,7 @@ export default function CoachView({
         </Card>
       ) : null}
 
-      {coachDiagnosticsEnabled && state.proposals.length ? (
+      {state.proposals.length ? (
         <Card>
           <CardHeader>
             <div className="ui-section-title">Pending actions</div>
