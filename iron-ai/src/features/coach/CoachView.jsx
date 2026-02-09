@@ -150,6 +150,36 @@ function formatConfidence(value) {
   return Number(value).toFixed(2);
 }
 
+function toRenderableText(value, fallback = "") {
+  if (value == null) return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((entry) => toRenderableText(entry, ""))
+      .filter(Boolean)
+      .join(" ");
+    return joined || fallback;
+  }
+  if (value instanceof Error) {
+    return value.message ? String(value.message) : fallback;
+  }
+  if (typeof value === "object") {
+    if (typeof value.message === "string" && value.message.trim()) {
+      return value.message.trim();
+    }
+    if (typeof value.text === "string" && value.text.trim()) {
+      return value.text.trim();
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return String(value);
+}
+
 function hasCoachContextCounts(contract) {
   if (!contract) return false;
   const counts = [
@@ -561,7 +591,7 @@ export default function CoachView({
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
     actionPayload?.name ?? actionPayload?.title ?? actionDraft?.title ?? "";
-  const actionDraftSummary = actionDraft?.summary ?? "";
+  const actionDraftSummary = toRenderableText(actionDraft?.summary ?? "", "");
   const actionDraftExercises = Array.isArray(actionPayload?.exercises)
     ? actionPayload.exercises
     : [];
@@ -1351,7 +1381,7 @@ export default function CoachView({
         {
           name: proposal.name,
           status: result.status,
-          summary: proposal.summary,
+          summary: toRenderableText(proposal.summary, "Action updated."),
         },
       ],
     });
@@ -1372,7 +1402,7 @@ export default function CoachView({
         {
           name: proposal.name,
           status: "cancelled",
-          summary: proposal.summary,
+          summary: toRenderableText(proposal.summary, "Action cancelled."),
         },
       ],
     });
@@ -1774,11 +1804,12 @@ export default function CoachView({
               const trustLastDate = formatDateLabel(trustContext?.lastWorkoutDate);
               const trustLibraryLabel = formatCount(trustContext?.exerciseLibraryCount);
               const trustFingerprintLabel = trustFingerprint?.hash ?? "—";
+              const showRequesting = sending && isLatestAssistant;
 
               return (
                 <div key={message.id} className="chat-message" data-role={message.role}>
                   <div className="chat-message__stack">
-                    <div className="chat-bubble">{displayText}</div>
+                    <div className="chat-bubble">{toRenderableText(displayText, "")}</div>
                     {isAssistant ? (
                       <div className="chat-actions">
                         {showTrustLine ? (
@@ -1812,7 +1843,7 @@ export default function CoachView({
                         )}
                         {templateError ? (
                           <div className="coach-template-error" role="status">
-                            <span>{templateError}</span>
+                            <span>{toRenderableText(templateError, "Unable to prepare template.")}</span>
                             {workoutActionConfig.showCopyJson ? (
                               <Button
                                 variant="secondary"
@@ -1842,7 +1873,7 @@ export default function CoachView({
         <CardFooter className="coach-footer">
           {error ? (
             <div className="chat-error" role="status">
-              <div>{error}</div>
+              <div>{toRenderableText(error, "Something went wrong.")}</div>
               {retryMessage || latestUserContent ? (
                 <Button
                   variant="secondary"
@@ -2112,7 +2143,9 @@ export default function CoachView({
                   : [];
               return (
                 <div key={proposal.id} className="proposal-card">
-                  <div className="proposal-card__summary">{proposal.summary}</div>
+                  <div className="proposal-card__summary">
+                    {toRenderableText(proposal.summary, "Pending action")}
+                  </div>
                   <div className="proposal-card__meta">
                     Status: {proposal.status ?? "pending"}
                   </div>
@@ -2161,7 +2194,8 @@ export default function CoachView({
                   <div key={`${event.name}-${index}`} className="tool-event">
                     <div className="tool-event__name">{event.name}</div>
                     <div className="tool-event__meta">
-                      {event.summary} · {event.status}
+                      {toRenderableText(event.summary, "Action update")} ·{" "}
+                      {toRenderableText(event.status, "pending")}
                     </div>
                   </div>
                 ))}
