@@ -1,6 +1,22 @@
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_MODELS_URL = "https://api.openai.com/v1/models";
+const COACH_API_URL = "/api/coach";
 export const DEFAULT_COACH_MODEL = "gpt-4o-mini";
+
+function createStatusError(message, status, code = null) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
+function requireApiKey(apiKey) {
+  const resolved = String(apiKey ?? "").trim();
+  if (!resolved) {
+    throw createStatusError("OpenAI API key is required.", 401);
+  }
+  return resolved;
+}
 
 async function parseError(response) {
   let errorBody = null;
@@ -9,10 +25,42 @@ async function parseError(response) {
   } catch {
     errorBody = null;
   }
-  const error = new Error(errorBody?.error?.message || "OpenAI request failed.");
-  error.status = response.status;
-  error.code = errorBody?.error?.code ?? null;
-  throw error;
+  throw createStatusError(
+    errorBody?.error?.message || "OpenAI request failed.",
+    response.status,
+    errorBody?.error?.code ?? null
+  );
+}
+
+async function parseCoachError(response) {
+  let errorBody = null;
+  try {
+    errorBody = await response.json();
+  } catch {
+    errorBody = null;
+  }
+  throw createStatusError(
+    errorBody?.error?.message || "Coach request failed.",
+    response.status,
+    errorBody?.error?.code ?? null
+  );
+}
+
+async function requestCoachServer(payload, signal) {
+  const response = await fetch(COACH_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+
+  if (!response.ok) {
+    await parseCoachError(response);
+  }
+
+  return response.json();
 }
 
 function mergeToolCallDelta(toolCalls, deltaCalls) {
@@ -38,6 +86,7 @@ function mergeToolCallDelta(toolCalls, deltaCalls) {
 
 export async function streamChatCompletion({
   apiKey,
+  useServerKey = false,
   model = DEFAULT_COACH_MODEL,
   messages,
   tools,
@@ -46,11 +95,34 @@ export async function streamChatCompletion({
   onEnd,
   signal,
 }) {
+  if (useServerKey) {
+    const result = await requestCoachServer(
+      {
+        action: "streamChatCompletion",
+        model,
+        messages,
+        tools,
+      },
+      signal
+    );
+    const content = String(result?.content ?? "").trim();
+    const toolCalls = Array.isArray(result?.toolCalls) ? result.toolCalls : [];
+
+    if (content && !toolCalls.length) {
+      onStart?.();
+      onDelta?.(content);
+      onEnd?.();
+    }
+
+    return { content, toolCalls };
+  }
+
+  const resolvedApiKey = requireApiKey(apiKey);
   const response = await fetch(OPENAI_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${resolvedApiKey}`,
     },
     body: JSON.stringify({
       model,
@@ -135,12 +207,27 @@ export async function streamChatCompletion({
 
 export async function createChatCompletion({
   apiKey,
+  useServerKey = false,
   model = DEFAULT_COACH_MODEL,
   messages,
   responseFormat,
   temperature = 0.2,
   signal,
 } = {}) {
+  if (useServerKey) {
+    return requestCoachServer(
+      {
+        action: "createChatCompletion",
+        model,
+        messages,
+        responseFormat,
+        temperature,
+      },
+      signal
+    );
+  }
+
+  const resolvedApiKey = requireApiKey(apiKey);
   const body = {
     model,
     messages,
@@ -154,7 +241,7 @@ export async function createChatCompletion({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${resolvedApiKey}`,
     },
     body: JSON.stringify(body),
     signal,
@@ -168,10 +255,11 @@ export async function createChatCompletion({
 }
 
 export async function testOpenAIKey({ apiKey, signal } = {}) {
+  const resolvedApiKey = requireApiKey(apiKey);
   const response = await fetch(OPENAI_MODELS_URL, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${resolvedApiKey}`,
     },
     signal,
   });

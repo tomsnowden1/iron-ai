@@ -1,0 +1,11 @@
+bug	Something isn't working	#d73a4a
+documentation	Improvements or additions to documentation	#0075ca
+duplicate	This issue or pull request already exists	#cfd3d7
+enhancement	New feature or request	#a2eeef
+help wanted	Extra attention is needed	#008672
+good first issue	Good for newcomers	#7057ff
+invalid	This doesn't seem right	#e4e669
+question	Further information is requested	#d876e3
+wontfix	This will not be worked on	#ffffff
+codex		#ededed
+automerge		#5F7EA2

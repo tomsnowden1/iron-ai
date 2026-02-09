@@ -1,379 +1,240 @@
-import fs from "node:fs/promises";
+#!/usr/bin/env node
+/**
+ * Fetch yuhonas/free-exercise-db combined dataset + (optional) images,
+ * then output transformed seed JSON files:
+ * - public/seed/exercises.full.transformed.json  (800+)
+ * - public/seed/exercises.inapp.300.json         (300 for app)
+ *
+ * Usage:
+ *   node scripts/free-exercise-db.seed.mjs
+ *   node scripts/free-exercise-db.seed.mjs --images
+ *
+ * Env:
+ *   INAPP_LIMIT=300        (default 300)
+ *   IMAGES_CONCURRENCY=10  (default 10)
+ *   MAX_IMAGES=0           (0 = no limit)
+ */
+
+import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 
-import { EQUIPMENT_CATALOG, EQUIPMENT_ID_SET } from "../src/equipment/catalog.js";
-import { inferExerciseEquipment } from "../src/equipment/inference.js";
-import {
-  computeStableId,
-  normalizeString,
-  slugify,
-} from "./lib/seed-node-utils.mjs";
-
-const SOURCE_URL =
+const DATASET_URL =
   "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/dist/exercises.json";
+const IMAGE_BASE =
+  "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/";
 
-const argv = new Set(process.argv.slice(2));
-const includeImages = argv.has("--images");
+const args = new Set(process.argv.slice(2));
+const withImages = args.has("--images");
 
-const nowIso = () => new Date().toISOString();
+const INAPP_LIMIT = Number(process.env.INAPP_LIMIT || 300);
+const IMAGES_CONCURRENCY = Math.max(1, Number(process.env.IMAGES_CONCURRENCY || 10));
+const MAX_IMAGES = Math.max(0, Number(process.env.MAX_IMAGES || 0));
 
-const EQUIPMENT_ALIAS_MAP = new Map();
+const OUT_SEED_DIR = path.resolve("public/seed");
+const OUT_IMG_DIR = path.resolve("public/exercise-images");
 
-const addEquipmentAlias = (alias, id) => {
-  const key = normalizeString(alias).toLowerCase();
-  if (!key) return;
-  EQUIPMENT_ALIAS_MAP.set(key, id);
-};
+const OUT_RAW = path.join(OUT_SEED_DIR, "free-exercise-db.raw.json");
+const OUT_FULL = path.join(OUT_SEED_DIR, "exercises.full.transformed.json");
+const OUT_INAPP = path.join(OUT_SEED_DIR, `exercises.inapp.${INAPP_LIMIT}.json`);
 
-EQUIPMENT_CATALOG.forEach((item) => {
-  addEquipmentAlias(item.id, item.id);
-  addEquipmentAlias(item.name, item.id);
-  (item.aliases ?? []).forEach((alias) => addEquipmentAlias(alias, item.id));
-});
+function mkdirp(p) {
+  fs.mkdirSync(p, { recursive: true });
+}
 
-const EXTRA_EQUIPMENT_ALIASES = {
-  "body only": "bodyweight",
-  bodyweight: "bodyweight",
-  kettlebell: "dumbbell",
-  kettlebells: "dumbbell",
-  "hex bar": "trap_bar",
-  "trap bar": "trap_bar",
-  "ez bar": "ez_bar",
-  "pull up bar": "pullup_bar",
-  "pull-up bar": "pullup_bar",
-  "lat pulldown": "lat_pulldown_machine",
-  "leg press": "leg_press_machine",
-  "leg extension": "leg_extension_machine",
-  "leg curl": "leg_curl_machine",
-  "calf raise": "calf_raise_machine",
-  "cable machine": "cable_machine",
-  cable: "cable_machine",
-  "stationary bike": "stationary_bike",
-  bike: "stationary_bike",
-  "rowing machine": "rower",
-  rower: "rower",
-};
-
-Object.entries(EXTRA_EQUIPMENT_ALIASES).forEach(([alias, id]) => {
-  addEquipmentAlias(alias, id);
-});
-
-const normalizeStringList = (value, { splitNewlines = true } = {}) => {
-  const list = Array.isArray(value) ? value : value != null ? [value] : [];
-  const expanded = list.flatMap((item) => {
-    if (splitNewlines && typeof item === "string" && item.includes("\n")) {
-      return item.split(/\r?\n+/);
-    }
-    return item;
-  });
-  const normalized = expanded
-    .map((item) => normalizeString(item))
-    .filter((item) => item.length > 0);
-  return Array.from(new Set(normalized));
-};
-
-const normalizeEquipmentList = (value) => {
-  const list = Array.isArray(value) ? value : value != null ? [value] : [];
-  const expanded = list.flatMap((item) => {
-    if (typeof item === "string" && item.includes(",")) {
-      return item.split(",");
-    }
-    return item;
-  });
-  return normalizeStringList(expanded, { splitNewlines: false });
-};
-
-const filterEquipmentIds = (list) =>
-  Array.from(new Set(list.filter((id) => EQUIPMENT_ID_SET.has(id))));
-
-const mapEquipmentIds = (value) => {
-  const list = normalizeEquipmentList(value);
-  const mapped = [];
-
-  list.forEach((item) => {
-    const key = item.toLowerCase();
-    if (EQUIPMENT_ALIAS_MAP.has(key)) {
-      mapped.push(EQUIPMENT_ALIAS_MAP.get(key));
-      return;
-    }
-    if (key.includes("kettlebell")) {
-      mapped.push("dumbbell");
-      return;
-    }
-    if (key.includes("barbell")) {
-      mapped.push("barbell");
-      return;
-    }
-    if (key.includes("trap bar") || key.includes("hex bar")) {
-      mapped.push("trap_bar");
-      return;
-    }
-    if (key.includes("ez bar") || key.includes("curl bar")) {
-      mapped.push("ez_bar");
-      return;
-    }
-    if (key.includes("dumbbell")) {
-      mapped.push("dumbbell");
-      return;
-    }
-    if (key.includes("bench")) {
-      mapped.push("bench");
-      return;
-    }
-    if (key.includes("cable")) {
-      mapped.push("cable_machine");
-      return;
-    }
-    if (key.includes("lat pulldown")) {
-      mapped.push("lat_pulldown_machine");
-      return;
-    }
-    if (key.includes("leg press")) {
-      mapped.push("leg_press_machine");
-      return;
-    }
-    if (key.includes("leg extension")) {
-      mapped.push("leg_extension_machine");
-      return;
-    }
-    if (key.includes("leg curl")) {
-      mapped.push("leg_curl_machine");
-      return;
-    }
-    if (key.includes("calf raise")) {
-      mapped.push("calf_raise_machine");
-      return;
-    }
-    if (key.includes("pull up") || key.includes("pull-up")) {
-      mapped.push("pullup_bar");
-      return;
-    }
-    if (key.includes("dip")) {
-      mapped.push("dip_station");
-      return;
-    }
-    if (key.includes("treadmill")) {
-      mapped.push("treadmill");
-      return;
-    }
-    if (key.includes("bike")) {
-      mapped.push("stationary_bike");
-      return;
-    }
-    if (key.includes("row")) {
-      mapped.push("rower");
-      return;
-    }
-    if (key.includes("body only") || key.includes("bodyweight")) {
-      mapped.push("bodyweight");
-    }
-  });
-
-  return filterEquipmentIds(mapped);
-};
-
-const pick = (record, keys) => {
-  for (const key of keys) {
-    if (record?.[key] !== undefined && record?.[key] !== null) return record[key];
+async function fetchText(url, attempt = 1) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    // quick retry for transient failures
+    if (attempt < 3) return fetchText(url, attempt + 1);
+    throw new Error(`Fetch failed: ${res.status} ${res.statusText} for ${url}`);
   }
-  return undefined;
-};
+  return res.text();
+}
 
-const extractName = (record) =>
-  normalizeString(pick(record, ["name", "exercise_name", "exerciseName", "title"]));
+function writeAtomic(filePath, contents) {
+  const tmp = `${filePath}.tmp.${Date.now()}`;
+  fs.writeFileSync(tmp, contents);
+  fs.renameSync(tmp, filePath);
+}
 
-const normalizeRecord = async (record, now) => {
-  const name = extractName(record) || "Unnamed Exercise";
-  const rawId = pick(record, ["externalId", "external_id", "id", "_id"]);
-  const sourceId = normalizeString(rawId) || null;
-  const slugBase = slugify(name || sourceId || "exercise");
-  const slug = sourceId ? `${sourceId}-${slugBase || "exercise"}` : slugBase || "exercise";
+function stableIdFromRaw(raw) {
+  // Prefer dataset id; else derive a stable id.
+  const base = raw?.id || raw?.name || JSON.stringify(raw);
+  return String(base).trim().replace(/\s+/g, "_");
+}
 
-  const primaryRaw = normalizeStringList(
-    pick(record, [
-      "primaryMuscles",
-      "primary_muscles",
-      "primary_muscle",
-      "primary",
-      "muscle_group",
-    ])
-  );
-  const muscleGroupRaw = normalizeString(pick(record, ["muscle_group", "muscleGroup"]));
-  const primaryMuscles = primaryRaw.length
-    ? primaryRaw
-    : muscleGroupRaw
-      ? [muscleGroupRaw]
-      : ["full body"];
-  const muscleGroup = muscleGroupRaw || primaryMuscles[0] || "full body";
+function sha1(s) {
+  return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 12);
+}
 
-  const secondaryMuscles = normalizeStringList(
-    pick(record, ["secondaryMuscles", "secondary_muscles", "secondary_muscle", "secondary"])
-  );
-  const equipmentRaw = pick(record, [
-    "equipment",
-    "equipmentList",
-    "requiredEquipment",
-    "required_equipment",
-    "equipment_list",
-    "equipment_required",
-    "equipment_ids",
-  ]);
-  const instructions = normalizeStringList(
-    pick(record, ["instructions", "steps", "execution", "howTo"])
-  );
-  const gotchas = normalizeStringList(pick(record, ["gotchas", "tips", "cues"]));
-  const commonMistakes = normalizeStringList(
-    pick(record, ["commonMistakes", "common_mistakes", "mistakes"])
-  );
-  const progressions = normalizeStringList(
-    pick(record, ["progressions", "progression", "advanced_exercises"])
-  );
-  const regressions = normalizeStringList(
-    pick(record, ["regressions", "regression", "beginner_exercises"])
-  );
-  const aliases = normalizeStringList(pick(record, ["aliases", "alternativeNames", "aka"]));
+/**
+ * Transform into a richer “IronAI-like” object.
+ * IMPORTANT: This is a best-guess shape.
+ * In the next Codex chunk we will align EXACTLY to your app’s Exercise model/Dexie schema.
+ */
+function transformExercise(raw) {
+  const idBase = stableIdFromRaw(raw);
+  const id = idBase.length > 0 ? idBase : `ex_${sha1(JSON.stringify(raw))}`;
 
-  const category = normalizeString(
-    pick(record, ["category", "type", "movement", "bodyPart"])
-  );
-  const pattern = normalizeString(
-    pick(record, ["pattern", "mechanic", "mechanics", "force"])
-  );
-  const status = normalizeString(record?.status) || "extended";
-  const youtubeSearchQuery =
-    normalizeString(record?.youtubeSearchQuery) ||
-    (name ? `${name} exercise form cues` : "");
-  const youtubeVideoId =
-    typeof record?.youtubeVideoId === "string" && record.youtubeVideoId.trim()
-      ? record.youtubeVideoId.trim()
-      : null;
-  const mediaVideoUrl = normalizeString(
-    record?.media?.videoUrl ?? record?.videoUrl ?? record?.video_url
-  );
-  const media = mediaVideoUrl ? { videoUrl: mediaVideoUrl } : undefined;
+  const images = Array.isArray(raw.images) ? raw.images.filter(Boolean) : [];
+  const imageUrls = images.map((imgPath) => `/exercise-images/${imgPath}`);
 
-  const mappedEquipment = mapEquipmentIds(equipmentRaw);
-  const inferredEquipment = inferExerciseEquipment({ name });
-  const requiredEquipmentIds = filterEquipmentIds([
-    ...mappedEquipment,
-    ...(inferredEquipment.requiredEquipmentIds ?? []),
-  ]);
-  const optionalEquipmentIds = filterEquipmentIds(
-    inferredEquipment.optionalEquipmentIds ?? []
-  );
-  const equipment = requiredEquipmentIds.length ? requiredEquipmentIds : ["bodyweight"];
+  // Normalize equipment: dataset uses a string; many apps want array.
+  const equipmentArr = raw.equipment ? [String(raw.equipment)] : [];
 
-  const stableId = computeStableId({
-    source: "free-exercise-db",
-    sourceId,
-    externalId: sourceId,
-    name,
-    equipment,
-    primaryMuscles,
-    pattern: pattern || undefined,
-    category: category || undefined,
-  });
+  // Instructions: keep array; many apps also want gotchas (leave empty for now).
+  const instructions = Array.isArray(raw.instructions) ? raw.instructions.filter(Boolean) : [];
+
+  // Some apps want “muscles” as arrays; keep both primary/secondary.
+  const primaryMuscles = Array.isArray(raw.primaryMuscles) ? raw.primaryMuscles.filter(Boolean) : [];
+  const secondaryMuscles = Array.isArray(raw.secondaryMuscles) ? raw.secondaryMuscles.filter(Boolean) : [];
 
   return {
-    stableId,
-    slug,
-    name,
-    muscle_group: muscleGroup,
-    default_sets: 3,
-    default_reps: null,
+    // Common fields most apps expect
+    id,
+    name: raw.name || id.replace(/_/g, " "),
+    source: "free-exercise-db",
+    isCustom: false,
+
+    // Taxonomy
+    category: raw.category ?? null,
+    force: raw.force ?? null,
+    level: raw.level ?? null,
+    mechanic: raw.mechanic ?? null,
+
+    // Equipment/muscles
+    equipment: equipmentArr,
     primaryMuscles,
     secondaryMuscles,
+
+    // How-to
     instructions,
-    gotchas,
-    commonMistakes: commonMistakes.length ? commonMistakes : gotchas,
-    progressions,
-    regressions,
-    aliases,
-    equipment,
-    requiredEquipmentIds,
-    optionalEquipmentIds,
-    category,
-    pattern,
-    status,
-    youtubeSearchQuery,
-    youtubeVideoId,
-    media,
-    source: "free-exercise-db",
-    sourceId,
-    sourceKey: sourceId,
-    externalId: sourceId,
-    is_custom: false,
-    createdAt: now,
-    updatedAt: now,
+    gotchas: [],          // app can fill later
+    cues: [],             // optional for coaching later
+    aliases: [],          // optional for search later
+
+    // Media
+    images,               // original relative paths for traceability
+    imageUrls,            // local browser-usable paths
+    videoUrl: null,       // optional later
+
+    // Extra fields many apps have
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
-};
-
-const writeJsonAtomic = async (filePath, data) => {
-  const dir = path.dirname(filePath);
-  await fs.mkdir(dir, { recursive: true });
-  const tmpPath = path.join(
-    dir,
-    `.${path.basename(filePath)}.tmp-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}`
-  );
-  await fs.writeFile(tmpPath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
-  await fs.rename(tmpPath, filePath);
-};
-
-const logSeedSummary = (raw, transformed, inapp) => {
-  const rawNames = raw.map(extractName).filter(Boolean);
-  const firstThree = rawNames.slice(0, 3);
-  const lastThree = rawNames.slice(-3);
-  console.log(`[seed:freeex] raw count: ${raw.length}`);
-  console.log(`[seed:freeex] transformed count: ${transformed.length}`);
-  console.log(`[seed:freeex] in-app count: ${inapp.length}`);
-  console.log(
-    `[seed:freeex] raw names (first 3): ${firstThree.join(" | ") || "n/a"}`
-  );
-  console.log(
-    `[seed:freeex] raw names (last 3): ${lastThree.join(" | ") || "n/a"}`
-  );
-};
-
-const run = async () => {
-  console.log(
-    `[seed:freeex] ${nowIso()} cwd=${process.cwd()} node=${process.version}`
-  );
-  if (includeImages) {
-    console.log("[seed:freeex] --images provided (no image download in this script).");
-  }
-
-  const response = await fetch(SOURCE_URL);
-  if (!response.ok) {
-    throw new Error(`Failed to download dataset (${response.status} ${response.statusText})`);
-  }
-  const raw = await response.json();
-  if (!Array.isArray(raw)) {
-    throw new Error("Downloaded dataset is not an array.");
-  }
-
-  const timestamp = Date.now();
-  const transformed = await Promise.all(
-    raw.map((record) => normalizeRecord(record, timestamp))
-  );
-  const inapp = transformed.slice(0, 300);
-
-  const seedDir = path.resolve(process.cwd(), "public", "seed");
-  await writeJsonAtomic(path.join(seedDir, "free-exercise-db.raw.json"), raw);
-  await writeJsonAtomic(
-    path.join(seedDir, "exercises.full.transformed.json"),
-    transformed
-  );
-  await writeJsonAtomic(path.join(seedDir, "exercises.inapp.300.json"), inapp);
-  await writeJsonAtomic(path.join(seedDir, "exercises.json"), transformed);
-
-  logSeedSummary(raw, transformed, inapp);
-};
-
-try {
-  await run();
-} catch (error) {
-  console.error("[seed:freeex] failed:", error?.stack || error?.message || error);
-  process.exitCode = 1;
 }
+
+async function downloadFile(url, outPath) {
+  // Resume-friendly: skip if exists
+  if (fs.existsSync(outPath)) return { status: "skipped" };
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    return { status: "failed", reason: `${res.status} ${res.statusText}` };
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  mkdirp(path.dirname(outPath));
+  fs.writeFileSync(outPath, buf);
+  return { status: "downloaded" };
+}
+
+async function runPool(items, concurrency, worker) {
+  const results = [];
+  let idx = 0;
+
+  async function runner() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await worker(items[i], i);
+    }
+  }
+
+  const runners = Array.from({ length: Math.min(concurrency, items.length) }, runner);
+  await Promise.all(runners);
+  return results;
+}
+
+async function main() {
+  mkdirp(OUT_SEED_DIR);
+  mkdirp(OUT_IMG_DIR);
+
+  console.log(`Fetching dataset: ${DATASET_URL}`);
+  const txt = await fetchText(DATASET_URL);
+  const rawArr = JSON.parse(txt);
+
+  if (!Array.isArray(rawArr)) {
+    throw new Error("Dataset JSON is not an array");
+  }
+
+  const isJunkExerciseName = (name) => /^Exercise\s+\d+$/.test(String(name || "").trim());
+  const filteredRaw = rawArr.filter((ex) => !isJunkExerciseName(ex?.name));
+
+  writeAtomic(OUT_RAW, JSON.stringify(filteredRaw, null, 2));
+
+  const removedCount = rawArr.length - filteredRaw.length;
+  console.log(`Raw count: ${rawArr.length} (removed junk: ${removedCount})`);
+  console.log(`First 3: ${filteredRaw.slice(0, 3).map((x) => x?.name).join(" | ")}`);
+  console.log(
+    `Last 3: ${filteredRaw.slice(-3).map((x) => x?.name).join(" | ")}`
+  );
+
+  const transformedFull = filteredRaw.map(transformExercise);
+  writeAtomic(OUT_FULL, JSON.stringify(transformedFull, null, 2));
+
+  const inApp = transformedFull.slice(0, INAPP_LIMIT);
+  writeAtomic(OUT_INAPP, JSON.stringify(inApp, null, 2));
+
+  console.log(`Wrote: ${path.relative(process.cwd(), OUT_FULL)} (${transformedFull.length})`);
+  console.log(`Wrote: ${path.relative(process.cwd(), OUT_INAPP)} (${inApp.length})`);
+
+  if (!withImages) {
+    console.log("Done (no images). Run with --images to download photos.");
+    return;
+  }
+
+  // Flatten all image paths from FULL dataset
+  let imagePaths = transformedFull.flatMap((ex) => (Array.isArray(ex.images) ? ex.images : []));
+  imagePaths = imagePaths.filter(Boolean);
+
+  if (MAX_IMAGES > 0) imagePaths = imagePaths.slice(0, MAX_IMAGES);
+
+  // De-dupe
+  const uniq = Array.from(new Set(imagePaths));
+
+  console.log(`Images referenced: ${imagePaths.length} (unique: ${uniq.length})`);
+  console.log(`Downloading to: ${path.relative(process.cwd(), OUT_IMG_DIR)}`);
+  console.log(`Concurrency: ${IMAGES_CONCURRENCY}`);
+
+  let downloaded = 0, skipped = 0, failed = 0;
+  const failures = [];
+
+  await runPool(uniq, IMAGES_CONCURRENCY, async (imgPath, i) => {
+    const url = `${IMAGE_BASE}${imgPath}`;
+    const outPath = path.join(OUT_IMG_DIR, imgPath);
+
+    const r = await downloadFile(url, outPath);
+    if (r.status === "downloaded") downloaded++;
+    else if (r.status === "skipped") skipped++;
+    else {
+      failed++;
+      if (failures.length < 10) failures.push({ imgPath, url, reason: r.reason });
+    }
+
+    if ((i + 1) % 100 === 0 || i === uniq.length - 1) {
+      console.log(`Progress: ${i + 1}/${uniq.length} | dl=${downloaded} skip=${skipped} fail=${failed}`);
+    }
+  });
+
+  console.log(`Images done. dl=${downloaded} skip=${skipped} fail=${failed}`);
+  if (failures.length) {
+    console.log("First failures:");
+    for (const f of failures) console.log(`- ${f.imgPath} (${f.reason})`);
+  }
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

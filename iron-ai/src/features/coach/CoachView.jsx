@@ -16,14 +16,41 @@ import { normalizeCoachMemory } from "../../coach/memory";
 import { coachReducer, initialCoachState } from "../../coach/state";
 import { actionDraftReducer, initialActionDraftState } from "../../coach/actionDraftState";
 import { ActionDraftKinds } from "../../coach/actionDraftContract";
-import { executeActionDraft, validateActionDraft } from "../../coach/actionDraftExecution";
+import {
+  createWorkoutFromDraft,
+  executeActionDraft,
+  validateActionDraft,
+} from "../../coach/actionDraftExecution";
 import { executeWriteToolCall, runCoachTurn } from "../../coach/orchestrator";
 import { buildContextFingerprint } from "../../coach/fingerprint";
 import { resolveTemplateExercises } from "../../coach/templateExerciseMapping";
 import { executeTool, getToolRegistry } from "../../coach/tools";
+import { extractWorkoutPlanOutput } from "../../coach/responseValidation";
 import { getCoachAccessState } from "./coachAccess";
-import { resolveTemplateDraftInfo } from "./templateDraft";
-import { setOpenAIKeyStatus, useCoachMemoryEnabled, useSettings } from "../../state/settingsStore";
+import { getCoachKeyMode } from "../../config/coachKeyMode";
+import {
+  buildHeuristicWorkoutDraft,
+  getCoachWorkoutActionConfig,
+  hasWorkoutCardPayload,
+  hasWorkoutIntent,
+  isStartWorkoutIntentText,
+  isTemplateIntentText,
+  isInternalPromptMessage,
+  resolveCoachErrorMessage,
+  sanitizeCoachAssistantText,
+  resolveCoachDisplayText,
+} from "./coachViewUiModel";
+import {
+  buildTemplateDraftFromWorkoutPlan,
+  resolveTemplateDraftInfo,
+} from "./templateDraft";
+import {
+  getCoachChatState,
+  setCoachChatState,
+  setOpenAIKeyStatus,
+  useCoachMemoryEnabled,
+  useSettings,
+} from "../../state/settingsStore";
 import {
   db,
   getAllExercises,
@@ -44,21 +71,13 @@ function createMessage(id, role, content, meta) {
   };
 }
 
-function resolveErrorMessage(err, accessState) {
-  if (!accessState?.canChat) return accessState?.message ?? "";
-  if (err?.status === 401 || err?.status === 403) {
-    return "That API key was rejected. Update it in Settings.";
-  }
-  if (err?.status === 429) {
-    return "OpenAI rate limit hit. Please wait and try again.";
-  }
-  if (err?.status >= 500) {
-    return "OpenAI is having trouble right now. Please try again soon.";
-  }
-  if (!err?.status) {
-    return "Network error. Check your connection and try again.";
-  }
-  return "Couldn't reach the coach. Check your connection and try again.";
+function getHighestMessageId(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+  return messages.reduce((highest, message) => {
+    const value = Number(message?.id);
+    if (!Number.isFinite(value)) return highest;
+    return Math.max(highest, value);
+  }, 0);
 }
 
 function summarizeProposalResult(result) {
@@ -142,9 +161,18 @@ function hasCoachContextCounts(contract) {
   return counts.some((value) => Number(value) > 0);
 }
 
-const TEMPLATE_REQUEST_PROMPT =
-  "Convert your last plan into the IronAI template JSON format. " +
-  "Reply with a fenced ```json``` block containing { name, exercises: [{ exerciseId, sets, reps, warmupSets? }] }.";
+const ADJUSTMENT_CHIPS = [
+  "Make it 8 exercises",
+  "More quads",
+  "Knee-friendly",
+  "No barbells",
+  "Shorter 30 min",
+  "Add warmup sets",
+];
+
+function normalizeExerciseName(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
 export default function CoachView({
   launchContext,
   onLaunchContextConsumed,
@@ -152,8 +180,8 @@ export default function CoachView({
   onOpenTemplate,
   onOpenWorkout,
   onNavigateToGyms,
-  diagnosticsEnabled,
 }) {
+  const coachKeyMode = getCoachKeyMode();
   const { settings, apiKey, hasKey, keyStatus } = useSettings();
   const { coachMemoryEnabled } = useCoachMemoryEnabled();
   const memoryEnabled = coachMemoryEnabled ?? false;
@@ -182,9 +210,19 @@ export default function CoachView({
     () => new Map((allExercises ?? []).map((exercise) => [exercise.id, exercise])),
     [allExercises]
   );
+  const exerciseNameLookup = useMemo(
+    () =>
+      new Map(
+        (allExercises ?? [])
+          .map((exercise) => [normalizeExerciseName(exercise?.name), exercise?.id])
+          .filter(([name, id]) => name && id != null)
+      ),
+    [allExercises]
+  );
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [retryMessage, setRetryMessage] = useState("");
   const [contextEnabled, setContextEnabled] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
@@ -201,10 +239,11 @@ export default function CoachView({
   const [pendingLaunchContext, setPendingLaunchContext] = useState(
     () => launchContext ?? null
   );
-  const [pendingTemplateRequest, setPendingTemplateRequest] = useState(false);
-  const [templateConfirmDraft, setTemplateConfirmDraft] = useState(null);
-  const [templateConfirmOpen, setTemplateConfirmOpen] = useState(false);
-  const [templateCreating, setTemplateCreating] = useState(false);
+  const [adjustMessageId, setAdjustMessageId] = useState(null);
+  const [startingWorkoutMessageId, setStartingWorkoutMessageId] = useState(null);
+  const [templateCreatingMessageId, setTemplateCreatingMessageId] = useState(null);
+  const [createdTemplateByMessageId, setCreatedTemplateByMessageId] = useState({});
+  const [startedWorkoutByMessageId, setStartedWorkoutByMessageId] = useState({});
   const [actionEditMode, setActionEditMode] = useState(false);
   const [actionEditDraft, setActionEditDraft] = useState({ title: "", gymId: "" });
   const [actionErrors, setActionErrors] = useState([]);
@@ -222,17 +261,19 @@ export default function CoachView({
   });
   const [messages, setMessages] = useState([]);
   const [chatHistory, setChatHistory] = useState([]);
+  const [chatStateLoaded, setChatStateLoaded] = useState(false);
   const chatHistoryRef = useRef([]);
+  const chatPersistTimerRef = useRef(null);
   const messageIdRef = useRef(0);
   const listRef = useRef(null);
   const streamingIdRef = useRef(null);
+  const inputRef = useRef(null);
 
   const accessState = useMemo(
-    () => getCoachAccessState({ hasKey, keyStatus }),
-    [hasKey, keyStatus]
+    () => getCoachAccessState({ hasKey, keyStatus, keyMode: coachKeyMode }),
+    [coachKeyMode, hasKey, keyStatus]
   );
   const canSend = accessState.canChat && input.trim().length > 0 && !sending;
-  const debugEnabled = import.meta.env.DEV || diagnosticsEnabled;
   const activeGymId = settings?.active_space_id ?? null;
   const exerciseCount = useLiveQuery(() => db.table("exercises").count(), []);
   const coachDiagnosticsEnabled = useMemo(() => {
@@ -241,6 +282,7 @@ export default function CoachView({
     // Debug panel gated by ?debug=1 to avoid accidental exposure in normal UX.
     return params.get("debug") === "1";
   }, []);
+  const debugEnabled = coachDiagnosticsEnabled;
 
   useEffect(() => {
     if (!launchContext) return;
@@ -257,6 +299,51 @@ export default function CoachView({
     if (!listRef.current) return;
     listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, sending]);
+
+  useEffect(() => {
+    let active = true;
+    const loadChatState = async () => {
+      try {
+        const saved = await getCoachChatState();
+        if (!active) return;
+        if (saved.messages.length) {
+          setMessages(saved.messages);
+          messageIdRef.current = Math.max(
+            messageIdRef.current,
+            getHighestMessageId(saved.messages)
+          );
+        }
+        if (saved.chatHistory.length) {
+          setChatHistory(saved.chatHistory);
+        }
+      } finally {
+        if (active) {
+          setChatStateLoaded(true);
+        }
+      }
+    };
+    void loadChatState();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatStateLoaded) return;
+    if (chatPersistTimerRef.current) {
+      clearTimeout(chatPersistTimerRef.current);
+      chatPersistTimerRef.current = null;
+    }
+    chatPersistTimerRef.current = setTimeout(() => {
+      void setCoachChatState({ messages, chatHistory });
+    }, 150);
+    return () => {
+      if (chatPersistTimerRef.current) {
+        clearTimeout(chatPersistTimerRef.current);
+        chatPersistTimerRef.current = null;
+      }
+    };
+  }, [chatHistory, chatStateLoaded, messages]);
 
   useEffect(() => {
     if (!contextEnabled && contextPreviewOpen) {
@@ -348,6 +435,7 @@ export default function CoachView({
   }, [coachDiagnosticsEnabled, state.proposals]);
 
   const hasGyms = sortedSpaces.length > 0;
+  const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
   const selectedGym = useMemo(
     () => sortedSpaces.find((space) => space.id === activeGymId) ?? null,
     [sortedSpaces, activeGymId]
@@ -359,8 +447,26 @@ export default function CoachView({
   const contextPillLabel = selectedGym
     ? `${gymNameLabel} · ${gymEquipmentLabel} · ${exerciseCountLabel}`
     : `No gym selected · ${exerciseCountLabel}`;
+  const selectedGymEquipmentSummary = useMemo(() => {
+    if (!selectedGym) return [];
+    const equipmentIds = Array.isArray(selectedGym.equipmentIds)
+      ? selectedGym.equipmentIds.filter((id) => id && id !== "bodyweight")
+      : [];
+    if (!equipmentIds.length) return "No equipment listed for selected gym.";
+    return equipmentIds.join(", ");
+  }, [selectedGym]);
+  const promptContextState = useMemo(
+    () => ({
+      contextEnabled: effectiveContextEnabled,
+      selectedGym: selectedGym
+        ? { id: selectedGym.id ?? null, name: selectedGym.name ?? null }
+        : null,
+      equipmentSummary: effectiveContextEnabled ? selectedGymEquipmentSummary : [],
+    }),
+    [effectiveContextEnabled, selectedGym, selectedGymEquipmentSummary]
+  );
   const trustBadgeEnabled =
-    Boolean(contextContract) && (contextEnabled || Boolean(pendingLaunchContext));
+    Boolean(contextContract) && effectiveContextEnabled;
   const trustSummary = trustBadgeEnabled
     ? `${formatCount(contextContract.recentWorkoutsCount)} workouts, ${formatCount(
         contextContract.templatesCount
@@ -412,16 +518,45 @@ export default function CoachView({
   const payloadContextBytes =
     payloadSummary?.contextBytes ?? debugContract?.contextBytes ?? null;
   const payloadBuildMs = payloadSummary?.buildMs ?? debugContract?.buildMs ?? null;
+  const workoutActionConfig = useMemo(
+    () => getCoachWorkoutActionConfig({ debugEnabled }),
+    [debugEnabled]
+  );
+  const visibleMessages = useMemo(() => {
+    const next = [];
+    for (let i = 0; i < messages.length; i += 1) {
+      const message = messages[i];
+      if (isInternalPromptMessage(message)) continue;
+      const previous = i > 0 ? messages[i - 1] : null;
+      const followsInternalPrompt =
+        message?.role === "assistant" && isInternalPromptMessage(previous);
+      if (
+        followsInternalPrompt &&
+        !sanitizeCoachAssistantText(message?.content ?? "").trim()
+      ) {
+        continue;
+      }
+      next.push(message);
+    }
+    return next;
+  }, [messages]);
   const latestAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].role === "assistant") return messages[i].id;
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      if (visibleMessages[i].role === "assistant") return visibleMessages[i].id;
     }
     return null;
-  }, [messages]);
+  }, [visibleMessages]);
   const latestAssistantMessage = useMemo(() => {
     if (latestAssistantId == null) return null;
-    return messages.find((message) => message.id === latestAssistantId) ?? null;
-  }, [latestAssistantId, messages]);
+    return visibleMessages.find((message) => message.id === latestAssistantId) ?? null;
+  }, [latestAssistantId, visibleMessages]);
+  const latestUserMessage = useMemo(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      if (visibleMessages[i].role === "user") return visibleMessages[i];
+    }
+    return null;
+  }, [visibleMessages]);
+  const latestUserContent = latestUserMessage?.content ?? "";
   const actionDraft = actionState.draft;
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
@@ -480,6 +615,49 @@ export default function CoachView({
     spaces: "Workout spaces",
   };
 
+  const buildWorkoutDraftForMessage = useCallback(
+    ({ actionDraft, text }) => {
+      const templateInfo = resolveTemplateDraftInfo({
+        actionDraft: actionDraft ?? null,
+        text: text ?? "",
+        templateTool,
+      });
+      if (templateInfo.draft) {
+        return {
+          payload: templateInfo.draft,
+          status: "ready",
+          source: templateInfo.source ?? null,
+          error: null,
+          rawJson: templateInfo.rawJson ?? null,
+        };
+      }
+      const workoutPlan = extractWorkoutPlanOutput(text ?? "");
+      if (workoutPlan.valid && workoutPlan.parsed) {
+        const draft = buildTemplateDraftFromWorkoutPlan(workoutPlan.parsed, {
+          fallbackName: workoutPlan.parsed?.name ?? "Coach Workout Draft",
+          spaceId: activeGymId,
+        });
+        if (draft) {
+          return {
+            payload: draft,
+            status: "ready",
+            source: workoutPlan.source ?? null,
+            error: null,
+            rawJson: workoutPlan.rawJson ?? null,
+          };
+        }
+      }
+      return {
+        payload: null,
+        status: templateInfo.found || workoutPlan.rawJson ? "error" : "ready",
+        source: templateInfo.source ?? workoutPlan.source ?? null,
+        error: templateInfo.error ?? workoutPlan.error ?? null,
+        rawJson: templateInfo.rawJson ?? workoutPlan.rawJson ?? null,
+      };
+    },
+    [activeGymId, templateTool]
+  );
+
   useEffect(() => {
     if (!actionDraft) {
       setActionEditMode(false);
@@ -526,33 +704,57 @@ export default function CoachView({
         return;
       }
 
-      const { clearInput = false, autoTemplateRequest = false } = options;
+      const {
+        clearInput = false,
+        responseMode = "general",
+        forceContextEnabled = null,
+        skipUserMessage = false,
+      } = options;
 
       setError("");
+      setRetryMessage("");
       setSending(true);
       if (clearInput) setInput("");
-      if (autoTemplateRequest) setPendingTemplateRequest(true);
 
-      const userId = (messageIdRef.current += 1);
-      setMessages((prev) => [
-        ...prev,
-        createMessage(userId, "user", trimmed, {
-          ...(autoTemplateRequest ? { autoTemplateRequest: true } : {}),
-        }),
-      ]);
+      const userId = skipUserMessage ? null : (messageIdRef.current += 1);
+      if (userId != null) {
+        setMessages((prev) => [
+          ...prev,
+          createMessage(userId, "user", trimmed, {
+            displayText: trimmed,
+            status: "ready",
+          }),
+        ]);
+      }
 
-      const effectiveContextEnabled = contextEnabled || Boolean(pendingLaunchContext);
       let streamedId = null;
       try {
+        const resolvedContextEnabled =
+          forceContextEnabled == null
+            ? effectiveContextEnabled
+            : Boolean(forceContextEnabled);
+        const resolvedContextState =
+          forceContextEnabled == null
+            ? promptContextState
+            : {
+                ...promptContextState,
+                contextEnabled: Boolean(forceContextEnabled),
+                equipmentSummary: forceContextEnabled
+                  ? selectedGymEquipmentSummary
+                  : [],
+              };
         const result = await runCoachTurn({
           apiKey,
+          keyMode: coachKeyMode,
           chatHistory: chatHistoryRef.current,
           userMessage: trimmed,
+          responseMode,
           contextConfig: {
-            enabled: effectiveContextEnabled,
+            enabled: resolvedContextEnabled,
             scopes: contextScopes,
             launchContext: pendingLaunchContext,
             activeGymId,
+            contextState: resolvedContextState,
           },
           memoryEnabled,
           memorySummary: memory,
@@ -586,8 +788,16 @@ export default function CoachView({
         setContextContract(result.contextContract ?? null);
         setPayloadFingerprint(result.payloadFingerprint ?? null);
         setPayloadSummary(result.payloadSummary ?? null);
+        if (result.responseValidation?.status === "failed") {
+          setError(
+            "Coach had trouble formatting that response. Please tap Retry to regenerate."
+          );
+          setRetryMessage(trimmed);
+        } else {
+          setRetryMessage("");
+        }
 
-        if (result.payloadFingerprint || result.contextContract) {
+        if (userId != null && (result.payloadFingerprint || result.contextContract)) {
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === userId
@@ -604,7 +814,7 @@ export default function CoachView({
           );
         }
 
-        if (keyStatus !== "valid") {
+        if (coachKeyMode === "user" && keyStatus !== "valid") {
           void setOpenAIKeyStatus("valid");
         }
 
@@ -613,7 +823,28 @@ export default function CoachView({
           actionContractVersion: result.actionContractVersion ?? null,
           contextContract: result.contextContract ?? null,
           payloadFingerprint: result.payloadFingerprint ?? null,
+          contextSnapshot: {
+            gymName:
+              result.contextContract?.activeGymName ??
+              selectedGym?.name ??
+              null,
+            equipmentCount:
+              result.contextContract?.equipmentCount ??
+              gymEquipmentCount ??
+              null,
+          },
+          requestUserMessage: trimmed,
         };
+        const draftState = buildWorkoutDraftForMessage({
+          actionDraft: result.actionDraft,
+          text: result.assistant,
+        });
+        assistantMeta.displayText = sanitizeCoachAssistantText(result.assistant);
+        assistantMeta.workoutDraftPayload = draftState.payload;
+        assistantMeta.workoutDraftSource = draftState.source;
+        assistantMeta.workoutDraftRawJson = draftState.rawJson;
+        assistantMeta.workoutDraftError = draftState.error;
+        assistantMeta.status = draftState.status;
 
         if (!streamedId) {
           const assistantId = (messageIdRef.current += 1);
@@ -655,29 +886,35 @@ export default function CoachView({
           onLaunchContextConsumed?.();
         }
       } catch (err) {
-        if (err?.status === 401 || err?.status === 403) {
+        if (coachKeyMode === "user" && (err?.status === 401 || err?.status === 403)) {
           void setOpenAIKeyStatus("invalid");
         }
-        setError(resolveErrorMessage(err, accessState));
+        setError(resolveCoachErrorMessage({ err, accessState }));
+        setRetryMessage(trimmed);
         if (streamedId) {
           setMessages((prev) => prev.filter((msg) => msg.id !== streamedId));
         }
       } finally {
         setSending(false);
-        if (autoTemplateRequest) setPendingTemplateRequest(false);
       }
     },
     [
       accessState,
       activeGymId,
       apiKey,
-      contextEnabled,
+      buildWorkoutDraftForMessage,
       contextScopes,
+      effectiveContextEnabled,
+      gymEquipmentCount,
+      coachKeyMode,
       keyStatus,
       memory,
       memoryEnabled,
       onLaunchContextConsumed,
       pendingLaunchContext,
+      promptContextState,
+      selectedGym,
+      selectedGymEquipmentSummary,
       sending,
     ]
   );
@@ -686,6 +923,12 @@ export default function CoachView({
     if (!input.trim()) return;
     await sendCoachMessage(input, { clearInput: true });
   };
+
+  const handleRetry = useCallback(async () => {
+    const nextMessage = retryMessage || latestUserContent;
+    if (!nextMessage || sending) return;
+    await sendCoachMessage(nextMessage, { skipUserMessage: true });
+  }, [latestUserContent, retryMessage, sendCoachMessage, sending]);
 
   const handleKeyDown = (event) => {
     if (event.key !== "Enter" || event.shiftKey) return;
@@ -696,19 +939,39 @@ export default function CoachView({
   };
 
   const resolveDraftInfoForMessage = useCallback(
-    (message) =>
-      resolveTemplateDraftInfo({
+    (message) => {
+      const metaDraft = message?.meta?.workoutDraftPayload;
+      if (metaDraft && Array.isArray(metaDraft.exercises) && metaDraft.exercises.length) {
+        return {
+          draft: metaDraft,
+          found: true,
+          valid: true,
+          error: null,
+          source: message?.meta?.workoutDraftSource ?? "messageMeta",
+          rawJson: message?.meta?.workoutDraftRawJson ?? null,
+        };
+      }
+      return resolveTemplateDraftInfo({
         actionDraft: message?.meta?.actionDraft ?? null,
         text: message?.content ?? "",
         templateTool,
-      }),
+      });
+    },
     [templateTool]
   );
 
-  const resolveDraftForMessage = useCallback(
-    (message) =>
-      resolveDraftInfoForMessage(message).draft ?? null,
-    [resolveDraftInfoForMessage]
+  const resolveTemplateDraftForMessage = useCallback(
+    (message) => {
+      const templateInfo = resolveDraftInfoForMessage(message);
+      if (templateInfo.draft) return templateInfo.draft;
+      const workoutPlan = extractWorkoutPlanOutput(message?.content ?? "");
+      if (!workoutPlan.valid || !workoutPlan.parsed) return null;
+      return buildTemplateDraftFromWorkoutPlan(workoutPlan.parsed, {
+        fallbackName: workoutPlan.parsed?.name ?? "Coach Template",
+        spaceId: activeGymId,
+      });
+    },
+    [activeGymId, resolveDraftInfoForMessage]
   );
 
   const latestTemplateDraftInfo = useMemo(() => {
@@ -722,59 +985,219 @@ export default function CoachView({
       draftValid: latestTemplateDraftInfo?.valid ?? false,
       validationError: latestTemplateDraftInfo?.error ?? null,
       source: latestTemplateDraftInfo?.source ?? null,
+      rawJson: latestTemplateDraftInfo?.rawJson ?? null,
       messageId: latestAssistantMessage?.id ?? null,
       messageCreatedAt: latestAssistantMessage?.createdAt ?? null,
     }),
     [latestAssistantMessage, latestTemplateDraftInfo]
   );
 
-  const handleMakeTemplate = useCallback(
-    async (message) => {
-      if (!message || message.role !== "assistant") return;
-      if (message.id !== latestAssistantId) return;
-      const draft = resolveDraftForMessage(message);
-      if (draft) {
-        setTemplateConfirmDraft(draft);
-        setTemplateConfirmOpen(true);
+  const getDraftMappingStatus = useCallback(
+    (draft) => {
+      const entries = Array.isArray(draft?.exercises) ? draft.exercises : [];
+      const total = entries.length;
+      if (!total) {
+        return { matched: 0, total: 0, label: "Needs mapping" };
+      }
+      let matched = 0;
+      entries.forEach((entry) => {
+        const entryId = Number.parseInt(entry?.exerciseId, 10);
+        if (Number.isFinite(entryId) && exerciseMap.has(entryId)) {
+          matched += 1;
+          return;
+        }
+        const entryName = normalizeExerciseName(entry?.name ?? entry?.exerciseName);
+        if (entryName && exerciseNameLookup.has(entryName)) {
+          matched += 1;
+        }
+      });
+      const label = matched === 0 ? "Needs mapping" : `Matched ${matched}/${total} to library`;
+      return { matched, total, label };
+    },
+    [exerciseMap, exerciseNameLookup]
+  );
+
+  const copyTextToClipboard = useCallback(
+    async (value, { successMessage, failureMessage }) => {
+      const text = String(value ?? "");
+      if (!text) {
+        onNotify?.(failureMessage ?? "Nothing to copy right now.", { tone: "warning" });
         return;
       }
-      if (pendingTemplateRequest || templateCreating) return;
-      await sendCoachMessage(TEMPLATE_REQUEST_PROMPT, { autoTemplateRequest: true });
+      try {
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = text;
+          textarea.setAttribute("readonly", "true");
+          textarea.style.position = "absolute";
+          textarea.style.left = "-9999px";
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          textarea.remove();
+        }
+        onNotify?.(successMessage ?? "Copied to clipboard.", { tone: "success" });
+      } catch {
+        onNotify?.(failureMessage ?? "Unable to copy right now.", { tone: "warning" });
+      }
+    },
+    [onNotify]
+  );
+
+  const handleAdjustChip = useCallback((messageId, chipText) => {
+    setAdjustMessageId(messageId);
+    if (chipText) {
+      setInput(chipText);
+    }
+    if (inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.setSelectionRange(
+        inputRef.current.value.length,
+        inputRef.current.value.length
+      );
+    }
+  }, []);
+
+  const handleStartWorkoutFromMessage = useCallback(
+    async (message) => {
+      if (!message || message.role !== "assistant") return;
+      const existing = startedWorkoutByMessageId[message.id];
+      if (existing?.id != null) {
+        onOpenWorkout?.(existing.id);
+        return;
+      }
+      const draft = resolveTemplateDraftForMessage(message);
+      if (!draft || !Array.isArray(draft.exercises) || draft.exercises.length === 0) {
+        onNotify?.("Workout draft is not ready yet.", { tone: "warning" });
+        return;
+      }
+
+      setStartingWorkoutMessageId(message.id);
+      try {
+        const mapped = await resolveTemplateExercises(draft.exercises, {
+          createMissing: true,
+        });
+        if (mapped.mappedCount !== draft.exercises.length) {
+          throw new Error("Unable to map all exercises for workout start.");
+        }
+        const workoutPayloadExercises = mapped.resolvedExercises.map((entry) => {
+          const reps = Number.parseInt(entry?.reps, 10);
+          const setCount = Number.parseInt(entry?.sets, 10);
+          const safeSetCount = Number.isFinite(setCount) && setCount > 0 ? setCount : 3;
+          const setTemplate = Number.isFinite(reps) && reps > 0 ? { reps } : {};
+          return {
+            exerciseId: entry.exerciseId,
+            sets: Array.from({ length: safeSetCount }, () => ({ ...setTemplate })),
+          };
+        });
+        const workoutId = await createWorkoutFromDraft({
+          kind: ActionDraftKinds.create_workout,
+          confidence: 0.9,
+          risk: "low",
+          title: draft.name ?? "Coach Workout",
+          summary: "Coach workout draft",
+          payload: {
+            name: draft.name ?? "Coach Workout",
+            gymId: activeGymId ?? draft.spaceId ?? null,
+            exercises: workoutPayloadExercises,
+          },
+        });
+        setStartedWorkoutByMessageId((prev) => ({
+          ...prev,
+          [message.id]: { id: workoutId },
+        }));
+        onNotify?.("Workout started ✅", {
+          tone: "success",
+          ...(onOpenWorkout
+            ? {
+                actionLabel: "Open workout",
+                onAction: () => onOpenWorkout(workoutId),
+              }
+            : {}),
+        });
+        onOpenWorkout?.(workoutId);
+      } catch (err) {
+        onNotify?.(`Unable to start workout: ${err?.message ?? "Unknown error"}`, {
+          tone: "warning",
+        });
+      } finally {
+        setStartingWorkoutMessageId(null);
+      }
     },
     [
-      latestAssistantId,
-      pendingTemplateRequest,
-      resolveDraftForMessage,
-      sendCoachMessage,
-      templateCreating,
+      activeGymId,
+      onNotify,
+      onOpenWorkout,
+      resolveTemplateDraftForMessage,
+      startedWorkoutByMessageId,
     ]
   );
 
-  const handleConfirmTemplate = useCallback(async () => {
-    if (!templateConfirmDraft || templateCreating) return;
-    setTemplateCreating(true);
-    try {
-      await executeTool("create_template", templateConfirmDraft);
-      onNotify?.(
-        `Template created${templateConfirmDraft.name ? `: ${templateConfirmDraft.name}` : "."}`,
-        { tone: "success" }
-      );
-      setTemplateConfirmOpen(false);
-      setTemplateConfirmDraft(null);
-    } catch (err) {
-      onNotify?.(`Unable to create template: ${err?.message ?? "Unknown error"}`, {
-        tone: "warning",
-      });
-    } finally {
-      setTemplateCreating(false);
-    }
-  }, [onNotify, templateConfirmDraft, templateCreating]);
+  const handleCreateTemplateFromMessage = useCallback(
+    async (message) => {
+      if (!message || message.role !== "assistant") return;
+      const existing = createdTemplateByMessageId[message.id];
+      if (existing?.id != null) {
+        onOpenTemplate?.(existing.id);
+        return;
+      }
+      const draft = resolveTemplateDraftForMessage(message);
+      if (!draft) {
+        onNotify?.("Workout draft is not visible yet. Adjust or regenerate first.", {
+          tone: "warning",
+        });
+        return;
+      }
+      setTemplateCreatingMessageId(message.id);
+      try {
+        const result = await executeTool("create_template", draft);
+        const createdTemplateId = result?.templateId ?? result?.id ?? null;
+        setCreatedTemplateByMessageId((prev) => ({
+          ...prev,
+          [message.id]: {
+            id: createdTemplateId,
+            name: draft.name ?? "",
+          },
+        }));
+        onNotify?.(
+          `Template created${draft.name ? `: ${draft.name}` : "."}`,
+          {
+            tone: "success",
+            ...(createdTemplateId != null && onOpenTemplate
+              ? {
+                  actionLabel: "Open template",
+                  onAction: () => onOpenTemplate(createdTemplateId),
+                }
+              : {}),
+          }
+        );
+      } catch (err) {
+        onNotify?.(`Unable to create template: ${err?.message ?? "Unknown error"}`, {
+          tone: "warning",
+        });
+      } finally {
+        setTemplateCreatingMessageId(null);
+      }
+    },
+    [
+      createdTemplateByMessageId,
+      onNotify,
+      onOpenTemplate,
+      resolveTemplateDraftForMessage,
+    ]
+  );
 
-  const handleCloseTemplateConfirm = useCallback(() => {
-    if (templateCreating) return;
-    setTemplateConfirmOpen(false);
-    setTemplateConfirmDraft(null);
-  }, [templateCreating]);
+  const handleCopyJsonRecovery = useCallback(
+    async (rawJson) => {
+      await copyTextToClipboard(rawJson, {
+        successMessage: "JSON copied. You can paste this into a template manually.",
+        failureMessage: "Unable to copy JSON right now.",
+      });
+    },
+    [copyTextToClipboard]
+  );
 
   const handleDiscardActionDraft = useCallback(() => {
     actionDispatch({ type: "DISCARD" });
@@ -1042,10 +1465,6 @@ export default function CoachView({
     onNotify?.("Diagnostics exported.", { tone: "success" });
   }, [coachDiagnosticsReport, onNotify]);
 
-  const templateConfirmSummary = templateConfirmDraft?.name
-    ? `Template: ${templateConfirmDraft.name}.`
-    : "Template ready.";
-
   return (
     <div className="page">
       <PageHeader title="AI Coach" subtitle="Tool-enabled coaching with your data." />
@@ -1053,7 +1472,9 @@ export default function CoachView({
       <div className="coach-gym-bar">
         <div className="coach-gym-bar__inner">
           <div className="coach-gym-pill">
-            <span className="coach-gym-pill__label">Context</span>
+            <span className="coach-gym-pill__label">
+              {effectiveContextEnabled ? "Context On" : "Context Off"}
+            </span>
             <span className="coach-gym-pill__text">{contextPillLabel}</span>
           </div>
           <div className="coach-gym-bar__actions">
@@ -1076,9 +1497,20 @@ export default function CoachView({
             ) : null}
           </div>
         </div>
-        {!contextEnabled ? (
+        {!effectiveContextEnabled ? (
           <div className="coach-context-warning">
-            Context is off. The coach cannot see your equipment.
+            <span>Context is off. Coach will generate generic workouts.</span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                setContextEnabled(true);
+                setContextScopes((prev) => ({ ...prev, spaces: true }));
+              }}
+              disabled={sending}
+            >
+              Enable
+            </Button>
           </div>
         ) : null}
       </div>
@@ -1230,23 +1662,109 @@ export default function CoachView({
 
         <CardBody className="coach-body">
           <div className="chat-messages" ref={listRef} aria-live="polite">
-            {messages.length === 0 && !sending ? (
+            {visibleMessages.length === 0 && !sending ? (
               <div className="chat-empty">Ask a question to get started.</div>
             ) : null}
-            {messages.map((message) => {
+            {visibleMessages.map((message) => {
               const isAssistant = message.role === "assistant";
               const isLatestAssistant = isAssistant && message.id === latestAssistantId;
-              const templateDraft = isLatestAssistant
-                ? latestTemplateDraftInfo?.draft ?? null
+              const templateDraftInfo = isAssistant
+                ? resolveDraftInfoForMessage(message)
                 : null;
-              const waitingOnTemplate =
-                isLatestAssistant && pendingTemplateRequest && !templateDraft;
-              const makeTemplateDisabled =
-                !isLatestAssistant || waitingOnTemplate || templateCreating || sending;
-              const changeGymDisabled = !isLatestAssistant || !hasGyms;
-              const showRequesting =
-                isLatestAssistant && pendingTemplateRequest && !templateDraft;
-              const showStaleHint = isAssistant && !isLatestAssistant;
+              const workoutPlanInfo = isAssistant
+                ? extractWorkoutPlanOutput(message.content ?? "")
+                : null;
+              const inferredTemplateDraft =
+                isAssistant && !templateDraftInfo?.draft && workoutPlanInfo?.valid
+                  ? buildTemplateDraftFromWorkoutPlan(workoutPlanInfo.parsed, {
+                      fallbackName: workoutPlanInfo.parsed?.name ?? "Coach Template",
+                      spaceId: activeGymId,
+                    })
+                  : null;
+              const fallbackDraft =
+                isAssistant && !templateDraftInfo?.draft && !workoutPlanInfo?.valid
+                  ? buildHeuristicWorkoutDraft({
+                      userMessage:
+                        message?.meta?.requestUserMessage ||
+                        (isLatestAssistant ? latestUserContent : "") ||
+                        message?.content ||
+                        "",
+                      exercises: allExercises ?? [],
+                      spaceId: activeGymId,
+                    })
+                  : null;
+              const templateDraft =
+                templateDraftInfo?.draft ?? inferredTemplateDraft ?? fallbackDraft ?? null;
+              const createdTemplate = createdTemplateByMessageId[message.id] ?? null;
+              const startedWorkout = startedWorkoutByMessageId[message.id] ?? null;
+              const isCreatingTemplate = templateCreatingMessageId === message.id;
+              const isStartingWorkout = startingWorkoutMessageId === message.id;
+              const templateError =
+                isAssistant && templateDraftInfo?.found && !templateDraftInfo?.valid
+                  ? templateDraftInfo.error
+                  : null;
+              const recoveryJson =
+                templateDraftInfo?.rawJson ?? workoutPlanInfo?.rawJson ?? message.content ?? "";
+              const workoutPayload = workoutPlanInfo?.valid ? workoutPlanInfo.parsed : null;
+              const workoutName =
+                workoutPayload?.name ??
+                templateDraft?.name ??
+                "Workout Draft";
+              const workoutExercises = workoutPayload?.exercises?.length
+                ? workoutPayload.exercises.map((entry, index) => ({
+                    key: `${message.id}-workout-${index}`,
+                    name: String(entry?.name ?? "").trim() || `Exercise ${index + 1}`,
+                    sets: entry?.sets ?? "—",
+                    reps: entry?.reps ?? "—",
+                  }))
+                : Array.isArray(templateDraft?.exercises)
+                  ? templateDraft.exercises.map((entry, index) => {
+                      const fallback =
+                        entry?.exerciseId != null
+                          ? exerciseMap.get(entry.exerciseId)?.name
+                          : "";
+                      const name =
+                        String(
+                          entry?.name ?? entry?.exerciseName ?? fallback ?? ""
+                        ).trim() || `Exercise ${index + 1}`;
+                      return {
+                        key: `${message.id}-template-${index}`,
+                        name,
+                        sets: entry?.sets ?? "—",
+                        reps: entry?.reps ?? "—",
+                      };
+                    })
+                  : [];
+              const hasWorkoutCard = hasWorkoutCardPayload(message.role, workoutExercises);
+              const mappingStatus = getDraftMappingStatus(templateDraft);
+              const draftReady =
+                Boolean(templateDraft) &&
+                hasWorkoutCard &&
+                !templateError &&
+                (templateDraftInfo?.valid ||
+                  hasWorkoutIntent(
+                    message?.meta?.requestUserMessage ||
+                      latestUserContent ||
+                      message?.content ||
+                      ""
+                  ));
+              const cardGymName =
+                message?.meta?.contextSnapshot?.gymName ??
+                selectedGym?.name ??
+                "None";
+              const cardEquipmentCount =
+                message?.meta?.contextSnapshot?.equipmentCount ??
+                gymEquipmentCount;
+              const cleanedAssistantText = isAssistant
+                ? sanitizeCoachAssistantText(message?.meta?.displayText ?? message.content)
+                : message.content;
+              const displayText = resolveCoachDisplayText({
+                role: message.role,
+                displayText: cleanedAssistantText,
+                content: message.content,
+                hasWorkoutCard,
+              });
+              const isAdjustOpen = adjustMessageId === message.id;
               const trustContext = message?.meta?.contextContract ?? null;
               const trustFingerprint = message?.meta?.payloadFingerprint ?? null;
               const showTrustLine =
@@ -1260,12 +1778,9 @@ export default function CoachView({
               return (
                 <div key={message.id} className="chat-message" data-role={message.role}>
                   <div className="chat-message__stack">
-                    <div className="chat-bubble">{message.content}</div>
+                    <div className="chat-bubble">{displayText}</div>
                     {isAssistant ? (
-                      <div
-                        className="chat-actions"
-                        data-stale={showStaleHint ? "true" : "false"}
-                      >
+                      <div className="chat-actions">
                         {showTrustLine ? (
                           <div className="coach-trust-line">
                             <span className="coach-trust-line__label">
@@ -1283,9 +1798,31 @@ export default function CoachView({
                           <div className="chat-actions__status">
                             Requesting template JSON…
                           </div>
-                        ) : showStaleHint ? (
-                          <div className="chat-actions__status">
-                            Actions apply to the latest reply.
+                        ) : (
+                          <div className="ui-row ui-row--wrap">
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => void handleRetry()}
+                              disabled={!isLatestAssistant || sending}
+                            >
+                              Regenerate
+                            </Button>
+                          </div>
+                        )}
+                        {templateError ? (
+                          <div className="coach-template-error" role="status">
+                            <span>{templateError}</span>
+                            {workoutActionConfig.showCopyJson ? (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => void handleCopyJsonRecovery(recoveryJson)}
+                                disabled={!recoveryJson}
+                              >
+                                Copy JSON
+                              </Button>
+                            ) : null}
                           </div>
                         ) : null}
                       </div>
@@ -1305,18 +1842,32 @@ export default function CoachView({
         <CardFooter className="coach-footer">
           {error ? (
             <div className="chat-error" role="status">
-              {error}
+              <div>{error}</div>
+              {retryMessage || latestUserContent ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => void handleRetry()}
+                  disabled={sending}
+                >
+                  Retry
+                </Button>
+              ) : null}
             </div>
           ) : null}
           <div className="chat-input">
             <textarea
+              ref={inputRef}
               className="ui-input ui-textarea chat-input__field"
               rows={3}
               placeholder="Ask your coach..."
               value={input}
               onChange={(e) => {
                 setInput(e.target.value);
-                if (error) setError("");
+                if (error) {
+                  setError("");
+                  setRetryMessage("");
+                }
               }}
               onKeyDown={handleKeyDown}
               disabled={!accessState.canChat}
@@ -1331,7 +1882,7 @@ export default function CoachView({
               Send
             </Button>
           </div>
-          <div className="template-meta">Chat history is not saved yet.</div>
+          <div className="template-meta">Chat history is saved on this device.</div>
         </CardFooter>
       </Card>
 
@@ -1846,39 +2397,6 @@ export default function CoachView({
             </div>
           </CardBody>
         </Card>
-      ) : null}
-
-      {templateConfirmOpen ? (
-        <div className="coach-modal" role="dialog" aria-modal="true">
-          <div
-            className="coach-modal__backdrop"
-            onClick={handleCloseTemplateConfirm}
-          />
-          <div className="coach-modal__content" role="document">
-            <div className="ui-section-title">Create template?</div>
-            <div className="template-meta">
-              {templateConfirmSummary} This will save a template from the coach plan.
-            </div>
-            <div className="ui-row ui-row--wrap">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleCloseTemplateConfirm}
-                disabled={templateCreating}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleConfirmTemplate}
-                loading={templateCreating}
-              >
-                Create
-              </Button>
-            </div>
-          </div>
-        </div>
       ) : null}
 
       {actionConfirmOpen ? (

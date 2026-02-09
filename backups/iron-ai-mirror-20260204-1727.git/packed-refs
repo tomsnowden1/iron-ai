@@ -1,0 +1,46 @@
+# pack-refs with: peeled fully-peeled sorted 
+e74c525402e79fe2bcf51b77eb455c9fb8e5b36f refs/heads/coach-action-draft-contract
+83b630013130e3a7a3bbb3dbbc49887b0427fca9 refs/heads/coach-action-tray
+ae0f53669ba536f1d89aacf63eb9f6b4eabb8320 refs/heads/coach-context-proof
+85913fe403bcab8ec2c487b8780f301ce09b53a9 refs/heads/coach-template-actions
+d4180d86e14ed624f86aa79e179b9aca725cae58 refs/heads/feat/some-change
+e40ce6c478cec2c3c4b8810c7d88c01c72b766ab refs/heads/fix/coach-memory
+1b63bc740edf0f477e313fddb6c975d9320c464e refs/heads/fix/make-template-deterministic
+32b7a89da13faa70bfccb3fc433baaf93dfce261 refs/heads/fix/seed-browser-safe-shipmain
+56ffc9a837e9238b85edec507360ac0cc7ef4282 refs/heads/fix/ship-script
+5faadf2becfd8ae581597bd880ed5f0743e8b5c1 refs/heads/fix/template-draft-extraction
+6cbf482911e536bf0fa739ab078218fa29e3339e refs/heads/fix/update-to-coach
+93954307c580cd6f697cefdc4d2635ea38d7d289 refs/heads/main
+d4180d86e14ed624f86aa79e179b9aca725cae58 refs/heads/seed-reliability
+93954307c580cd6f697cefdc4d2635ea38d7d289 refs/remotes/origin/HEAD
+e74c525402e79fe2bcf51b77eb455c9fb8e5b36f refs/remotes/origin/coach-action-draft-contract
+83b630013130e3a7a3bbb3dbbc49887b0427fca9 refs/remotes/origin/coach-action-tray
+37abdd9a5233a1153b44aa819fe36e306a7587c3 refs/remotes/origin/coach-context-proof
+85913fe403bcab8ec2c487b8780f301ce09b53a9 refs/remotes/origin/coach-template-actions
+360c55409abafd07419547d0bd4e8c91e8a601be refs/remotes/origin/coach-template-exercise-mapping
+d5b9cf575247796b29fc2c3a31a6cd07c70e2d05 refs/remotes/origin/codex/add-comment-to-src/app.jsx
+357119e8c14e679742d1ebf3add20b058e8fc827 refs/remotes/origin/codex/add-space-for-testing-purposes
+63b2e4dc047b4eded3d13cec0ccbc734b26050ec refs/remotes/origin/codex/update-workout-builder-ui-controls
+3712d4e62459f247b1df8c5e62680a477aedc73d refs/remotes/origin/fix/coach-active-gym-context
+c6b478bc1222ede8204b9c0bac5834b5302779ce refs/remotes/origin/fix/coach-context-trust
+e40ce6c478cec2c3c4b8810c7d88c01c72b766ab refs/remotes/origin/fix/coach-memory
+a0a6bc77306ea0a0711759ae6d3292739d8ff035 refs/remotes/origin/fix/lint-and-compiler-errors
+1b63bc740edf0f477e313fddb6c975d9320c464e refs/remotes/origin/fix/make-template-deterministic
+da7a69f86e4b0edb0373c52536f975a7bff0ee79 refs/remotes/origin/fix/no-node-builtins-in-src
+32b7a89da13faa70bfccb3fc433baaf93dfce261 refs/remotes/origin/fix/seed-browser-safe-shipmain
+56ffc9a837e9238b85edec507360ac0cc7ef4282 refs/remotes/origin/fix/ship-script
+5faadf2becfd8ae581597bd880ed5f0743e8b5c1 refs/remotes/origin/fix/template-draft-extraction
+6cbf482911e536bf0fa739ab078218fa29e3339e refs/remotes/origin/fix/update-to-coach
+93954307c580cd6f697cefdc4d2635ea38d7d289 refs/remotes/origin/main
+d4180d86e14ed624f86aa79e179b9aca725cae58 refs/remotes/origin/seed-reliability
+2d37f7b37b7a71e2f27a0f835cd0c3fbd556ba50 refs/tags/backup/pre-antigravity-20260204-1719
+^93954307c580cd6f697cefdc4d2635ea38d7d289
+5909931e581eca910312173a371159bead8010e2 refs/tags/backup/pre-antigravity-20260204-1727
+^93954307c580cd6f697cefdc4d2635ea38d7d289
+3790a658c610478f8ab25b3375e8371c60ccf50c refs/tags/prod-2026-01-17-1409
+^7023ce6e2f603f50dd415334d58cac49d96829df
+9f48656f48748b68c6b8e298f0424d44f5228394 refs/tags/prod-2026-01-17-1756
+^db76ca063c5ee25aa7a0d254001ad069cfb9af90
+a63bf07f166bdcb61fec2566420ed6c4accaa045 refs/tags/prod-2026-01-18-1926
+^bcbe446bdfd66eac3870059a3271d5618aa00b4f
+5916490e4b82f8518dc73723312c1f30c155384c refs/tags/safety-2026-01-19-1422

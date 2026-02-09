@@ -49,8 +49,8 @@ const META_KEYS = {
 const AUDIT_LOG_LIMIT = 20;
 const REPAIR_VERSION = "2026-01-14-repair-v2";
 const REPORT_PATH = "src/seed/reports/latestExerciseImportReport.json";
-const SEED_DATA_VERSION = "2026-01-16-inapp-300-v1";
-const SEED_FILE_PATH = "seed/exercises.inapp.300.json";
+const SEED_DATA_VERSION = "2026-02-06-full-seed-v2";
+const SEED_FILE_PATH = "seed/exercises.json";
 
 const PLACEHOLDER_INSTRUCTIONS = new Set([
   "Step 1: Perform the movement with control.",
@@ -68,6 +68,16 @@ const PLACEHOLDER_GOTCHAS = new Set([
 const PLACEHOLDER_PRIMARY_MUSCLES = new Set(["full body"]);
 
 const PLACEHOLDER_SEED_NAME = /^Exercise\s+\d+$/i;
+
+function isPlaceholderSeedName(name) {
+  return PLACEHOLDER_SEED_NAME.test(normalizeString(name));
+}
+
+function shouldRemovePlaceholderExercise(record) {
+  if (!isPlaceholderSeedName(record?.name)) return false;
+  if (record?.is_custom || record?.isCustom) return false;
+  return normalizeString(record?.source).toLowerCase() !== "user";
+}
 
 function seedLog(level, message, meta = {}) {
   const logger = console[level] ?? console.info;
@@ -739,10 +749,13 @@ export async function importExercises({
       };
     })
   );
+  const filteredNormalized = normalized.filter(
+    (record) => !isPlaceholderSeedName(record?.name)
+  );
 
   progress("hashing");
   const withStableIds = await Promise.all(
-    normalized.map(async (record) => ({
+    filteredNormalized.map(async (record) => ({
       ...record,
       stableId: await computeStableId({
         source: record.source,
@@ -818,6 +831,7 @@ export async function importExercises({
   let inserted = 0;
   let updated = 0;
   let skipped = 0;
+  let removedPlaceholders = 0;
   const insertedIds = [];
   const updatedIds = [];
   const skippedIds = [];
@@ -825,28 +839,40 @@ export async function importExercises({
   try {
     await db.transaction("rw", db.table("exercises"), db.table("meta"), async () => {
       const existingExercises = await db.table("exercises").toArray();
+      const placeholderExerciseIds = existingExercises
+        .filter((exercise) => shouldRemovePlaceholderExercise(exercise))
+        .map((exercise) => exercise.id)
+        .filter((id) => id != null);
+      const placeholderIdSet = new Set(placeholderExerciseIds);
+      if (placeholderExerciseIds.length) {
+        await db.table("exercises").bulkDelete(placeholderExerciseIds);
+        removedPlaceholders = placeholderExerciseIds.length;
+      }
+      const existingAfterCleanup = existingExercises.filter(
+        (exercise) => !placeholderIdSet.has(exercise.id)
+      );
       const existingByStableId = new Map(
-        existingExercises
+        existingAfterCleanup
           .filter((exercise) => exercise.stableId)
           .map((exercise) => [exercise.stableId, exercise])
       );
       const existingBySourceStableKey = new Map(
-        existingExercises
+        existingAfterCleanup
           .map((exercise) => [buildSourceStableKey(exercise), exercise])
           .filter(([key]) => key)
       );
       const existingBySourceId = new Map(
-        existingExercises
+        existingAfterCleanup
           .filter((exercise) => exercise.sourceId)
           .map((exercise) => [exercise.sourceId, exercise])
       );
       const existingByExternalId = new Map(
-        existingExercises
+        existingAfterCleanup
           .filter((exercise) => exercise.externalId)
           .map((exercise) => [exercise.externalId, exercise])
       );
       const existingBySlug = new Map(
-        existingExercises
+        existingAfterCleanup
           .filter((exercise) => exercise.slug)
           .map((exercise) => [exercise.slug, exercise])
       );
@@ -917,7 +943,7 @@ export async function importExercises({
       await writeMeta(META_KEYS.lastSeedStatus, "SUCCESS");
       await writeMeta(
         META_KEYS.lastSeedMessage,
-        `Seeded ${inserted} inserted, ${updated} updated, ${skipped} skipped.`
+        `Seeded ${inserted} inserted, ${updated} updated, ${skipped} skipped, ${removedPlaceholders} placeholders removed.`
       );
       await writeMeta(META_KEYS.lastSeedStats, {
         totalSeed: deduped.length,
@@ -926,6 +952,7 @@ export async function importExercises({
         inserted,
         updated,
         skipped,
+        removedPlaceholders,
         duplicatesCollapsed,
         importMs: Date.now() - startedAt,
       });
@@ -941,6 +968,7 @@ export async function importExercises({
           inserted,
           updated,
           skipped,
+          removedPlaceholders,
           duplicatesCollapsed,
         },
         sourceUsed,
@@ -998,6 +1026,7 @@ export async function importExercises({
     inserted,
     updated,
     skipped,
+    removedPlaceholders,
     duplicatesCollapsed,
     durationMs,
     warnings,

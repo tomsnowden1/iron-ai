@@ -22,7 +22,6 @@ import ExerciseDetailView from "./features/exercises/ExerciseDetailView";
 import ExerciseHistoryDrawer from "./features/exercises/ExerciseHistoryDrawer";
 import ExercisePickerView from "./features/exercises/ExercisePickerView";
 import ExercisesExplorer from "./features/exercises/ExercisesExplorer";
-import SeedDebugMiniPanel from "./features/debug/SeedDebugMiniPanel";
 import SeedDebugPanel from "./features/debug/SeedDebugPanel";
 import DiagnosticsHub from "./features/debug/DiagnosticsHub";
 import GymsView from "./features/gyms/GymsView";
@@ -51,10 +50,10 @@ import { formatCoachMemory, getDefaultCoachMemory, normalizeCoachMemory } from "
 import { getEquipmentMap } from "./equipment/catalog";
 import { getMissingEquipmentForExercise } from "./equipment/engine";
 import { resolveActiveSpace } from "./workoutSpaces/logic";
+import { getCoachKeyMode } from "./config/coachKeyMode";
 import {
   clearOpenAIKey,
   getOpenAIKeyMasked,
-  useCoachMemoryEnabled,
   setOpenAIKey,
   testOpenAIKey,
   updateSettings,
@@ -87,7 +86,7 @@ import {
   updateWorkoutSet,
 } from "./db";
 
-const SESSION_NOTE_LIMIT = 500 ;
+const SESSION_NOTE_LIMIT = 500;
 const EXERCISE_NOTE_LIMIT = 250;
 const SESSION_IDLE_MS = 8 * 60 * 1000;
 const SESSION_PROLONGED_IDLE_MS = 12 * 60 * 1000;
@@ -420,7 +419,7 @@ function WorkoutView({
   const autoScrollAppliedRef = useRef(false);
   const longPressTimeoutsRef = useRef(new Map());
   const longPressTriggeredRef = useRef(new Set());
-  const lastActivityAtRef = useRef(null);
+  const lastActivityAtRef = useRef(0);
   const lastBackgroundAtRef = useRef(null);
   const resumeBannerShownRef = useRef(false);
 
@@ -430,7 +429,9 @@ function WorkoutView({
     const rawItems = Array.isArray(workoutBundle?.items) ? workoutBundle.items : [];
     const hasInvalidSets = rawItems.some((item) => item && !Array.isArray(item.sets));
     if (hasInvalidSets) {
-      console.error("Workout items contain invalid set arrays; falling back to empty arrays.");
+      console.error(
+        "Workout items contain invalid set arrays; falling back to empty arrays."
+      );
     }
     return rawItems
       .filter(Boolean)
@@ -613,7 +614,7 @@ function WorkoutView({
         lastBackgroundAtRef.current = Date.now();
         return;
       }
-      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
+      const idleFor = Date.now() - lastActivityAtRef.current;
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState(nextState);
       setIsProlongedIdle(idleFor >= SESSION_PROLONGED_IDLE_MS);
@@ -642,7 +643,7 @@ function WorkoutView({
     if (!workoutId || workout?.finishedAt) return;
     const interval = window.setInterval(() => {
       if (document.visibilityState !== "visible") return;
-      const idleFor = Date.now() - (lastActivityAtRef.current ?? Date.now());
+      const idleFor = Date.now() - lastActivityAtRef.current;
       const nextState = idleFor >= SESSION_IDLE_MS ? "idle" : "active";
       setSessionState((prev) =>
         prev === "backgrounded" || prev === nextState ? prev : nextState
@@ -1322,6 +1323,11 @@ function WorkoutView({
     setWorkoutId(null);
   };
 
+  const openExercisePicker = useCallback(() => {
+    setPickerPrefill(null);
+    setPickerOpen(true);
+  }, []);
+
   const handleSessionNoteBlur = async () => {
     setSessionNoteFocused(false);
     if (!workoutId) return;
@@ -1470,11 +1476,6 @@ function WorkoutView({
       <PageHeader
         title="Workout"
         subtitle={workoutSubtitle}
-        actions={
-          <Button variant="destructive" size="sm" onClick={handleDeleteWorkout}>
-            Delete
-          </Button>
-        }
       />
 
       {showResumeBanner ? (
@@ -1496,78 +1497,24 @@ function WorkoutView({
         </div>
       ) : null}
 
-      <div className="workout-stats-bar">
-        <div className="workout-stats-title">
-          <span className="ui-section-title">Session</span>
-          {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
-        </div>
-        <div className="workout-stats-chips">
-          <span className="stat-chip">
-            <span className="stat-chip__label">Exercises</span>
-            <span className="stat-chip__value">{items.length}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Sets</span>
-            <span className="stat-chip__value">{totalSets}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Template</span>
-            <span className="stat-chip__value">{templateLabel}</span>
-          </span>
-          <span className="stat-chip">
-            <span className="stat-chip__label">Space</span>
-            <span className="stat-chip__value">{spaceLabel}</span>
-          </span>
-        </div>
+      <div className="ui-row ui-row--between ui-row--wrap">
+        <div className="ui-section-title">Exercises</div>
+        {items.length > 0 ? (
+          <Button variant="secondary" size="sm" onClick={openExercisePicker}>
+            Add exercise
+          </Button>
+        ) : null}
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="ui-row ui-row--between">
-            <div className="ui-section-title">Workout notes</div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSessionNoteOpen((prev) => !prev)}
-            >
-              {sessionNoteOpen ? "Hide" : sessionNote ? "Edit" : "Add note"}
+      {items.length === 0 ? (
+        <div className="empty-state">
+          <div className="ui-row ui-row--between ui-row--wrap">
+            <span>No exercises yet. Add your first exercise.</span>
+            <Button variant="secondary" size="sm" onClick={openExercisePicker}>
+              Add exercises
             </Button>
           </div>
-          {!sessionNoteOpen && sessionNote ? (
-            <div className="template-meta">Note saved</div>
-          ) : null}
-        </CardHeader>
-        {sessionNoteOpen ? (
-          <CardBody className="ui-stack">
-            <div>
-              <Label htmlFor="session-note">Workout note</Label>
-              <textarea
-                id="session-note"
-                className="ui-input ui-textarea"
-                rows={3}
-                maxLength={SESSION_NOTE_LIMIT}
-                placeholder="Optional thoughts about today's session."
-                value={sessionNote}
-                onFocus={() => setSessionNoteFocused(true)}
-                onBlur={handleSessionNoteBlur}
-                onChange={(e) => setSessionNote(e.target.value)}
-              />
-              {sessionNoteFocused ? (
-                <div className="template-meta">
-                  Optional | {sessionNote.length}/{SESSION_NOTE_LIMIT}
-                </div>
-              ) : null}
-            </div>
-          </CardBody>
-        ) : null}
-      </Card>
-
-      {items.length === 0 ? (
-        <Card>
-          <CardBody>
-            <div className="empty-state">No exercises yet. Add your first exercise below.</div>
-          </CardBody>
-        </Card>
+        </div>
       ) : (
         <div className="ui-stack">
           {items.map((it, index) => {
@@ -1719,25 +1666,69 @@ function WorkoutView({
 
       <Card>
         <CardHeader>
-          <div className="ui-section-title">Add exercise</div>
-        </CardHeader>
-        <CardBody className="ui-stack">
-          <div className="template-meta">
-            Open the full-page picker to search, filter, and add exercises fast.
+          <div className="ui-row ui-row--between">
+            <div className="ui-section-title">Workout notes</div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSessionNoteOpen((prev) => !prev)}
+            >
+              {sessionNoteOpen ? "Hide" : sessionNote ? "Edit" : "Add note"}
+            </Button>
           </div>
-          <Button
-            variant="secondary"
-            size="md"
-            onClick={() => {
-              setPickerPrefill(null);
-              setPickerOpen(true);
-            }}
-            className="w-full"
-          >
-            Open Exercise Picker
-          </Button>
-        </CardBody>
+          {!sessionNoteOpen && sessionNote ? (
+            <div className="template-meta">Note saved</div>
+          ) : null}
+        </CardHeader>
+        {sessionNoteOpen ? (
+          <CardBody className="ui-stack">
+            <div>
+              <Label htmlFor="session-note">Workout note</Label>
+              <textarea
+                id="session-note"
+                className="ui-input ui-textarea"
+                rows={3}
+                maxLength={SESSION_NOTE_LIMIT}
+                placeholder="Optional thoughts about today's session."
+                value={sessionNote}
+                onFocus={() => setSessionNoteFocused(true)}
+                onBlur={handleSessionNoteBlur}
+                onChange={(e) => setSessionNote(e.target.value)}
+              />
+              {sessionNoteFocused ? (
+                <div className="template-meta">
+                  Optional | {sessionNote.length}/{SESSION_NOTE_LIMIT}
+                </div>
+              ) : null}
+            </div>
+          </CardBody>
+        ) : null}
       </Card>
+
+      <div className="workout-stats-bar">
+        <div className="workout-stats-title">
+          <span className="ui-section-title">Session</span>
+          {workoutSpace?.name ? <span className="pill">{workoutSpace.name}</span> : null}
+        </div>
+        <div className="workout-stats-chips">
+          <span className="stat-chip">
+            <span className="stat-chip__label">Exercises</span>
+            <span className="stat-chip__value">{items.length}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Sets</span>
+            <span className="stat-chip__value">{totalSets}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Template</span>
+            <span className="stat-chip__value">{templateLabel}</span>
+          </span>
+          <span className="stat-chip">
+            <span className="stat-chip__label">Space</span>
+            <span className="stat-chip__value">{spaceLabel}</span>
+          </span>
+        </div>
+      </div>
 
       <Card>
         <CardBody className="ui-stack">
@@ -1751,6 +1742,20 @@ function WorkoutView({
             Finish Workout
           </Button>
           {finishMessage ? <div className="ui-muted">{finishMessage}</div> : null}
+        </CardBody>
+      </Card>
+
+      <Card className="workout-danger-zone">
+        <CardBody className="ui-row ui-row--between ui-row--wrap">
+          <div>
+            <div className="ui-section-title">Danger zone</div>
+            <div className="template-meta">
+              Delete this workout session permanently. This cannot be undone.
+            </div>
+          </div>
+          <Button variant="destructive" size="sm" onClick={handleDeleteWorkout}>
+            Delete workout
+          </Button>
         </CardBody>
       </Card>
 
@@ -2281,12 +2286,16 @@ function HistoryView() {
 }
 
 function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMode }) {
+  const coachKeyMode = getCoachKeyMode();
+  const isServerKeyMode = coachKeyMode === "server";
   const [persona, setPersona] = useState(settings?.coach_persona ?? "");
   const [openAiKeyDraft, setOpenAiKeyDraft] = useState("");
   const [openAiEditing, setOpenAiEditing] = useState(!settings?.openai_api_key);
   const [openAiTesting, setOpenAiTesting] = useState(false);
   const [openAiTestResult, setOpenAiTestResult] = useState(null);
-  const { coachMemoryEnabled, setCoachMemoryEnabled } = useCoachMemoryEnabled();
+  const [coachMemoryEnabled, setCoachMemoryEnabled] = useState(
+    settings?.coach_memory_enabled ?? false
+  );
   const [coachMemory, setCoachMemory] = useState(() =>
     normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory())
   );
@@ -2319,10 +2328,10 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     trimmedOpenAiKey.length === 0 || trimmedOpenAiKey.startsWith("sk-");
   const maskedOpenAiKey = getOpenAIKeyMasked(settings?.openai_api_key);
   const openAiKeyStatus = settings?.openai_api_key_status ?? "missing";
-  const resolvedCoachMemoryEnabled = coachMemoryEnabled ?? false;
 
   useEffect(() => {
     if (memoryEditOpen) return;
+    setCoachMemoryEnabled(settings?.coach_memory_enabled ?? false);
     setCoachMemory(normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory()));
   }, [memoryEditOpen, settings]);
 
@@ -2336,14 +2345,10 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     setOpenAiTestResult(null);
   }, [settings?.openai_api_key]);
 
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    console.debug("[coachMemory] Settings value ->", coachMemoryEnabled);
-  }, [coachMemoryEnabled]);
-
   const saveSettings = async () => {
     await updateSettings({
       coach_persona: persona,
+      coach_memory_enabled: coachMemoryEnabled,
       coach_memory: coachMemory,
       exercise_picker_auto_focus: exercisePickerAutoFocus,
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
@@ -2355,6 +2360,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleSaveOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!trimmedOpenAiKey) {
       setOpenAiTestResult({
         tone: "error",
@@ -2380,6 +2392,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleRemoveOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "error",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!window.confirm("Remove the saved OpenAI API key from this device?")) return;
     await clearOpenAIKey();
     setOpenAiKeyDraft("");
@@ -2392,6 +2411,13 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   };
 
   const handleTestOpenAiKey = async () => {
+    if (isServerKeyMode) {
+      setOpenAiTestResult({
+        tone: "success",
+        message: "Testing mode: using server key.",
+      });
+      return;
+    }
     if (!settings?.openai_api_key) {
       setOpenAiTestResult({
         tone: "error",
@@ -2507,7 +2533,23 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
 
         <div>
           <Label htmlFor={openAiKeyId}>OpenAI API key</Label>
-          {openAiEditing ? (
+          {isServerKeyMode ? (
+            <div className="ui-stack">
+              <Input
+                id={openAiKeyId}
+                type="password"
+                value={maskedOpenAiKey}
+                readOnly
+                disabled
+                className="flex-1"
+                placeholder="Disabled in testing mode"
+              />
+              <div className="template-meta">Testing mode: using server key.</div>
+              <div className="template-meta">
+                Set VITE_COACH_KEY_MODE=user to re-enable local BYOK controls.
+              </div>
+            </div>
+          ) : openAiEditing ? (
             <div className="ui-stack">
               <Input
                 id={openAiKeyId}
@@ -2519,7 +2561,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
                 placeholder="sk-..."
               />
               {!looksLikeOpenAiKey && trimmedOpenAiKey ? (
-                <div className="chat-error">Keys usually start with &quot;sk-&quot;.</div>
+                <div className="chat-error">
+                  Keys usually start with &quot;sk-&quot;.
+                </div>
               ) : null}
               <div className="ui-row ui-row--wrap">
                 <Button variant="primary" size="sm" type="button" onClick={handleSaveOpenAiKey}>
@@ -2569,30 +2613,36 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             </div>
           )}
           <div className="template-meta">
-            Unlocks AI Coach chat and tool-powered coaching. Stored locally on this device.
+            {isServerKeyMode
+              ? "Coach chats use the server key in testing mode."
+              : "Unlocks AI Coach chat and tool-powered coaching. Stored locally on this device."}
           </div>
           <div className="template-meta">
             Status:{" "}
-            {openAiKeyStatus === "valid"
-              ? "Verified"
-              : openAiKeyStatus === "invalid"
-                ? "Invalid"
-                : openAiKeyStatus === "missing"
-                  ? "Missing"
-                  : "Not tested"}
+            {isServerKeyMode
+              ? "Testing mode: using server key"
+              : openAiKeyStatus === "valid"
+                ? "Verified"
+                : openAiKeyStatus === "invalid"
+                  ? "Invalid"
+                  : openAiKeyStatus === "missing"
+                    ? "Missing"
+                    : "Not tested"}
           </div>
-          <div className="ui-row ui-row--wrap">
-            <Button
-              variant="secondary"
-              size="sm"
-              type="button"
-              onClick={handleTestOpenAiKey}
-              loading={openAiTesting}
-              disabled={!settings?.openai_api_key}
-            >
-              Test API Key
-            </Button>
-          </div>
+          {!isServerKeyMode ? (
+            <div className="ui-row ui-row--wrap">
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={handleTestOpenAiKey}
+                loading={openAiTesting}
+                disabled={!settings?.openai_api_key}
+              >
+                Test API Key
+              </Button>
+            </div>
+          ) : null}
           {openAiTestResult ? (
             <div
               className={openAiTestResult.tone === "error" ? "chat-error" : "template-meta"}
@@ -2608,17 +2658,12 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
             <div className="template-meta">Let the coach remember preferences.</div>
           </div>
           <Button
-            variant={resolvedCoachMemoryEnabled ? "primary" : "secondary"}
+            variant={coachMemoryEnabled ? "primary" : "secondary"}
             size="sm"
             type="button"
-            onClick={() =>
-              void setCoachMemoryEnabled(!resolvedCoachMemoryEnabled, {
-                caller: "settings-toggle",
-              })
-            }
-            aria-pressed={resolvedCoachMemoryEnabled}
+            onClick={() => setCoachMemoryEnabled((prev) => !prev)}
           >
-            {resolvedCoachMemoryEnabled ? "On" : "Off"}
+            {coachMemoryEnabled ? "On" : "Off"}
           </Button>
         </div>
 
@@ -3226,13 +3271,6 @@ export default function App() {
       window.localStorage.getItem("ironai.diagnosticsEnabled") === "true"
     );
   });
-  const [seedDebugEnabled, setSeedDebugEnabled] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return (
-      params.get("debug") === "1" ||
-      window.localStorage.getItem("debugSeed") === "1"
-    );
-  });
   const toastIdRef = useRef(0);
   const toastTimersRef = useRef(new Map());
   const { themeMode, resolvedTheme, setThemeMode } = useTheme();
@@ -3313,9 +3351,7 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("debug") === "1") {
       window.localStorage.setItem("ironai.diagnosticsEnabled", "true");
-      window.localStorage.setItem("debugSeed", "1");
       setDiagnosticsEnabled(true);
-      setSeedDebugEnabled(true);
     }
   }, []);
 
@@ -3383,9 +3419,7 @@ export default function App() {
     const runSeed = async () => {
       setExerciseSeedState({ status: "loading" });
       const result = await seedExercisesIfNeeded();
-      if (result?.status === "success" || result?.status === "fallback") {
-        await repairSeededExercises({ force: false });
-      }
+      await repairSeededExercises({ force: false });
       if (cancelled) return;
       setExerciseSeedState({
         status: result?.status ?? "error",
@@ -3410,12 +3444,6 @@ export default function App() {
 
   const handleStartWorkoutFromTemplate = async (templateId, options = {}) => {
     const id = await startWorkoutFromTemplate(templateId, options);
-    setWorkoutId(id);
-    setTab("workout");
-  };
-
-  const handleOpenWorkout = (id) => {
-    if (!id) return;
     setWorkoutId(id);
     setTab("workout");
   };
@@ -3514,17 +3542,12 @@ export default function App() {
             launchContext={coachLaunchContext}
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
             onNotify={notify}
-            onOpenTemplate={handleOpenTemplate}
-            onOpenWorkout={handleOpenWorkout}
             onNavigateToGyms={(options = {}) => {
-              const gymView = options.spaceId
-                ? { type: "detail", spaceId: options.spaceId }
-                : options.create
-                  ? { type: "form", mode: "create", spaceId: null }
-                  : null;
               setPendingMoreNavigation({
                 section: "gyms",
-                gymView,
+                gymView: options.create
+                  ? { type: "form", mode: "create", spaceId: null }
+                  : null,
               });
               setTab("more");
             }}
@@ -3595,7 +3618,7 @@ export default function App() {
           ))}
         </div>
       </nav>
-      {seedDebugEnabled ? <SeedDebugMiniPanel /> : null}
     </div>
   );
 }
+123

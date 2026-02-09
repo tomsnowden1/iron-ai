@@ -1,4 +1,5 @@
 import Dexie from "dexie";
+import starterExercises from "./data/starterExercises.json";
 import { EQUIPMENT_CATALOG } from "./equipment/catalog";
 import { inferExerciseEquipment } from "./equipment/inference";
 import { computeStableId } from "./seed/seedUtils";
@@ -34,7 +35,7 @@ function writeCoachGymToStorage(storage, value) {
 }
 
 /**
- * v2 (existing)
+ * v2 (existingg))
  */
 db.version(2)
   .stores({
@@ -82,7 +83,7 @@ db.version(3)
   });
 
 /**
- * v4 (NEW): workoutSessions table (backward-compatible with workouts)
+ * v4 (NEW): workoutSessions table (backward-compatible with workouts )
  */
 db.version(4)
   .stores({
@@ -422,6 +423,12 @@ db.version(9)
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
+  const slugify = (value) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   await db.table("equipment").bulkPut(EQUIPMENT_CATALOG);
   await db.table("workoutSpaces").add({
     name: "Default Gym",
@@ -433,6 +440,59 @@ db.on("populate", async () => {
     createdAt: now,
     updatedAt: now,
   });
+  const starterRecords = await Promise.all(
+    starterExercises.map(async (ex) => {
+      const name = ex.name ?? "Exercise";
+      const baseSlug = slugify(name);
+      const primaryMuscles =
+        Array.isArray(ex.primaryMuscles) && ex.primaryMuscles.length
+          ? ex.primaryMuscles
+          : ex.muscle_group
+            ? [ex.muscle_group]
+            : [];
+      const media =
+        ex.media ??
+        (ex.video_url || ex.videoUrl
+          ? { videoUrl: ex.video_url ?? ex.videoUrl }
+          : {});
+      const stableId = await computeStableId({
+        source: ex.source ?? "starter",
+        sourceId: ex.sourceId ?? ex.externalId ?? ex.sourceKey ?? null,
+        externalId: ex.externalId ?? ex.sourceKey ?? null,
+        name,
+        equipment: ex.equipment ?? [],
+        primaryMuscles,
+        pattern: ex.pattern,
+        category: ex.category,
+      });
+      return {
+        ...ex,
+        slug: ex.slug ?? (baseSlug || "exercise"),
+        primaryMuscles,
+        secondaryMuscles: Array.isArray(ex.secondaryMuscles) ? ex.secondaryMuscles : [],
+        instructions: Array.isArray(ex.instructions) ? ex.instructions : [],
+        commonMistakes: Array.isArray(ex.commonMistakes) ? ex.commonMistakes : [],
+        gotchas: Array.isArray(ex.gotchas) ? ex.gotchas : [],
+        progressions: Array.isArray(ex.progressions) ? ex.progressions : [],
+        regressions: Array.isArray(ex.regressions) ? ex.regressions : [],
+        aliases: Array.isArray(ex.aliases) ? ex.aliases : [],
+        equipment: Array.isArray(ex.equipment) ? ex.equipment : [],
+        status: ex.status ?? "extended",
+        youtubeSearchQuery:
+          ex.youtubeSearchQuery ?? `${name ?? "exercise"} exercise form cues`,
+        youtubeVideoId: ex.youtubeVideoId ?? null,
+        media,
+        stableId,
+        source: ex.source ?? "starter",
+        sourceKey: ex.sourceKey ?? ex.externalId ?? null,
+        is_custom: false,
+        ...inferExerciseEquipment(ex),
+        createdAt: now,
+        updatedAt: now,
+      };
+    })
+  );
+  await db.table("exercises").bulkAdd(starterRecords);
 });
 
 db.on("ready", async () => {

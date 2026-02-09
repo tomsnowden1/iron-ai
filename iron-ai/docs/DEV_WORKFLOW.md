@@ -38,6 +38,7 @@ Diagnostics
 - Open the Diagnostics panel from **More → Diagnostics** (only visible when debug is enabled).
 
 Shipping
+- One-time: `chmod +x scripts/ship.sh`
 - `npm run shipmain` from a clean feature branch.
   - Syncs local `main` using `git fetch origin` + `git pull --rebase --autostash origin main`.
   - Stops with conflict instructions if `main` cannot be rebased cleanly.
