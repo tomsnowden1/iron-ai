@@ -32,7 +32,8 @@ export default async function handler(req, res) {
       env: process.env,
     });
     res.status(result.status).json(result.body);
-  } catch {
-    res.status(500).json({ error: { message: "Coach request failed." } });
+  } catch (err) {
+    const message = String(err?.message ?? "").trim() || "Coach request failed.";
+    res.status(500).json({ error: { message } });
   }
 }

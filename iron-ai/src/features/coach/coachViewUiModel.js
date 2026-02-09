@@ -31,6 +31,8 @@ const TEMPLATE_INTENT_REGEX =
   /\b(make|create|save|turn)\b[\w\s]*\btemplate\b|\btemplate\b[\w\s]*\b(save|create|make)\b/i;
 const START_WORKOUT_INTENT_REGEX =
   /\b(start|begin|launch|run)\b[\w\s]*\b(workout|session)\b|\badd\b[\w\s]*\btoday\b/i;
+const WORKOUT_ADJUST_INTENT_REGEX =
+  /\b(make it|adjust|more|less|add|remove|replace|swap|change|include|exclude|without|shorter|longer|sets?|reps?|exercise(?:s)?|quads?|hamstrings?|glutes?|legs?|chest|back|shoulders?|triceps?|biceps?)\b/i;
 
 export function sanitizeCoachAssistantText(value) {
   const text = String(value ?? "");
@@ -47,6 +49,14 @@ export function isStartWorkoutIntentText(value) {
   return START_WORKOUT_INTENT_REGEX.test(String(value ?? ""));
 }
 
+export function shouldForceWorkoutResponseMode({ userMessage, hasVisibleWorkoutDraft }) {
+  if (!hasVisibleWorkoutDraft) return false;
+  const text = String(userMessage ?? "").trim();
+  if (!text) return false;
+  if (isTemplateIntentText(text) || isStartWorkoutIntentText(text)) return false;
+  return WORKOUT_ADJUST_INTENT_REGEX.test(text);
+}
+
 export function resolveCoachErrorMessage({ err, accessState }) {
   if (!accessState?.canChat) return accessState?.message ?? "";
 
@@ -54,7 +64,7 @@ export function resolveCoachErrorMessage({ err, accessState }) {
   const rawMessage = String(err?.message ?? "").trim();
 
   if (accessState?.keyMode === "server" && (status === 401 || status === 403)) {
-    return "Coach server access is not enabled. Ask an admin to set ALLOW_COACH_PROD=true.";
+    return "Coach server is disabled in production. Remove ALLOW_COACH_PROD=false in Vercel to enable Coach.";
   }
 
   if (accessState?.keyMode === "server" && status >= 500) {

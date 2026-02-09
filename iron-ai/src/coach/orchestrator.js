@@ -10,7 +10,12 @@ import {
   summarizeToolCall,
   validateToolInput,
 } from "./tools";
-import { getCoachContextSnapshot, getCoachRequestContext } from "./context";
+import {
+  getCoachContextSnapshot,
+  getCoachExerciseCandidates,
+  getCoachRequestContext,
+} from "./context";
+import { getAllExercises } from "../db";
 import { summarizeCoachMemory } from "./memory";
 import { parseCoachActionDraftMessage } from "./actionDraftContract";
 import { buildContextFingerprint } from "./fingerprint";
@@ -23,6 +28,7 @@ import {
 
 const MAX_TOOL_LOOPS = 2;
 const COACH_TEMPERATURE = 0.2;
+const ENABLE_WRITE_TOOLS = false;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -30,22 +36,28 @@ export const SYSTEM_PROMPT = [
   "Reply with a succinct assistantText.",
   "If proposing an action, include a JSON object in a fenced ```json``` block using contractVersion coach_action_v1 with assistantText and an optional actionDraft.",
   "Action drafts must include kind, confidence, risk, title, summary, and payload. For workouts/templates: payload includes name/title, optional gymId, and exercises: [{ exerciseId, sets?: [{ reps?, weight?, duration?, rpe? }], notes? }]. For gyms: payload includes name/title and optional equipmentIds.",
+  "For workout/template drafts, every exercise must include exerciseId from the provided candidate exercise list.",
+  "Never invent exercise IDs or exercise names outside the candidate list.",
+  "If you cannot confidently map a requested exercise, return needsReview: [{ requestedName, suggestions: [{ exerciseId, name }] }] and do not guess.",
+  "Never ask users to copy/paste JSON. Do not expose raw template or workout JSON in assistantText.",
+  "For workout requests and workout edits, prefer actionDraft kind create_workout with a complete, updated exercise list.",
+  "For template requests, prefer actionDraft kind create_template and guide users to save/open the template.",
+  "Apply requested workout edits directly; do not enter repeated confirmation loops.",
   "The Context availability payload is authoritative for whether context sharing is enabled.",
   "Never fabricate available equipment. Only use equipmentSummary when provided.",
   "If contextEnabled is false, do NOT claim you can see equipment. Still provide a generic workout and include a brief nudge to enable context or choose a gym for personalization.",
-  "When asked to produce a workout, you MUST output at least 5 exercises with sets and reps in a fenced ```json``` block shaped as { name, exercises: [{ name, sets, reps }] }.",
-  "If you cannot comply due to missing context, ask for the missing information and stop.",
-  "When asked to convert to template JSON, output ONLY a fenced ```json``` block with { name, exercises: [{ exerciseId?, name?, exerciseName?, sets, reps, warmupSets? }] } and no extra text.",
+  "If the user asks to adjust an existing workout draft, return an updated create_workout actionDraft even when contextEnabled is false.",
+  "When asked to produce a workout, include at least 5 exercises with sets and reps.",
+  "If context is missing, continue with safe generic assumptions when possible; only ask one clarifying question when the request is impossible without missing details.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
   "If contextEnabled is true and equipmentSummary exists, use only that equipment when generating workouts.",
   "Do not suggest creating a new gym/space if activeGymId is present or if a gym with the same normalized name already exists.",
   "Only suggest creating a gym if there is no activeGymId and no existing gyms match by normalized name.",
-  "If activeGymId is present but equipmentSummary is missing, say you cannot see equipment and ask the user to enable context sharing or share their equipment.",
+  "If activeGymId is present but equipmentSummary is missing, do not claim you can see equipment. Continue using the provided candidate list and include a brief nudge to enable context sharing for better personalization.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
   "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
-  "If a write action is requested, ask for user confirmation before changes are made.",
   "Avoid high-risk actionDrafts unless the user explicitly requests overwriting or destructive changes.",
   "Avoid asking multiple clarifying questions; propose reasonable defaults instead.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
@@ -106,6 +118,7 @@ export function buildSystemMessages({
   memorySummary,
   requestContext,
   contextState,
+  exerciseCandidates,
 }) {
   const messages = [{ role: "system", content: SYSTEM_PROMPT }];
   if (contextState) {
@@ -124,6 +137,14 @@ export function buildSystemMessages({
     messages.push({
       role: "system",
       content: `Coach request context (JSON):\n${JSON.stringify(requestContext)}`,
+    });
+  }
+  if (Array.isArray(exerciseCandidates) && exerciseCandidates.length > 0) {
+    messages.push({
+      role: "system",
+      content: `Exercise candidates (authoritative JSON, choose exerciseId only from this list):\n${JSON.stringify(
+        exerciseCandidates
+      )}`,
     });
   }
   if (contextSnapshot) {
@@ -200,7 +221,10 @@ export async function runCoachTurn({
 }) {
   const useServerKey = keyMode === "server";
   const allowReadTools = Boolean(contextConfig?.enabled);
-  const allowedTools = new Set(WRITE_TOOLS);
+  const allowedTools = new Set();
+  if (ENABLE_WRITE_TOOLS) {
+    WRITE_TOOLS.forEach((tool) => allowedTools.add(tool));
+  }
   const activeGymId = contextConfig?.activeGymId ?? null;
   if (allowReadTools) {
     const scopes = contextConfig?.scopes ?? {};
@@ -211,7 +235,7 @@ export async function runCoachTurn({
   }
   const tools = getOpenAITools({
     allowRead: allowReadTools,
-    allowWrite: true,
+    allowWrite: ENABLE_WRITE_TOOLS,
     allowedTools,
   });
   const registry = getToolRegistry();
@@ -265,6 +289,46 @@ export async function runCoachTurn({
   const requestExerciseCount =
     (requestContext.exerciseLibraryCount ?? 0) + (requestContext.customExercisesCount ?? 0);
   const contextState = normalizeContextStatePayload(contextConfig, requestContext);
+  let libraryExercises = [];
+  let exerciseCandidates = [];
+  let libraryIdSet = new Set();
+  let allowedCandidateIds = new Set();
+  try {
+    libraryExercises = await getAllExercises();
+    libraryIdSet = new Set(
+      libraryExercises
+        .map((exercise) => Number.parseInt(exercise?.id, 10))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    );
+  } catch {
+    libraryExercises = [];
+    libraryIdSet = new Set();
+  }
+  try {
+    exerciseCandidates = await getCoachExerciseCandidates({
+      activeGymId,
+      contextEnabled: contextState.contextEnabled,
+      userMessage,
+    });
+  } catch {
+    exerciseCandidates = [];
+  }
+  if (!exerciseCandidates.length && libraryExercises.length) {
+    exerciseCandidates = libraryExercises.slice(0, 40).map((exercise) => ({
+      exerciseId: exercise.id,
+      name: exercise.name ?? "Unknown Exercise",
+      aliases: Array.isArray(exercise.aliases) ? exercise.aliases : [],
+      equipment: Array.isArray(exercise.equipment) ? exercise.equipment : [],
+      primaryMuscles: Array.isArray(exercise.primaryMuscles)
+        ? exercise.primaryMuscles
+        : [],
+    }));
+  }
+  allowedCandidateIds = new Set(
+    exerciseCandidates
+      .map((candidate) => Number.parseInt(candidate?.exerciseId ?? candidate?.id, 10))
+      .filter((id) => Number.isFinite(id) && id > 0)
+  );
 
   let contextSnapshot = null;
   let contextContract = null;
@@ -303,6 +367,7 @@ export async function runCoachTurn({
       : null,
     contextBytes: contextContract?.contextBytes ?? requestMeta.contextBytes ?? null,
     buildMs: contextContract?.buildMs ?? requestMeta.contextBuildMs ?? null,
+    candidateExerciseCount: exerciseCandidates.length,
     summaryOnly,
   };
 
@@ -314,6 +379,7 @@ export async function runCoachTurn({
       memorySummary: memorySummaryData,
       requestContext,
       contextState,
+      exerciseCandidates,
     }),
     ...history,
   ];
@@ -331,6 +397,7 @@ export async function runCoachTurn({
   debug.requestMeta = requestMeta;
   debug.requestFingerprint = requestFingerprint;
   debug.contextState = contextState;
+  debug.exerciseCandidateCount = exerciseCandidates.length;
 
   console.info(
     `coach_payload gym=${requestContext.activeGymId ?? "none"} eq=${
@@ -383,6 +450,7 @@ export async function runCoachTurn({
         memorySummary: memorySummaryData,
         requestContext,
         contextState,
+        exerciseCandidates,
       }),
       ...history,
     ];
@@ -501,6 +569,7 @@ export async function runCoachTurn({
         memorySummary: memorySummaryData,
         requestContext,
         contextState,
+        exerciseCandidates,
       }),
       ...history,
     ];
@@ -522,6 +591,8 @@ export async function runCoachTurn({
       assistantText: finalAssistant,
       responseMode,
       contextEnabled: contextState.contextEnabled,
+      allowedCandidateIds,
+      libraryIdSet,
     });
     responseValidation.mode = firstValidation.mode;
     if (!firstValidation.valid) {
@@ -530,6 +601,7 @@ export async function runCoachTurn({
         contextEnabled: contextState.contextEnabled,
         invalidContent: finalAssistant,
         selectedGym: contextState.selectedGym,
+        candidateExercises: exerciseCandidates,
       });
       let repairedAssistant = "";
       try {
@@ -554,6 +626,8 @@ export async function runCoachTurn({
         assistantText: repairedAssistant,
         responseMode,
         contextEnabled: contextState.contextEnabled,
+        allowedCandidateIds,
+        libraryIdSet,
       });
       if (repairedValidation.valid) {
         finalAssistant = repairedAssistant;

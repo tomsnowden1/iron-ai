@@ -38,8 +38,28 @@ const ActionDraftSetSchema = z
 const ActionDraftExerciseSchema = z
   .object({
     exerciseId: NumericId,
-    sets: z.array(ActionDraftSetSchema).optional(),
+    name: z.string().min(1).optional(),
+    exerciseName: z.string().min(1).optional(),
+    sets: z.union([z.array(ActionDraftSetSchema), NumericValue]).optional(),
+    reps: NumericValue.optional(),
+    targetSets: NumericValue.optional(),
+    targetReps: NumericValue.optional(),
+    warmupSets: NumericValue.optional(),
     notes: z.string().optional(),
+  })
+  .passthrough();
+
+const ActionDraftSuggestionSchema = z
+  .object({
+    exerciseId: NumericId,
+    name: z.string().min(1),
+  })
+  .passthrough();
+
+const ActionDraftNeedsReviewSchema = z
+  .object({
+    requestedName: z.string().min(1),
+    suggestions: z.array(ActionDraftSuggestionSchema).max(5).optional(),
   })
   .passthrough();
 
@@ -49,24 +69,38 @@ const ActionDraftPayloadSchemas = {
       name: z.string().min(1).optional(),
       title: z.string().min(1).optional(),
       gymId: NumericId.optional(),
-      exercises: z.array(ActionDraftExerciseSchema).min(1),
+      exercises: z.array(ActionDraftExerciseSchema).optional(),
+      needsReview: z.array(ActionDraftNeedsReviewSchema).optional(),
       plannedDurationMins: NumericValue.optional(),
     })
-    .refine((value) => value.name || value.title, {
-      message: "Workout draft requires a name or title.",
-    })
+    .refine(
+      (value) =>
+        Boolean(value.name || value.title) &&
+        ((Array.isArray(value.exercises) && value.exercises.length > 0) ||
+          (Array.isArray(value.needsReview) && value.needsReview.length > 0)),
+      {
+        message: "Workout draft requires a title and exercises or needsReview.",
+      }
+    )
     .passthrough(),
   create_template: z
     .object({
       name: z.string().min(1).optional(),
       title: z.string().min(1).optional(),
       gymId: NumericId.optional(),
-      exercises: z.array(ActionDraftExerciseSchema).min(1),
+      exercises: z.array(ActionDraftExerciseSchema).optional(),
+      needsReview: z.array(ActionDraftNeedsReviewSchema).optional(),
       frequencyHint: z.string().optional(),
     })
-    .refine((value) => value.name || value.title, {
-      message: "Template draft requires a name or title.",
-    })
+    .refine(
+      (value) =>
+        Boolean(value.name || value.title) &&
+        ((Array.isArray(value.exercises) && value.exercises.length > 0) ||
+          (Array.isArray(value.needsReview) && value.needsReview.length > 0)),
+      {
+        message: "Template draft requires a title and exercises or needsReview.",
+      }
+    )
     .passthrough(),
   create_gym: z
     .object({
