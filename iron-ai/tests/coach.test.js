@@ -8,7 +8,7 @@ import {
   getAllExercises,
   listEquipment,
 } from "../src/db.js";
-import { getCoachContextSnapshot } from "../src/coach/context.js";
+import { getCoachContextSnapshot, getCoachExerciseCandidates } from "../src/coach/context.js";
 import { coachReducer, initialCoachState } from "../src/coach/state.js";
 import { executeTool, getToolRegistry, validateToolInput } from "../src/coach/tools.js";
 import { normalizeGymName } from "../src/workoutSpaces/logic.js";
@@ -116,6 +116,69 @@ describe.sequential("coach platform", () => {
         expect.objectContaining({ id: equipmentIds[0], name: expect.any(String) }),
       ])
     );
+  });
+
+  it("filters coach candidates by selected gym equipment even when context is off", async () => {
+    const now = Date.now();
+    await db.table("exercises").bulkAdd([
+      {
+        name: "Close-Grip Front Lat Pulldown",
+        slug: "close-grip-front-lat-pulldown",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "back",
+        is_custom: false,
+        status: "extended",
+        aliases: ["lat pulldown"],
+        primaryMuscles: ["back"],
+        secondaryMuscles: ["biceps"],
+        equipment: ["lat_pulldown_machine"],
+        requiredEquipmentIds: ["lat_pulldown_machine"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "lat-pulldown-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Inverted Row",
+        slug: "inverted-row",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "back",
+        is_custom: false,
+        status: "extended",
+        aliases: ["bodyweight row"],
+        primaryMuscles: ["back"],
+        secondaryMuscles: ["biceps"],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "inverted-row-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const spaceId = await createWorkoutSpace({
+      name: "Condo",
+      equipmentIds: ["dumbbell", "bench"],
+    });
+
+    const candidates = await getCoachExerciseCandidates({
+      activeGymId: spaceId,
+      contextEnabled: false,
+      userMessage: "make me a pull workout",
+      maxCandidates: 20,
+    });
+
+    expect(
+      candidates.some((entry) => /lat pulldown/i.test(String(entry?.name ?? "")))
+    ).toBe(false);
+    expect(
+      candidates.some((entry) => /inverted row/i.test(String(entry?.name ?? "")))
+    ).toBe(true);
   });
 
   it("normalizes gym names for matching", () => {

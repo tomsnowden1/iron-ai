@@ -5,8 +5,12 @@ import {
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
+  isStartWorkoutIntentText,
+  isTemplateIntentText,
   resolveCoachErrorMessage,
+  sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldForceWorkoutResponseMode,
 } from "../src/features/coach/coachViewUiModel";
 
 describe("coach view UX model", () => {
@@ -79,5 +83,41 @@ describe("coach view UX model", () => {
       accessState: { canChat: true, keyMode: "server" },
     });
     expect(message).toMatch(/Coach server error/i);
+  });
+
+  it("removes JSON plumbing text from assistant display", () => {
+    const cleaned = sanitizeCoachAssistantText(`Here is the template in JSON format:
+\`\`\`json
+{"name":"Leg Day","exercises":[{"name":"Squat","sets":3,"reps":8}]}
+\`\`\`
+Use this template payload.`);
+    expect(cleaned).toBe("");
+  });
+
+  it("detects quick-action intent text for start/template", () => {
+    expect(isTemplateIntentText("make it a template")).toBe(true);
+    expect(isStartWorkoutIntentText("start workout")).toBe(true);
+    expect(isTemplateIntentText("how are you")).toBe(false);
+  });
+
+  it("forces workout response mode for follow-up adjustments when a draft is visible", () => {
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "more quads and make it 8 exercises",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(true);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "start workout",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "how are you today",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
   });
 });

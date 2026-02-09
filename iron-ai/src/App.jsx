@@ -1,3 +1,4 @@
+// codex-pr-test
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLiveQuery } from "dexie-react-hooks";
 import {
@@ -2296,6 +2297,9 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   const [coachMemoryEnabled, setCoachMemoryEnabled] = useState(
     settings?.coach_memory_enabled ?? false
   );
+  const [coachContextEnabled, setCoachContextEnabled] = useState(
+    settings?.coach_context_enabled ?? true
+  );
   const [coachMemory, setCoachMemory] = useState(() =>
     normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory())
   );
@@ -2332,6 +2336,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
   useEffect(() => {
     if (memoryEditOpen) return;
     setCoachMemoryEnabled(settings?.coach_memory_enabled ?? false);
+    setCoachContextEnabled(settings?.coach_context_enabled ?? true);
     setCoachMemory(normalizeCoachMemory(settings?.coach_memory ?? getDefaultCoachMemory()));
   }, [memoryEditOpen, settings]);
 
@@ -2349,6 +2354,7 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
     await updateSettings({
       coach_persona: persona,
       coach_memory_enabled: coachMemoryEnabled,
+      coach_context_enabled: coachContextEnabled,
       coach_memory: coachMemory,
       exercise_picker_auto_focus: exercisePickerAutoFocus,
       exercise_picker_filter_active_gym: exercisePickerFilterActiveGym,
@@ -2654,6 +2660,23 @@ function SettingsForm({ settings, onNotify, themeMode, resolvedTheme, setThemeMo
 
         <div className="ui-row ui-row--between ui-row--wrap">
           <div>
+            <div className="ui-strong">Coach context sharing</div>
+            <div className="template-meta">
+              Use your gym/equipment/session context in coach chat.
+            </div>
+          </div>
+          <Button
+            variant={coachContextEnabled ? "primary" : "secondary"}
+            size="sm"
+            type="button"
+            onClick={() => setCoachContextEnabled((prev) => !prev)}
+          >
+            {coachContextEnabled ? "On" : "Off"}
+          </Button>
+        </div>
+
+        <div className="ui-row ui-row--between ui-row--wrap">
+          <div>
             <div className="ui-strong">Enable Coach Memory</div>
             <div className="template-meta">Let the coach remember preferences.</div>
           </div>
@@ -2954,12 +2977,12 @@ function SettingsView({
     ? `${settings.coach_persona ?? ""}::${settings.openai_api_key ?? ""}::${
         settings.openai_api_key_status ?? ""
       }::${settings.coach_memory_enabled ?? ""}::${
-        settings.exercise_picker_auto_focus ?? ""
-      }::${settings.exercise_picker_filter_active_gym ?? ""}::${
-        settings.exercise_picker_most_used_first ?? ""
-      }::${settings.show_rest_timer ?? ""}::${
-        settings.long_press_done_adds_next ?? ""
-      }`
+        settings.coach_context_enabled ?? ""
+      }::${settings.exercise_picker_auto_focus ?? ""}::${
+        settings.exercise_picker_filter_active_gym ?? ""
+      }::${settings.exercise_picker_most_used_first ?? ""}::${
+        settings.show_rest_timer ?? ""
+      }::${settings.long_press_done_adds_next ?? ""}`
     : "loading";
 
   return (
@@ -3542,6 +3565,16 @@ export default function App() {
             launchContext={coachLaunchContext}
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
             onNotify={notify}
+            onOpenTemplate={handleOpenTemplate}
+            onOpenWorkout={(id) => {
+              if (!id) return;
+              setWorkoutId(id);
+              setTab("workout");
+            }}
+            onOpenSettings={() => {
+              setPendingMoreNavigation({ section: "settings" });
+              setTab("more");
+            }}
             onNavigateToGyms={(options = {}) => {
               setPendingMoreNavigation({
                 section: "gyms",

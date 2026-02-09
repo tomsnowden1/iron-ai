@@ -107,6 +107,30 @@ describe("action draft contract", () => {
     expect(parsed.contractVersion).toBe(ACTION_DRAFT_CONTRACT_VERSION);
     expect(parsed.assistantText).toBe(contract.assistantText);
   });
+
+  it("accepts numeric set/rep exercise payloads in action drafts", () => {
+    const contract = {
+      contractVersion: ACTION_DRAFT_CONTRACT_VERSION,
+      assistantText: "Push workout ready.",
+      actionDraft: {
+        ...draftByKind.create_workout,
+        payload: {
+          name: "Push Workout",
+          exercises: [
+            {
+              exerciseId: 2,
+              sets: 3,
+              reps: 10,
+            },
+          ],
+        },
+      },
+    };
+    const message = `\`\`\`json\n${JSON.stringify(contract)}\n\`\`\``;
+    const parsed = parseCoachActionDraftMessage(message);
+    expect(parsed.actionDraft?.payload?.exercises?.[0]?.sets).toBe(3);
+    expect(parsed.actionDraft?.payload?.exercises?.[0]?.reps).toBe(10);
+  });
 });
 
 describe("coach context fingerprint", () => {
