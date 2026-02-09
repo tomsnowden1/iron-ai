@@ -11,12 +11,22 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+!.env.example
+
+# Generated reports
+src/seed/reports/latestExerciseImportReport.json
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+**/.DS_Store
+.Spotlight-V100
+.Trashes
+._*
 *.suo
 *.ntvs*
 *.njsproj

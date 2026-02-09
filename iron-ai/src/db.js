@@ -2,11 +2,40 @@ import Dexie from "dexie";
 import starterExercises from "./data/starterExercises.json";
 import { EQUIPMENT_CATALOG } from "./equipment/catalog";
 import { inferExerciseEquipment } from "./equipment/inference";
+import { computeStableId } from "./seed/seedUtils";
 
 export const db = new Dexie("ironAI");
+const COACH_ACTIVE_GYM_KEY = "coach.activeGymId.v1";
+const MIGRATION_META_KEYS = {
+  version: "migration.version",
+  lastMigrationAt: "migration.lastMigrationAt",
+};
+
+function normalizeCoachGymId(value) {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function readCoachGymFromStorage(storage) {
+  if (!storage) return { value: null, exists: false };
+  const raw = storage.getItem(COACH_ACTIVE_GYM_KEY);
+  if (raw == null) return { value: null, exists: false };
+  try {
+    const parsed = JSON.parse(raw);
+    return { value: normalizeCoachGymId(parsed), exists: true };
+  } catch {
+    return { value: null, exists: true };
+  }
+}
+
+function writeCoachGymToStorage(storage, value) {
+  if (!storage) return;
+  storage.setItem(COACH_ACTIVE_GYM_KEY, JSON.stringify(value));
+}
 
 /**
- * v2 (existing)
+ * v2 (existingg))
  */
 db.version(2)
   .stores({
@@ -54,7 +83,7 @@ db.version(3)
   });
 
 /**
- * v4 (NEW): workoutSessions table (backward-compatible with workouts)
+ * v4 (NEW): workoutSessions table (backward-compatible with workouts )
  */
 db.version(4)
   .stores({
@@ -273,9 +302,133 @@ db.version(7)
     });
   });
 
+/**
+ * v8 (NEW): exercise library seed + meta table
+ */
+db.version(8)
+  .stores({
+    exercises:
+      "++id, slug, name, default_sets, default_reps, muscle_group, video_url, is_custom, status, *aliases, *primaryMuscles, *secondaryMuscles, *equipment",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+    meta: "key",
+  })
+  .upgrade(async (tx) => {
+    const now = Date.now();
+    const slugify = (value) =>
+      String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+    await tx.table("exercises").toCollection().modify((exercise) => {
+      if (!exercise.slug) {
+        const baseSlug = slugify(exercise.name ?? "");
+        const idPrefix = exercise.id != null ? String(exercise.id) : "";
+        if (baseSlug && idPrefix) {
+          exercise.slug = `${idPrefix}-${baseSlug}`;
+        } else {
+          exercise.slug = baseSlug || idPrefix || "exercise";
+        }
+      }
+      if (!exercise.status) exercise.status = "extended";
+      if (!Array.isArray(exercise.aliases)) exercise.aliases = [];
+      if (!Array.isArray(exercise.primaryMuscles)) {
+        const legacy = String(exercise.muscle_group ?? "").trim();
+        exercise.primaryMuscles = legacy ? [legacy] : [];
+      }
+      if (!Array.isArray(exercise.secondaryMuscles)) exercise.secondaryMuscles = [];
+      if (!Array.isArray(exercise.instructions)) exercise.instructions = [];
+      if (!Array.isArray(exercise.gotchas)) exercise.gotchas = [];
+      if (!Array.isArray(exercise.equipment)) exercise.equipment = [];
+      if (!exercise.youtubeSearchQuery && exercise.name) {
+        exercise.youtubeSearchQuery = `${exercise.name} exercise form cues`;
+      }
+      if (exercise.youtubeVideoId === undefined) {
+        exercise.youtubeVideoId = null;
+      }
+      if (!exercise.source) {
+        exercise.source = exercise.is_custom ? "user" : "starter";
+      }
+      if (exercise.createdAt == null) exercise.createdAt = now;
+      if (exercise.updatedAt == null) exercise.updatedAt = now;
+    });
+  });
+
+/**
+ * v9 (NEW): stable exercise IDs for seed imports
+ */
+db.version(9)
+  .stores({
+    exercises:
+      "++id, &stableId, slug, name, default_sets, default_reps, muscle_group, video_url, is_custom, status, *aliases, *primaryMuscles, *secondaryMuscles, *equipment",
+    logs: "++id, date",
+    settings: "id, api_key, coach_persona",
+    templates: "++id, name, createdAt, updatedAt",
+    templateItems:
+      "++id, templateId, exerciseId, sortOrder, targetSets, targetReps, notes, createdAt, updatedAt, [templateId+exerciseId]",
+
+    // Legacy sessions (kept for backward compatibility)
+    workouts: "++id, startedAt, finishedAt, templateId",
+    // Canonical sessions table
+    workoutSessions: "++id, startedAt, finishedAt, templateId",
+    workoutItems:
+      "++id, workoutId, exerciseId, sortOrder, targetSets, targetReps, notes, [workoutId+exerciseId]",
+    workoutSets: "++id, workoutItemId, setNumber",
+
+    plannedWorkouts: "++id, date, createdAt, updatedAt, source, templateId",
+
+    equipment: "id, name, category, isPortable",
+    workoutSpaces: "++id, name, isDefault, isTemporary, expiresAt, updatedAt",
+    meta: "key",
+  })
+  .upgrade(async (tx) => {
+    const exercises = await tx.table("exercises").toArray();
+    const updated = await Promise.all(
+      exercises.map(async (exercise) => {
+        if (exercise.stableId) return exercise;
+        const stableId = await computeStableId({
+          source: exercise.source,
+          sourceId: exercise.sourceId ?? exercise.externalId ?? exercise.sourceKey ?? null,
+          externalId: exercise.externalId ?? exercise.sourceKey ?? null,
+          name: exercise.name,
+          equipment: exercise.equipment ?? [],
+          primaryMuscles: exercise.primaryMuscles ?? [],
+          pattern: exercise.pattern,
+          category: exercise.category,
+        });
+        return { ...exercise, stableId };
+      })
+    );
+    await tx.table("exercises").bulkPut(updated);
+  });
+
 // Seed only on first DB creation
 db.on("populate", async () => {
   const now = Date.now();
+  const slugify = (value) =>
+    String(value ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
   await db.table("equipment").bulkPut(EQUIPMENT_CATALOG);
   await db.table("workoutSpaces").add({
     name: "Default Gym",
@@ -287,8 +440,10 @@ db.on("populate", async () => {
     createdAt: now,
     updatedAt: now,
   });
-  await db.table("exercises").bulkAdd(
-    starterExercises.map((ex) => {
+  const starterRecords = await Promise.all(
+    starterExercises.map(async (ex) => {
+      const name = ex.name ?? "Exercise";
+      const baseSlug = slugify(name);
       const primaryMuscles =
         Array.isArray(ex.primaryMuscles) && ex.primaryMuscles.length
           ? ex.primaryMuscles
@@ -300,16 +455,36 @@ db.on("populate", async () => {
         (ex.video_url || ex.videoUrl
           ? { videoUrl: ex.video_url ?? ex.videoUrl }
           : {});
+      const stableId = await computeStableId({
+        source: ex.source ?? "starter",
+        sourceId: ex.sourceId ?? ex.externalId ?? ex.sourceKey ?? null,
+        externalId: ex.externalId ?? ex.sourceKey ?? null,
+        name,
+        equipment: ex.equipment ?? [],
+        primaryMuscles,
+        pattern: ex.pattern,
+        category: ex.category,
+      });
       return {
         ...ex,
+        slug: ex.slug ?? (baseSlug || "exercise"),
         primaryMuscles,
         secondaryMuscles: Array.isArray(ex.secondaryMuscles) ? ex.secondaryMuscles : [],
         instructions: Array.isArray(ex.instructions) ? ex.instructions : [],
         commonMistakes: Array.isArray(ex.commonMistakes) ? ex.commonMistakes : [],
+        gotchas: Array.isArray(ex.gotchas) ? ex.gotchas : [],
         progressions: Array.isArray(ex.progressions) ? ex.progressions : [],
         regressions: Array.isArray(ex.regressions) ? ex.regressions : [],
         aliases: Array.isArray(ex.aliases) ? ex.aliases : [],
+        equipment: Array.isArray(ex.equipment) ? ex.equipment : [],
+        status: ex.status ?? "extended",
+        youtubeSearchQuery:
+          ex.youtubeSearchQuery ?? `${name ?? "exercise"} exercise form cues`,
+        youtubeVideoId: ex.youtubeVideoId ?? null,
         media,
+        stableId,
+        source: ex.source ?? "starter",
+        sourceKey: ex.sourceKey ?? ex.externalId ?? null,
         is_custom: false,
         ...inferExerciseEquipment(ex),
         createdAt: now,
@@ -317,6 +492,22 @@ db.on("populate", async () => {
       };
     })
   );
+  await db.table("exercises").bulkAdd(starterRecords);
+});
+
+db.on("ready", async () => {
+  try {
+    const metaTable = db.table("meta");
+    const stored = await metaTable.get(MIGRATION_META_KEYS.version);
+    const storedVersion = stored?.value ?? null;
+    if (storedVersion !== db.verno) {
+      const now = Date.now();
+      await metaTable.put({ key: MIGRATION_META_KEYS.version, value: db.verno });
+      await metaTable.put({ key: MIGRATION_META_KEYS.lastMigrationAt, value: now });
+    }
+  } catch (error) {
+    console.warn("Unable to store migration metadata.", error);
+  }
 });
 
 // --------------------
@@ -603,6 +794,40 @@ export async function setActiveWorkoutSpace(spaceId) {
   });
 }
 
+export async function getCoachActiveGymMeta() {
+  try {
+    const record = await db.table("meta").get(COACH_ACTIVE_GYM_KEY);
+    if (record) {
+      return {
+        value: normalizeCoachGymId(record.value),
+        exists: true,
+      };
+    }
+  } catch {
+    // Ignore Dexie errors and fall back to local storage.
+  }
+  if (typeof window === "undefined") {
+    return { value: null, exists: false };
+  }
+  return readCoachGymFromStorage(window.localStorage);
+}
+
+export async function setCoachActiveGymMeta(nextValue) {
+  const normalized = normalizeCoachGymId(nextValue);
+  const record = {
+    key: COACH_ACTIVE_GYM_KEY,
+    value: normalized,
+    updatedAt: Date.now(),
+  };
+  try {
+    await db.table("meta").put(record);
+  } catch {
+    // Ignore Dexie errors and fall back to local storage.
+  }
+  if (typeof window === "undefined") return;
+  writeCoachGymToStorage(window.localStorage, normalized);
+}
+
 function parseRestSeconds(value, fallback = 60) {
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed)) return fallback;
@@ -650,6 +875,7 @@ export async function createEmptyWorkout(options = {}) {
         templateId: null,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       await db.table("workouts").put({
@@ -659,6 +885,7 @@ export async function createEmptyWorkout(options = {}) {
         templateId: null,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       return workoutId;
@@ -694,6 +921,7 @@ export async function startWorkoutFromTemplate(templateId, options = {}) {
         templateId,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       await db.table("workouts").put({
@@ -703,6 +931,7 @@ export async function startWorkoutFromTemplate(templateId, options = {}) {
         templateId,
         spaceId: spaceId ?? null,
         sessionNote: "",
+        sessionReflection: "",
         exerciseNotes: {},
       });
       return id;
@@ -848,6 +1077,7 @@ export async function addExerciseToWorkout(workoutId, exerciseId) {
         setNumber: s,
         weight: "",
         reps: targetReps == null ? "" : String(targetReps),
+        isWarmup: false,
       });
     }
   });
@@ -862,15 +1092,42 @@ export async function removeWorkoutItem(workoutItemId) {
   });
 }
 
-export async function addWorkoutSet(workoutItemId) {
+export async function addWorkoutSet(workoutItemId, options = {}) {
   const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
   const maxN = sets.length ? Math.max(...sets.map((s) => s.setNumber ?? 0)) : 0;
   const nextN = maxN + 1;
+  const { weight, reps, isWarmup } = options ?? {};
   return db.table("workoutSets").add({
     workoutItemId,
     setNumber: nextN,
-    weight: "",
-    reps: "",
+    weight: weight ?? "",
+    reps: reps ?? "",
+    isWarmup: isWarmup ?? false,
+  });
+}
+
+export async function addWarmupSets(workoutItemId, count = 2) {
+  const safeCount = Math.max(1, Math.floor(count));
+  return db.transaction("rw", db.table("workoutSets"), async () => {
+    const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
+    sets.sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0));
+    const warmupCount = sets.filter((set) => set.isWarmup).length;
+
+    for (const set of sets) {
+      if (set.isWarmup) continue;
+      const current = set.setNumber ?? 0;
+      await db.table("workoutSets").update(set.id, { setNumber: current + safeCount });
+    }
+
+    for (let i = 0; i < safeCount; i += 1) {
+      await db.table("workoutSets").add({
+        workoutItemId,
+        setNumber: warmupCount + i + 1,
+        weight: "",
+        reps: "",
+        isWarmup: true,
+      });
+    }
   });
 }
 
@@ -901,6 +1158,11 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
       // Keep same number of sets currently on the item
       const existingSets = await db.table("workoutSets").where({ workoutItemId }).toArray();
       const setCount = existingSets.length || ex.default_sets || 3;
+      const warmupFlags = existingSets.length
+        ? existingSets
+            .sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0))
+            .map((set) => Boolean(set.isWarmup))
+        : Array.from({ length: setCount }, () => false);
 
       // Update workout item
       await db.table("workoutItems").update(workoutItemId, {
@@ -909,7 +1171,7 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
         targetReps: ex.default_reps ?? null,
       });
 
-      // Reset sets to match new exercise default reps
+      // Reset sets to match new exercise defaults while preserving count
       await db.table("workoutSets").where({ workoutItemId }).delete();
 
       for (let s = 1; s <= setCount; s++) {
@@ -917,7 +1179,8 @@ export async function replaceWorkoutExercise(workoutItemId, newExerciseId) {
           workoutItemId,
           setNumber: s,
           weight: "",
-          reps: ex.default_reps == null ? "" : String(ex.default_reps),
+          reps: "",
+          isWarmup: warmupFlags[s - 1] ?? false,
         });
       }
     }
@@ -937,6 +1200,34 @@ export async function removeWorkoutSet(workoutItemId, setId) {
         await db.table("workoutSets").update(sets[i].id, { setNumber: desired });
       }
     }
+  });
+}
+
+export async function restoreWorkoutSet(workoutItemId, setData) {
+  return db.transaction("rw", db.table("workoutSets"), async () => {
+    const sets = await db.table("workoutSets").where({ workoutItemId }).toArray();
+    const maxPosition = sets.length + 1;
+    const desired = Math.min(
+      maxPosition,
+      Math.max(1, Math.floor(setData?.setNumber ?? maxPosition))
+    );
+
+    for (const set of sets) {
+      if ((set.setNumber ?? 0) >= desired) {
+        const nextNumber = (set.setNumber ?? 0) + 1;
+        await db.table("workoutSets").update(set.id, { setNumber: nextNumber });
+      }
+    }
+
+    await db.table("workoutSets").add({
+      id: setData?.id,
+      workoutItemId,
+      setNumber: desired,
+      weight: setData?.weight ?? "",
+      reps: setData?.reps ?? "",
+      isWarmup: setData?.isWarmup ?? false,
+      isComplete: setData?.isComplete ?? false,
+    });
   });
 }
 
@@ -964,6 +1255,10 @@ export async function getWorkoutWithDetails(workoutId) {
         spaceId: workoutRecord.spaceId ?? null,
         sessionNote:
           typeof workoutRecord.sessionNote === "string" ? workoutRecord.sessionNote : "",
+        sessionReflection:
+          typeof workoutRecord.sessionReflection === "string"
+            ? workoutRecord.sessionReflection
+            : "",
         exerciseNotes:
           workoutRecord.exerciseNotes && typeof workoutRecord.exerciseNotes === "object"
             ? workoutRecord.exerciseNotes
@@ -1010,6 +1305,40 @@ export async function listFinishedWorkouts() {
 
   done.sort((a, b) => String(b.finishedAt).localeCompare(String(a.finishedAt)));
   return done;
+}
+
+export async function getPreviousWorkoutSetsByExercise(exerciseIds, currentWorkoutId = null) {
+  const uniqueIds = Array.from(new Set(exerciseIds ?? [])).filter((id) => id != null);
+  if (uniqueIds.length === 0) return new Map();
+
+  const finished = await listFinishedWorkouts();
+  if (!finished.length) return new Map();
+
+  const remaining = new Set(uniqueIds);
+  const results = new Map();
+
+  for (const workout of finished) {
+    if (remaining.size === 0) break;
+    if (currentWorkoutId != null && workout.id === currentWorkoutId) continue;
+
+    const items = await db.table("workoutItems").where({ workoutId: workout.id }).toArray();
+    const matchingItems = items.filter((item) => remaining.has(item.exerciseId));
+    if (!matchingItems.length) continue;
+
+    for (const item of matchingItems) {
+      if (!remaining.has(item.exerciseId)) continue;
+      const sets = await db.table("workoutSets").where({ workoutItemId: item.id }).toArray();
+      sets.sort((a, b) => (a.setNumber ?? 0) - (b.setNumber ?? 0));
+      results.set(item.exerciseId, {
+        workoutId: workout.id,
+        finishedAt: workout.finishedAt ?? workout.startedAt ?? null,
+        sets,
+      });
+      remaining.delete(item.exerciseId);
+    }
+  }
+
+  return results;
 }
 
 export async function getExerciseUsageCounts() {

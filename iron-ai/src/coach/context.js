@@ -10,8 +10,9 @@ import {
 } from "../db";
 import { getEquipmentMap } from "../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../equipment/engine";
-import { resolveActiveSpace } from "../workoutSpaces/logic";
+import { isSpaceExpired } from "../workoutSpaces/logic";
 import { summarizeCoachMemory } from "./memory";
+import { buildCoachContextContract } from "./contract";
 
 const DEFAULT_SESSION_LIMIT = 5;
 const MAX_SESSION_LIMIT = 20;
@@ -19,9 +20,47 @@ const DEFAULT_TEMPLATE_LIMIT = 10;
 const MAX_TEMPLATE_LIMIT = 50;
 const DEFAULT_MAX_BYTES = 60000;
 const MAX_MISSING_EXERCISES = 20;
+const DEFAULT_REQUEST_SESSION_LIMIT = 5;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function nowMs() {
+  if (typeof performance !== "undefined" && typeof performance.now === "function") {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function countEquipment(equipmentIds) {
+  if (!Array.isArray(equipmentIds)) return 0;
+  return equipmentIds.filter((id) => id && id !== "bodyweight").length;
+}
+
+function buildEquipmentPayload(availableEquipment) {
+  if (!Array.isArray(availableEquipment) || availableEquipment.length === 0) return [];
+  return availableEquipment
+    .map((item) => {
+      if (!item) return null;
+      const payload = {
+        id: item.id ?? null,
+        name: item.name ?? "Unknown",
+      };
+      if (Array.isArray(item.aliases) && item.aliases.length) {
+        payload.aliases = item.aliases;
+      }
+      return payload;
+    })
+    .filter(Boolean);
+}
+
+function safeJsonSize(value) {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
 }
 
 function toDateLabel(dateValue) {
@@ -150,6 +189,11 @@ function sizeOfSnapshot(snapshot) {
   }
 }
 
+function resolveSnapshotBytes(snapshot) {
+  const size = sizeOfSnapshot(snapshot);
+  return Number.isFinite(size) ? size : 0;
+}
+
 function truncateSnapshot(snapshot, maxBytes) {
   const meta = { truncated: false, omitted: [] };
   let working = snapshot;
@@ -198,6 +242,7 @@ function truncateSnapshot(snapshot, maxBytes) {
     activeSpace: current.activeSpace
       ? { ...current.activeSpace, equipmentIds: [] }
       : current.activeSpace,
+    equipment: null,
     availableEquipment: [],
     missingEquipment: [],
   }));
@@ -208,7 +253,64 @@ function truncateSnapshot(snapshot, maxBytes) {
   return { snapshot: working, meta };
 }
 
+function resolveCoachActiveSpace(spaces, activeGymId) {
+  if (!Array.isArray(spaces) || spaces.length === 0) return null;
+  const validSpaces = spaces.filter((space) => !isSpaceExpired(space));
+  if (!validSpaces.length) return null;
+  if (activeGymId == null) return null;
+  return validSpaces.find((space) => space.id === activeGymId) ?? null;
+}
+
+export async function getCoachRequestContext({ activeGymId } = {}) {
+  const startedAt = nowMs();
+  const settings = await db.settings.get(1);
+  const resolvedActiveGymId = activeGymId ?? settings?.active_space_id ?? null;
+  const spaces = await listWorkoutSpaces();
+  const activeSpace = resolveCoachActiveSpace(spaces, resolvedActiveGymId);
+  const equipmentIds = Array.isArray(activeSpace?.equipmentIds)
+    ? activeSpace.equipmentIds
+    : [];
+  const normalizedEquipmentIds = Array.from(new Set(equipmentIds)).sort((a, b) =>
+    String(a).localeCompare(String(b))
+  );
+  const equipmentCount = countEquipment(normalizedEquipmentIds);
+
+  const exerciseTotal = await db.table("exercises").count();
+  const customExercisesCount = await db
+    .table("exercises")
+    .filter((exercise) => exercise?.is_custom || exercise?.source === "user")
+    .count();
+  const exerciseLibraryCount = Math.max(0, exerciseTotal - customExercisesCount);
+
+  const templatesCount = await db.table("templates").count();
+  const recentSessions = await listRecentWorkoutSessions(DEFAULT_REQUEST_SESSION_LIMIT);
+  const recentWorkoutsCount = recentSessions.length;
+  const lastWorkoutDate =
+    recentSessions[0]?.finishedAt ?? recentSessions[0]?.startedAt ?? null;
+
+  const baseContext = {
+    activeGymId: activeSpace?.id ?? null,
+    gymName: activeSpace?.name ?? null,
+    equipmentIds: normalizedEquipmentIds,
+    equipmentCount,
+    exerciseLibraryCount,
+    customExercisesCount,
+    templatesCount,
+    recentWorkoutsCount,
+    lastWorkoutDate,
+  };
+
+  const contextBytes = safeJsonSize(baseContext);
+  const contextBuildMs = Math.max(0, Math.round(nowMs() - startedAt));
+
+  return {
+    context: { ...baseContext, contextBytes, contextBuildMs },
+    meta: { contextBytes, contextBuildMs },
+  };
+}
+
 export async function getCoachContextSnapshot(options = {}) {
+  const startedAt = nowMs();
   const {
     scopes = {},
     sessionLimit = DEFAULT_SESSION_LIMIT,
@@ -216,6 +318,7 @@ export async function getCoachContextSnapshot(options = {}) {
     maxBytes = DEFAULT_MAX_BYTES,
     memorySummary = null,
     launchContext = null,
+    activeGymId = null,
   } = options;
 
   const resolvedSessionLimit = clamp(
@@ -267,7 +370,7 @@ export async function getCoachContextSnapshot(options = {}) {
     ? summarizeExerciseLibrary(allExercises, sessions)
     : null;
 
-  const settingsRow = includeSettings || includeSpaces ? await db.settings.get(1) : null;
+  const settingsRow = includeSettings ? await db.settings.get(1) : null;
   const settings = includeSettings ? buildSettingsSummary(settingsRow) : null;
   const memorySummaryData = memorySummary ? summarizeCoachMemory(memorySummary) : null;
 
@@ -277,7 +380,7 @@ export async function getCoachContextSnapshot(options = {}) {
 
   if (includeSpaces) {
     const spaces = await listWorkoutSpaces();
-    activeSpace = resolveActiveSpace(spaces, settingsRow?.active_space_id ?? null);
+    activeSpace = resolveCoachActiveSpace(spaces, activeGymId);
 
     if (activeSpace) {
       const equipmentList = await listEquipment();
@@ -349,6 +452,12 @@ export async function getCoachContextSnapshot(options = {}) {
     templates: includeTemplates ? templates : [],
     exerciseLibrary: exerciseLibrary,
     settings,
+    activeGymId: includeSpaces ? activeSpace?.id ?? null : null,
+    activeGymName: includeSpaces ? activeSpace?.name ?? null : null,
+    equipmentCount:
+      includeSpaces && activeSpace ? countEquipment(activeSpace.equipmentIds) : null,
+    equipment:
+      includeSpaces && activeSpace ? buildEquipmentPayload(availableEquipment) : null,
     activeSpace: includeSpaces
       ? activeSpace
         ? {
@@ -379,14 +488,23 @@ export async function getCoachContextSnapshot(options = {}) {
   const size = sizeOfSnapshot(snapshot);
   const truncatedResult = size > maxBytes ? truncateSnapshot(snapshot, maxBytes) : null;
 
+  let meta = { sizeBytes: size, truncated: false, omitted: [] };
+  let finalSnapshot = snapshot;
+
   if (truncatedResult) {
-    const meta = { sizeBytes: size, truncated: true, omitted: truncatedResult.meta.omitted };
-    return {
-      snapshot: { ...truncatedResult.snapshot, meta },
-      meta,
-    };
+    meta = { sizeBytes: size, truncated: true, omitted: truncatedResult.meta.omitted };
+    finalSnapshot = truncatedResult.snapshot;
   }
 
-  const meta = { sizeBytes: size, truncated: false, omitted: [] };
-  return { snapshot: { ...snapshot, meta }, meta };
+  finalSnapshot = { ...finalSnapshot, meta };
+
+  const contextBytes = resolveSnapshotBytes(finalSnapshot);
+  const buildMs = Math.max(0, Math.round(nowMs() - startedAt));
+  const contract = buildCoachContextContract({
+    snapshot: finalSnapshot,
+    contextBytes,
+    buildMs,
+  });
+
+  return { snapshot: finalSnapshot, meta, contract };
 }

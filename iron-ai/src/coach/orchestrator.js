@@ -1,4 +1,8 @@
-import { DEFAULT_COACH_MODEL, streamChatCompletion } from "../services/openai";
+import {
+  DEFAULT_COACH_MODEL,
+  createChatCompletion,
+  streamChatCompletion,
+} from "../services/openai";
 import {
   executeTool,
   getOpenAITools,
@@ -6,20 +10,44 @@ import {
   summarizeToolCall,
   validateToolInput,
 } from "./tools";
-import { getCoachContextSnapshot } from "./context";
+import { getCoachContextSnapshot, getCoachRequestContext } from "./context";
 import { summarizeCoachMemory } from "./memory";
+import { parseCoachActionDraftMessage } from "./actionDraftContract";
+import { buildContextFingerprint } from "./fingerprint";
+import { recordCoachPayloadTelemetry } from "./telemetry";
+import {
+  buildRepairPrompt,
+  getValidationFailureMessage,
+  validateCoachResponse,
+} from "./responseValidation";
 
 const MAX_TOOL_LOOPS = 2;
+const COACH_TEMPERATURE = 0.2;
 
-const SYSTEM_PROMPT = [
+export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
   "Be concise, practical, and friendly.",
+  "Reply with a succinct assistantText.",
+  "If proposing an action, include a JSON object in a fenced ```json``` block using contractVersion coach_action_v1 with assistantText and an optional actionDraft.",
+  "Action drafts must include kind, confidence, risk, title, summary, and payload. For workouts/templates: payload includes name/title, optional gymId, and exercises: [{ exerciseId, sets?: [{ reps?, weight?, duration?, rpe? }], notes? }]. For gyms: payload includes name/title and optional equipmentIds.",
+  "The Context availability payload is authoritative for whether context sharing is enabled.",
+  "Never fabricate available equipment. Only use equipmentSummary when provided.",
+  "If contextEnabled is false, do NOT claim you can see equipment. Still provide a generic workout and include a brief nudge to enable context or choose a gym for personalization.",
+  "When asked to produce a workout, you MUST output at least 5 exercises with sets and reps in a fenced ```json``` block shaped as { name, exercises: [{ name, sets, reps }] }.",
+  "If you cannot comply due to missing context, ask for the missing information and stop.",
+  "When asked to convert to template JSON, output ONLY a fenced ```json``` block with { name, exercises: [{ exerciseId?, name?, exerciseName?, sets, reps, warmupSets? }] } and no extra text.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
+  "If contextEnabled is true and equipmentSummary exists, use only that equipment when generating workouts.",
+  "Do not suggest creating a new gym/space if activeGymId is present or if a gym with the same normalized name already exists.",
+  "Only suggest creating a gym if there is no activeGymId and no existing gyms match by normalized name.",
+  "If activeGymId is present but equipmentSummary is missing, say you cannot see equipment and ask the user to enable context sharing or share their equipment.",
   "When you provide a plan or recommendation, include a line: 'Designed for: <space name>'. If unknown, ask the user.",
   "If the context snapshot includes launchContext.source 'gym_detail', start your next reply with: \"I'll design workouts for <gym name>.\" Use the active space name if available.",
   "If the context snapshot includes launchContext.source 'exercise_detail', start your next reply with: \"Let's break down <exercise name>.\" Use the exercise name if available.",
   "If a write action is requested, ask for user confirmation before changes are made.",
+  "Avoid high-risk actionDrafts unless the user explicitly requests overwriting or destructive changes.",
+  "Avoid asking multiple clarifying questions; propose reasonable defaults instead.",
   "Avoid medical advice; recommend a professional for injuries or health concerns.",
 ].join(" ");
 
@@ -44,12 +72,58 @@ const WRITE_TOOLS = [
   "set_active_space",
 ];
 
-function buildSystemMessages({ contextSnapshot, memorySummary }) {
+function normalizeContextStatePayload(contextConfig, requestContext) {
+  const selectedGym =
+    contextConfig?.contextState?.selectedGym ??
+    (requestContext?.activeGymId != null
+      ? {
+          id: requestContext.activeGymId,
+          name: requestContext.gymName ?? null,
+        }
+      : null);
+  const contextEnabled = Boolean(contextConfig?.enabled);
+  let equipmentSummary = [];
+  if (contextEnabled) {
+    const provided = contextConfig?.contextState?.equipmentSummary;
+    if (typeof provided === "string") {
+      equipmentSummary = provided.trim() ? provided.trim() : [];
+    } else if (Array.isArray(provided)) {
+      equipmentSummary = provided;
+    }
+  }
+  return {
+    contextEnabled,
+    selectedGym:
+      selectedGym && selectedGym.id != null
+        ? { id: selectedGym.id, name: selectedGym.name ?? null }
+        : null,
+    equipmentSummary,
+  };
+}
+
+export function buildSystemMessages({
+  contextSnapshot,
+  memorySummary,
+  requestContext,
+  contextState,
+}) {
   const messages = [{ role: "system", content: SYSTEM_PROMPT }];
+  if (contextState) {
+    messages.push({
+      role: "system",
+      content: `Context availability (authoritative JSON):\n${JSON.stringify(contextState)}`,
+    });
+  }
   if (memorySummary) {
     messages.push({
       role: "system",
       content: `Coach memory summary (JSON):\n${JSON.stringify(memorySummary)}`,
+    });
+  }
+  if (requestContext) {
+    messages.push({
+      role: "system",
+      content: `Coach request context (JSON):\n${JSON.stringify(requestContext)}`,
     });
   }
   if (contextSnapshot) {
@@ -61,6 +135,24 @@ function buildSystemMessages({ contextSnapshot, memorySummary }) {
     });
   }
   return messages;
+}
+
+function extractCompletionContent(completion) {
+  const message = completion?.choices?.[0]?.message;
+  if (!message) return "";
+  if (typeof message.content === "string") {
+    return message.content.trim();
+  }
+  if (Array.isArray(message.content)) {
+    return message.content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        return typeof part?.text === "string" ? part.text : "";
+      })
+      .join("")
+      .trim();
+  }
+  return "";
 }
 
 function safeParseJSON(value) {
@@ -95,17 +187,21 @@ function buildAssistantToolCallMessage(toolCalls) {
 
 export async function runCoachTurn({
   apiKey,
+  keyMode = "user",
   chatHistory,
   userMessage,
   contextConfig,
+  responseMode = "general",
   memoryEnabled,
   memorySummary,
   onStreamStart,
   onStreamDelta,
   onStreamEnd,
 }) {
+  const useServerKey = keyMode === "server";
   const allowReadTools = Boolean(contextConfig?.enabled);
   const allowedTools = new Set(WRITE_TOOLS);
+  const activeGymId = contextConfig?.activeGymId ?? null;
   if (allowReadTools) {
     const scopes = contextConfig?.scopes ?? {};
     Object.entries(READ_TOOL_SCOPES).forEach(([scopeKey, toolNames]) => {
@@ -125,40 +221,142 @@ export async function runCoachTurn({
     model: DEFAULT_COACH_MODEL,
     toolCalls: [],
     contextMeta: null,
+    contextContract: null,
     allowedTools: Array.from(allowedTools),
+    payloadFingerprint: null,
+    payloadBuiltAt: null,
+    requestContext: null,
+    requestMeta: null,
+    requestFingerprint: null,
+    actionContractVersion: null,
+    actionParseErrors: null,
+    actionDraft: null,
+    contextState: null,
+    responseValidation: null,
   };
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
 
+  let requestContext = {
+    activeGymId: null,
+    gymName: null,
+    equipmentIds: [],
+    equipmentCount: 0,
+    exerciseLibraryCount: 0,
+    customExercisesCount: 0,
+    templatesCount: 0,
+    recentWorkoutsCount: 0,
+    lastWorkoutDate: null,
+    contextBytes: 0,
+    contextBuildMs: 0,
+  };
+  let requestMeta = { contextBytes: 0, contextBuildMs: 0 };
+  try {
+    const result = await getCoachRequestContext({ activeGymId });
+    requestContext = result.context ?? requestContext;
+    requestMeta = result.meta ?? requestMeta;
+  } catch {
+    // Fall back to a minimal request context if the DB is unavailable.
+  }
+  const requestFingerprint = await buildContextFingerprint(
+    requestContext,
+    requestMeta?.contextBytes ?? null
+  );
+  const requestExerciseCount =
+    (requestContext.exerciseLibraryCount ?? 0) + (requestContext.customExercisesCount ?? 0);
+  const contextState = normalizeContextStatePayload(contextConfig, requestContext);
+
   let contextSnapshot = null;
+  let contextContract = null;
   if (contextConfig?.enabled) {
     // TODO: Extend context snapshot sources (planner, long-term stats) as needed.
-    const { snapshot, meta } = await getCoachContextSnapshot({
+    const { snapshot, meta, contract } = await getCoachContextSnapshot({
       scopes: contextConfig.scopes,
       sessionLimit: contextConfig.sessionLimit,
       templateLimit: contextConfig.templateLimit,
       memorySummary: memoryEnabled ? memorySummary : null,
       launchContext: contextConfig.launchContext ?? null,
+      activeGymId,
     });
     contextSnapshot = snapshot;
+    contextContract = contract ?? null;
     debug.contextMeta = meta;
+    debug.contextContract = contextContract;
   }
+  const templatesAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.templates);
+  const sessionsAvailable = Boolean(contextConfig?.enabled && contextConfig.scopes?.sessions);
+  const summaryOnly = !contextSnapshot;
+  const payloadSummary = {
+    activeGymId: contextContract?.activeGymId ?? requestContext.activeGymId ?? null,
+    activeGymName: contextContract?.activeGymName ?? requestContext.gymName ?? null,
+    equipmentCount: contextContract?.equipmentCount ?? requestContext.equipmentCount ?? 0,
+    equipmentIds: requestContext.equipmentIds ?? [],
+    exerciseLibraryCount:
+      contextContract?.exerciseLibraryCount ?? requestContext.exerciseLibraryCount ?? 0,
+    customExercisesCount:
+      contextContract?.customExercisesCount ?? requestContext.customExercisesCount ?? 0,
+    templatesCount: templatesAvailable
+      ? contextContract?.templatesCount ?? requestContext.templatesCount ?? null
+      : null,
+    recentWorkoutsCount: sessionsAvailable
+      ? contextContract?.recentWorkoutsCount ?? requestContext.recentWorkoutsCount ?? null
+      : null,
+    contextBytes: contextContract?.contextBytes ?? requestMeta.contextBytes ?? null,
+    buildMs: contextContract?.buildMs ?? requestMeta.contextBuildMs ?? null,
+    summaryOnly,
+  };
 
   let loop = 0;
   let history = [...chatHistory, { role: "user", content: userMessage }];
   let conversation = [
-    ...buildSystemMessages({ contextSnapshot, memorySummary: memorySummaryData }),
+    ...buildSystemMessages({
+      contextSnapshot,
+      memorySummary: memorySummaryData,
+      requestContext,
+      contextState,
+    }),
     ...history,
   ];
   debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
 
+  let payloadFingerprint = requestFingerprint;
+  let payloadBuiltAt = Date.now();
+  let snapshotFingerprint = null;
   let finalAssistant = null;
   let pendingToolMessages = [];
+
+  debug.payloadFingerprint = payloadFingerprint;
+  debug.payloadBuiltAt = payloadBuiltAt;
+  debug.requestContext = requestContext;
+  debug.requestMeta = requestMeta;
+  debug.requestFingerprint = requestFingerprint;
+  debug.contextState = contextState;
+
+  console.info(
+    `coach_payload gym=${requestContext.activeGymId ?? "none"} eq=${
+      requestContext.equipmentCount ?? 0
+    } ex=${requestExerciseCount} bytes=${requestMeta?.contextBytes ?? 0} ms=${
+      requestMeta?.contextBuildMs ?? 0
+    } fp=${requestFingerprint.hash}`
+  );
+
+  if (contextSnapshot) {
+    snapshotFingerprint = await buildContextFingerprint(
+      contextSnapshot,
+      contextContract?.contextBytes ?? null
+    );
+    await recordCoachPayloadTelemetry({
+      fingerprint: snapshotFingerprint,
+      contract: contextContract,
+      builtAt: payloadBuiltAt,
+    });
+  }
 
   while (loop < MAX_TOOL_LOOPS) {
     loop += 1;
     const streamResult = await streamChatCompletion({
       apiKey,
+      useServerKey,
       model: DEFAULT_COACH_MODEL,
       messages: conversation,
       tools,
@@ -179,7 +377,15 @@ export async function runCoachTurn({
 
     const assistantToolCallMessage = buildAssistantToolCallMessage(streamResult.toolCalls);
     history = [...history, assistantToolCallMessage];
-    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+    conversation = [
+      ...buildSystemMessages({
+        contextSnapshot,
+        memorySummary: memorySummaryData,
+        requestContext,
+        contextState,
+      }),
+      ...history,
+    ];
 
     pendingToolMessages = [];
     for (const toolCall of streamResult.toolCalls) {
@@ -260,6 +466,7 @@ export async function runCoachTurn({
       try {
         const result = await executeTool(name, parsedArgs, {
           scopes: contextConfig?.scopes ?? {},
+          activeGymId,
         });
         toolEvents.push({
           name,
@@ -288,28 +495,134 @@ export async function runCoachTurn({
     }
 
     history = [...history, ...pendingToolMessages];
-    conversation = [...buildSystemMessages({ contextSnapshot }), ...history];
+    conversation = [
+      ...buildSystemMessages({
+        contextSnapshot,
+        memorySummary: memorySummaryData,
+        requestContext,
+        contextState,
+      }),
+      ...history,
+    ];
   }
+
+  let responseValidation = {
+    status: "ok",
+    mode: "general",
+    repaired: false,
+    error: null,
+  };
 
   if (!finalAssistant) {
     finalAssistant = "I ran into an issue while preparing your response.";
     history = [...history, { role: "assistant", content: finalAssistant }];
+  } else {
+    const firstValidation = validateCoachResponse({
+      userMessage,
+      assistantText: finalAssistant,
+      responseMode,
+      contextEnabled: contextState.contextEnabled,
+    });
+    responseValidation.mode = firstValidation.mode;
+    if (!firstValidation.valid) {
+      const repairPrompt = buildRepairPrompt({
+        validationMode: firstValidation.mode,
+        contextEnabled: contextState.contextEnabled,
+        invalidContent: finalAssistant,
+        selectedGym: contextState.selectedGym,
+      });
+      let repairedAssistant = "";
+      try {
+        const repairCompletion = await createChatCompletion({
+          apiKey,
+          useServerKey,
+          model: DEFAULT_COACH_MODEL,
+          messages: [
+            ...conversation,
+            { role: "assistant", content: finalAssistant },
+            { role: "user", content: repairPrompt },
+          ],
+          temperature: COACH_TEMPERATURE,
+        });
+        repairedAssistant = extractCompletionContent(repairCompletion);
+      } catch {
+        repairedAssistant = "";
+      }
+
+      const repairedValidation = validateCoachResponse({
+        userMessage,
+        assistantText: repairedAssistant,
+        responseMode,
+        contextEnabled: contextState.contextEnabled,
+      });
+      if (repairedValidation.valid) {
+        finalAssistant = repairedAssistant;
+        responseValidation = {
+          status: "repaired",
+          mode: repairedValidation.mode,
+          repaired: true,
+          error: null,
+        };
+      } else {
+        finalAssistant = getValidationFailureMessage(firstValidation.mode);
+        responseValidation = {
+          status: "failed",
+          mode: repairedValidation.mode,
+          repaired: true,
+          error: repairedValidation.error ?? firstValidation.error ?? "Validation failed.",
+        };
+      }
+      if (history.length && history[history.length - 1]?.role === "assistant") {
+        history = [
+          ...history.slice(0, -1),
+          { ...history[history.length - 1], content: finalAssistant },
+        ];
+      } else {
+        history = [...history, { role: "assistant", content: finalAssistant }];
+      }
+    }
   }
 
+  const parsedActionDraft = parseCoachActionDraftMessage(finalAssistant);
+  const assistantText = parsedActionDraft.assistantText || finalAssistant;
+  const actionDraft = parsedActionDraft.actionDraft ?? null;
+  const actionContractVersion = parsedActionDraft.contractVersion ?? null;
+  const actionParseErrors = parsedActionDraft.parseErrors ?? null;
+
+  if (history.length && history[history.length - 1]?.role === "assistant") {
+    history = [
+      ...history.slice(0, -1),
+      { ...history[history.length - 1], content: assistantText },
+    ];
+  }
+
+  debug.actionContractVersion = actionContractVersion;
+  debug.actionParseErrors = actionParseErrors;
+  debug.actionDraft = actionDraft;
+  debug.responseValidation = responseValidation;
+
   return {
-    assistant: finalAssistant,
+    assistant: assistantText,
     conversation: history,
     toolEvents,
     proposals,
     pendingToolMessages,
     debug,
+    contextContract,
+    payloadFingerprint,
+    payloadBuiltAt,
+    payloadSummary,
+    actionDraft,
+    actionContractVersion,
+    actionParseErrors,
+    responseValidation,
   };
 }
 
-export async function executeWriteToolCall({ proposal, onResult }) {
+export async function executeWriteToolCall({ proposal, onResult, context }) {
   if (!proposal) return null;
   try {
-    const result = await executeTool(proposal.name, proposal.input);
+    const result = await executeTool(proposal.name, proposal.input, context);
     onResult?.({ status: "success", result });
     return { status: "success", result };
   } catch (err) {

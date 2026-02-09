@@ -1,10 +1,11 @@
-import { Info } from "lucide-react";
+import { History, Info } from "lucide-react";
 
 import { Button } from "../../components/ui";
 import { getEquipmentMap } from "../../equipment/catalog";
 import { getMissingEquipmentForExercise } from "../../equipment/engine";
 import {
   formatEquipmentLabels,
+  getExerciseEquipment,
   getExercisePrimaryMuscles,
   getNormalizedEquipment,
 } from "../../exercises/data";
@@ -50,10 +51,12 @@ export default function ExerciseList({
   activeSpace,
   onSelect,
   onInfo,
+  onHistory,
   emptyLabel,
 }) {
   const equipmentMap =
     equipmentList instanceof Map ? equipmentList : getEquipmentMap(equipmentList ?? []);
+  const equipmentIdSet = new Set(equipmentMap.keys());
 
   if (!exercises.length) {
     return <div className="empty-state">{emptyLabel ?? "No exercises match."}</div>;
@@ -63,8 +66,18 @@ export default function ExerciseList({
     <div className="exercise-list">
       {exercises.map((exercise) => {
         const primaryMuscles = getExercisePrimaryMuscles(exercise);
-        const { requiredEquipmentIds } = getNormalizedEquipment(exercise);
+        const { requiredEquipmentIds } = getNormalizedEquipment(exercise, equipmentIdSet);
+        const equipmentIds = getExerciseEquipment(exercise);
+        const equipmentLabels = equipmentIds.length
+          ? equipmentIds.map((id) => equipmentMap.get(id)?.name ?? id)
+          : [];
+        const metaParts = [
+          primaryMuscles.length ? primaryMuscles.join(", ") : null,
+          equipmentLabels.length ? equipmentLabels.join(", ") : null,
+        ].filter(Boolean);
+        const metaLabel = metaParts.length ? metaParts.join(" · ") : "—";
         const availability = formatAvailability(exercise, activeSpace, equipmentMap);
+        const isCustom = exercise?.source === "user" || exercise?.is_custom;
 
         return (
           <div key={exercise.id} className="exercise-row">
@@ -75,13 +88,10 @@ export default function ExerciseList({
             >
               <div className="exercise-row__main">
                 <div className="exercise-row__title">
-                  {exercise.name ?? "Unknown Exercise"}
+                  <span>{exercise.name ?? "Unknown Exercise"}</span>
+                  {isCustom ? <span className="pill pill--custom">Custom</span> : null}
                 </div>
-                {primaryMuscles.length ? (
-                  <div className="exercise-row__meta">
-                    {primaryMuscles.join(", ")}
-                  </div>
-                ) : null}
+                <div className="exercise-row__meta">{metaLabel}</div>
                 <EquipmentPills
                   equipmentIds={requiredEquipmentIds}
                   equipmentMap={equipmentMap}
@@ -91,17 +101,33 @@ export default function ExerciseList({
                 <span className={availability.tone}>{availability.label}</span>
               ) : null}
             </button>
-            {onInfo ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                type="button"
-                onClick={() => onInfo(exercise)}
-                className="exercise-row__info"
-                aria-label={`View details for ${exercise.name ?? "exercise"}`}
-              >
-                <Info size={16} />
-              </Button>
+            {onHistory || onInfo ? (
+              <div className="exercise-row__actions">
+                {onHistory ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => onHistory(exercise)}
+                    className="exercise-row__info"
+                    aria-label={`View history for ${exercise.name ?? "exercise"}`}
+                  >
+                    <History size={16} />
+                  </Button>
+                ) : null}
+                {onInfo ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    type="button"
+                    onClick={() => onInfo(exercise)}
+                    className="exercise-row__info"
+                    aria-label={`View details for ${exercise.name ?? "exercise"}`}
+                  >
+                    <Info size={16} />
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
           </div>
         );

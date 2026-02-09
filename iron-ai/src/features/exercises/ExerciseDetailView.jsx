@@ -22,13 +22,14 @@ import {
 } from "../../equipment/engine";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
 import {
-  getExerciseCommonMistakes,
+  getExerciseGotchas,
   getExerciseInstructions,
   getExercisePrimaryMuscles,
   getExerciseSecondaryMuscles,
   getExerciseVideoUrl,
   getNormalizedEquipment,
 } from "../../exercises/data";
+import { normalizeString, slugify } from "../../seed/seedUtils";
 import {
   getExerciseHistory,
   getGymAvailabilityForExercise,
@@ -127,6 +128,7 @@ export default function ExerciseDetailView({
   onBack,
   onOpenExercise,
   onAddExercise,
+  onEditExercise,
   onLaunchCoach,
 }) {
   const exercise = useLiveQuery(
@@ -146,6 +148,10 @@ export default function ExerciseDetailView({
     () => getEquipmentMap(equipmentList ?? []),
     [equipmentList]
   );
+  const equipmentIdSet = useMemo(
+    () => new Set((equipmentList ?? []).map((item) => item.id)),
+    [equipmentList]
+  );
   const activeSpace = useMemo(
     () => resolveActiveSpace(workoutSpaces ?? [], settings?.active_space_id ?? null),
     [settings?.active_space_id, workoutSpaces]
@@ -154,9 +160,22 @@ export default function ExerciseDetailView({
   const primaryMuscles = getExercisePrimaryMuscles(exercise);
   const secondaryMuscles = getExerciseSecondaryMuscles(exercise);
   const instructionsData = getExerciseInstructions(exercise);
-  const mistakesData = getExerciseCommonMistakes(exercise);
+  const gotchasData = getExerciseGotchas(exercise);
   const videoUrl = getExerciseVideoUrl(exercise);
-  const normalizedEquipment = getNormalizedEquipment(exercise);
+  const normalizedEquipment = getNormalizedEquipment(exercise, equipmentIdSet);
+  const rawEquipment = Array.isArray(exercise?.equipment) ? exercise.equipment : [];
+  const youtubeSearchQuery =
+    exercise?.youtubeSearchQuery ??
+    `${exercise?.name ?? "exercise"} exercise form cues`;
+  const youtubeUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(
+    youtubeSearchQuery
+  )}`;
+  const youtubeVideoId =
+    typeof exercise?.youtubeVideoId === "string" && exercise.youtubeVideoId.trim()
+      ? exercise.youtubeVideoId.trim()
+      : null;
+  const stickyNote = exercise?.stickyNote?.trim() ?? "";
+  const isCustom = exercise?.source === "user" || exercise?.is_custom;
 
   const historyStats = useMemo(() => {
     const sessions = Array.isArray(history) ? history : [];
@@ -245,6 +264,14 @@ export default function ExerciseDetailView({
     () => new Map((allExercises ?? []).map((ex) => [ex.id, ex])),
     [allExercises]
   );
+  const exerciseStableIdMap = useMemo(
+    () => new Map((allExercises ?? []).map((ex) => [ex.stableId, ex])),
+    [allExercises]
+  );
+  const exerciseSlugMap = useMemo(
+    () => new Map((allExercises ?? []).map((ex) => [ex.slug, ex])),
+    [allExercises]
+  );
 
   const progressions = useMemo(() => {
     const list = Array.isArray(exercise?.progressions) ? exercise.progressions : [];
@@ -254,6 +281,10 @@ export default function ExerciseDetailView({
         if (typeof item === "string") {
           const parsed = Number(item);
           if (!Number.isNaN(parsed)) return exerciseMap.get(parsed) ?? null;
+          const stableMatch = exerciseStableIdMap.get(item);
+          if (stableMatch) return stableMatch;
+          const slugMatch = exerciseSlugMap.get(item);
+          if (slugMatch) return slugMatch;
           return (
             allExercises ?? []
           ).find((ex) => String(ex.name ?? "").toLowerCase() === item.toLowerCase()) ?? null;
@@ -267,7 +298,13 @@ export default function ExerciseDetailView({
       .filter(Boolean)
       .map((item) => ({ id: item.id, name: item.name ?? "Exercise" }));
     return resolved;
-  }, [allExercises, exercise?.progressions, exerciseMap]);
+  }, [
+    allExercises,
+    exercise,
+    exerciseMap,
+    exerciseSlugMap,
+    exerciseStableIdMap,
+  ]);
 
   const regressions = useMemo(() => {
     const list = Array.isArray(exercise?.regressions) ? exercise.regressions : [];
@@ -277,6 +314,10 @@ export default function ExerciseDetailView({
         if (typeof item === "string") {
           const parsed = Number(item);
           if (!Number.isNaN(parsed)) return exerciseMap.get(parsed) ?? null;
+          const stableMatch = exerciseStableIdMap.get(item);
+          if (stableMatch) return stableMatch;
+          const slugMatch = exerciseSlugMap.get(item);
+          if (slugMatch) return slugMatch;
           return (
             allExercises ?? []
           ).find((ex) => String(ex.name ?? "").toLowerCase() === item.toLowerCase()) ?? null;
@@ -290,7 +331,13 @@ export default function ExerciseDetailView({
       .filter(Boolean)
       .map((item) => ({ id: item.id, name: item.name ?? "Exercise" }));
     return resolved;
-  }, [allExercises, exercise?.regressions, exerciseMap]);
+  }, [
+    allExercises,
+    exercise,
+    exerciseMap,
+    exerciseSlugMap,
+    exerciseStableIdMap,
+  ]);
 
   const fallbackAlternatives = useMemo(() => {
     if (!exercise || !allExercises?.length) return [];
@@ -343,9 +390,37 @@ export default function ExerciseDetailView({
   const optionalLabels = normalizedEquipment.optionalEquipmentIds
     .map((id) => equipmentMap.get(id)?.name ?? id)
     .filter(Boolean);
+  const missingEquipment = rawEquipment.filter((id) => !equipmentIdSet.has(id));
 
   const availableGyms = gymAvailability.filter((item) => item.isAvailable);
   const unavailableGyms = gymAvailability.filter((item) => !item.isAvailable);
+
+  const handleCreateMissingEquipment = async () => {
+    if (!missingEquipment.length) return;
+    const existingIds = new Set(equipmentMap.keys());
+    const toCreate = missingEquipment
+      .map((item) => normalizeString(item).toLowerCase())
+      .filter(Boolean)
+      .map((normalized) => {
+        const slug = slugify(normalized) || normalized;
+        if (!slug || existingIds.has(slug)) return null;
+        existingIds.add(slug);
+        return {
+          id: slug,
+          name: normalized
+            .split(/\s+/)
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(" "),
+          category: "accessory",
+          isPortable: true,
+          aliases: [normalized],
+        };
+      })
+      .filter(Boolean);
+
+    if (!toCreate.length) return;
+    await db.table("equipment").bulkPut(toCreate);
+  };
 
   return (
     <div className="page">
@@ -362,6 +437,15 @@ export default function ExerciseDetailView({
             {onAddExercise ? (
               <Button variant="primary" size="sm" onClick={() => onAddExercise(exercise.id)}>
                 Add to workout
+              </Button>
+            ) : null}
+            {isCustom && onEditExercise ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => onEditExercise(exercise)}
+              >
+                Edit
               </Button>
             ) : null}
             {onLaunchCoach ? (
@@ -390,19 +474,27 @@ export default function ExerciseDetailView({
         <CardBody className="ui-stack">
           <div className="exercise-overview">
             <div className="exercise-overview__media">
-              {videoUrl ? (
+              {youtubeVideoId ? (
+                <iframe
+                  title={`${exercise.name ?? "Exercise"} video`}
+                  src={`https://www.youtube.com/embed/${youtubeVideoId}`}
+                  className="exercise-video"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              ) : videoUrl ? (
                 <a href={videoUrl} target="_blank" rel="noreferrer">
                   Open video demo
                 </a>
               ) : (
-                <div className="template-meta">Video placeholder</div>
+                <div className="template-meta">No video yet.</div>
               )}
             </div>
             <div className="exercise-overview__meta">
               <div>
                 <div className="template-meta">Primary muscles</div>
                 <div className="ui-strong">
-                  {primaryMuscles.length ? primaryMuscles.join(", ") : "N/A"}
+                  {primaryMuscles.length ? primaryMuscles.join(", ") : "—"}
                 </div>
               </div>
               {secondaryMuscles.length ? (
@@ -423,7 +515,22 @@ export default function ExerciseDetailView({
                   ) : (
                     <span className="template-meta">None listed</span>
                   )}
+                  {missingEquipment.map((label) => (
+                    <span key={label} className="equipment-pill equipment-pill--warning">
+                      {label} (missing)
+                    </span>
+                  ))}
                 </div>
+                {missingEquipment.length ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    type="button"
+                    onClick={handleCreateMissingEquipment}
+                  >
+                    Create missing equipment
+                  </Button>
+                ) : null}
               </div>
               {optionalLabels.length ? (
                 <div>
@@ -437,44 +544,78 @@ export default function ExerciseDetailView({
                   </div>
                 </div>
               ) : null}
+              {exercise?.category ? (
+                <div>
+                  <div className="template-meta">Category</div>
+                  <div>{exercise.category}</div>
+                </div>
+              ) : null}
+              {exercise?.pattern ? (
+                <div>
+                  <div className="template-meta">Pattern</div>
+                  <div>{exercise.pattern}</div>
+                </div>
+              ) : null}
               <div className="template-meta">
                 Available at {availableGyms.length} gyms
                 {activeSpace ? ` · Active: ${activeSpace.name ?? "Gym"}` : ""}
               </div>
             </div>
           </div>
+          <div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => window.open(youtubeUrl, "_blank", "noopener,noreferrer")}
+            >
+              Watch on YouTube
+            </Button>
+          </div>
         </CardBody>
       </Card>
+
+      {stickyNote ? (
+        <Card>
+          <CardHeader>
+            <div className="ui-section-title">Sticky note</div>
+          </CardHeader>
+          <CardBody>
+            <div>{stickyNote}</div>
+          </CardBody>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
           <div className="ui-section-title">How to perform</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          {instructionsData.isFallback ? (
-            <div className="template-meta">General cues (add custom steps later).</div>
-          ) : null}
-          <ol className="exercise-steps">
-            {instructionsData.steps.map((step, index) => (
-              <li key={`${step}-${index}`}>{step}</li>
-            ))}
-          </ol>
+          {instructionsData.steps.length ? (
+            <ol className="exercise-steps">
+              {instructionsData.steps.map((step, index) => (
+                <li key={`${step}-${index}`}>{step}</li>
+              ))}
+            </ol>
+          ) : (
+            <div className="template-meta">No instructions yet.</div>
+          )}
         </CardBody>
       </Card>
 
       <Card>
         <CardHeader>
-          <div className="ui-section-title">Common mistakes</div>
+          <div className="ui-section-title">Gotchas</div>
         </CardHeader>
         <CardBody className="ui-stack">
-          {mistakesData.isFallback ? (
-            <div className="template-meta">Typical pitfalls (customize as needed).</div>
-          ) : null}
-          <ul className="exercise-mistakes">
-            {mistakesData.mistakes.map((item, index) => (
-              <li key={`${item}-${index}`}>{item}</li>
-            ))}
-          </ul>
+          {gotchasData.gotchas.length ? (
+            <ul className="exercise-mistakes">
+              {gotchasData.gotchas.map((item, index) => (
+                <li key={`${item}-${index}`}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="template-meta">No gotchas yet.</div>
+          )}
         </CardBody>
       </Card>
 

@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
+import { History } from "lucide-react";
 import { useLiveQuery } from "dexie-react-hooks";
 
 import {
@@ -7,6 +8,7 @@ import {
   getExerciseUsageCounts,
   getTemplateWithDetails,
   updateTemplate,
+  updateTemplateItem,
   deleteTemplate,
   addExerciseToTemplate,
   removeTemplateItem,
@@ -33,6 +35,7 @@ import {
 } from "../../equipment/engine";
 import { resolveActiveSpace } from "../../workoutSpaces/logic";
 import ExercisePickerView from "../exercises/ExercisePickerView";
+import ExerciseHistoryDrawer from "../exercises/ExerciseHistoryDrawer";
 
 export default function TemplateEditor({ templateId, onBack, onStartWorkout, onNotify }) {
   const templateBundle = useLiveQuery(
@@ -117,6 +120,7 @@ function TemplateEditorForm({
 }) {
   const [name, setName] = useState(templateBundle?.template?.name ?? "");
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [historyExercise, setHistoryExercise] = useState(null);
   const nameId = useId();
   const templateSpaceId = useId();
   const activeSpaceId = useId();
@@ -134,7 +138,7 @@ function TemplateEditorForm({
   const templateSpace = useMemo(() => {
     if (!template?.spaceId) return null;
     return (workoutSpaces ?? []).find((space) => space.id === template.spaceId) ?? null;
-  }, [template?.spaceId, workoutSpaces]);
+  }, [template, workoutSpaces]);
   const equipmentMap = useMemo(
     () => getEquipmentMap(equipmentList ?? []),
     [equipmentList]
@@ -377,25 +381,104 @@ function TemplateEditorForm({
             <div className="empty-state">No exercises yet. Add your first one below.</div>
           ) : (
             <div className="ui-stack">
-              {items.map((it) => (
-                <div key={it.id} className="ui-row ui-row--between">
-                  <div className="ui-stack">
-                    <div className="ui-strong">{it.exercise?.name ?? "Unknown Exercise"}</div>
-                    <div>
-                      <span className="pill pill--muted">
-                        {it.exercise?.muscle_group ?? "Unknown"}
-                      </span>
+              {items.map((it) => {
+                const targetSets = Math.max(1, Number(it.targetSets ?? 3));
+                const targetReps = it.targetReps ?? "";
+                return (
+                  <div key={it.id} className="template-item">
+                    <div className="template-item__header">
+                      <div className="ui-stack">
+                        <button
+                          type="button"
+                          className="template-item__title"
+                          onClick={() =>
+                            setHistoryExercise({
+                              id: it.exerciseId,
+                              name: it.exercise?.name ?? "Unknown Exercise",
+                              stickyNote: it.exercise?.stickyNote ?? "",
+                            })
+                          }
+                        >
+                          {it.exercise?.name ?? "Unknown Exercise"}
+                        </button>
+                        <div>
+                          <span className="pill pill--muted">
+                            {it.exercise?.muscle_group ?? "Unknown"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="template-item__actions">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setHistoryExercise({
+                              id: it.exerciseId,
+                              name: it.exercise?.name ?? "Unknown Exercise",
+                              stickyNote: it.exercise?.stickyNote ?? "",
+                            })
+                          }
+                          aria-label={`View history for ${it.exercise?.name ?? "exercise"}`}
+                        >
+                          <History size={16} />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveItem(it.id)}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="template-set-grid">
+                      <div className="template-set-grid__label">Sets</div>
+                      <div className="template-set-grid__label">Reps</div>
+                      <div className="template-set-counter">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() =>
+                            updateTemplateItem(it.id, {
+                              targetSets: Math.max(1, targetSets - 1),
+                            })
+                          }
+                        >
+                          -
+                        </Button>
+                        <Input
+                          inputMode="numeric"
+                          value={targetSets}
+                          onChange={(e) => {
+                            const next = Number.parseInt(e.target.value, 10);
+                            if (Number.isNaN(next)) return;
+                            updateTemplateItem(it.id, { targetSets: Math.max(1, next) });
+                          }}
+                        />
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() =>
+                            updateTemplateItem(it.id, { targetSets: targetSets + 1 })
+                          }
+                        >
+                          +
+                        </Button>
+                      </div>
+                      <div className="template-set-input">
+                        <Input
+                          inputMode="numeric"
+                          placeholder="reps"
+                          value={targetReps}
+                          onChange={(e) =>
+                            updateTemplateItem(it.id, { targetReps: e.target.value })
+                          }
+                        />
+                      </div>
                     </div>
                   </div>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => handleRemoveItem(it.id)}
-                  >
-                    Remove
-                  </Button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardBody>
@@ -427,6 +510,14 @@ function TemplateEditorForm({
           </Button>
         </CardFooter>
       </Card>
+
+      <ExerciseHistoryDrawer
+        open={Boolean(historyExercise)}
+        exerciseId={historyExercise?.id ?? null}
+        exerciseName={historyExercise?.name ?? null}
+        stickyNote={historyExercise?.stickyNote ?? null}
+        onClose={() => setHistoryExercise(null)}
+      />
     </div>
   );
 }

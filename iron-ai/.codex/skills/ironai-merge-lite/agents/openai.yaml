@@ -1,0 +1,4 @@
+interface:
+  display_name: "IronAI Merge Lite"
+  short_description: "Run daily main sync + PR runway check"
+  default_prompt: "Run ironai-flow-lite: clean working tree, sync main, classify open PR health, and return strict runway verdict."

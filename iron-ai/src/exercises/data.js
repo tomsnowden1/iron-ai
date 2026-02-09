@@ -1,16 +1,16 @@
 import { normalizeExerciseEquipment } from "../equipment/engine";
 
-const DEFAULT_INSTRUCTIONS = [
-  "Set up your starting position and brace your core.",
-  "Move through the full range of motion with control.",
-  "Return to the start position and repeat with steady form.",
-];
+const PLACEHOLDER_EXERCISE_NAME = /^Exercise\s+\d+$/i;
 
-const DEFAULT_MISTAKES = [
-  "Rushing the tempo or bouncing through reps.",
-  "Letting form break down near the end of the set.",
-  "Using momentum instead of controlled effort.",
-];
+export function isPlaceholderExerciseName(name) {
+  return PLACEHOLDER_EXERCISE_NAME.test(String(name ?? "").trim());
+}
+
+export function isPlaceholderExercise(exercise) {
+  if (!isPlaceholderExerciseName(exercise?.name)) return false;
+  if (exercise?.is_custom || exercise?.isCustom) return false;
+  return String(exercise?.source ?? "").trim().toLowerCase() !== "user";
+}
 
 export function getExercisePrimaryMuscles(exercise) {
   const primary = Array.isArray(exercise?.primaryMuscles)
@@ -44,16 +44,19 @@ export function getExerciseInstructions(exercise) {
   const steps = Array.isArray(exercise?.instructions)
     ? exercise.instructions.filter(Boolean)
     : [];
-  if (steps.length) return { steps, isFallback: false };
-  return { steps: DEFAULT_INSTRUCTIONS, isFallback: true };
+  return { steps, isFallback: false };
 }
 
 export function getExerciseCommonMistakes(exercise) {
   const mistakes = Array.isArray(exercise?.commonMistakes)
     ? exercise.commonMistakes.filter(Boolean)
     : [];
-  if (mistakes.length) return { mistakes, isFallback: false };
-  return { mistakes: DEFAULT_MISTAKES, isFallback: true };
+  return { mistakes, isFallback: false };
+}
+
+export function getExerciseGotchas(exercise) {
+  const gotchas = Array.isArray(exercise?.gotchas) ? exercise.gotchas.filter(Boolean) : [];
+  return { gotchas, isFallback: false };
 }
 
 export function getExerciseVideoUrl(exercise) {
@@ -61,8 +64,19 @@ export function getExerciseVideoUrl(exercise) {
   return mediaUrl || exercise?.videoUrl || exercise?.video_url || "";
 }
 
-export function getNormalizedEquipment(exercise) {
-  return normalizeExerciseEquipment(exercise);
+export function getNormalizedEquipment(exercise, equipmentIdSet) {
+  return normalizeExerciseEquipment(exercise, equipmentIdSet);
+}
+
+export function getExerciseEquipment(exercise) {
+  const equipment = Array.isArray(exercise?.equipment)
+    ? exercise.equipment.filter(Boolean)
+    : [];
+  if (equipment.length) return equipment;
+  const normalized = normalizeExerciseEquipment(exercise);
+  return Array.isArray(normalized?.requiredEquipmentIds)
+    ? normalized.requiredEquipmentIds
+    : [];
 }
 
 export function buildExerciseSearchText(exercise) {
@@ -83,5 +97,5 @@ export function formatEquipmentLabels(requiredEquipmentIds, equipmentMap) {
   return ids
     .map((id) => equipmentMap.get(id))
     .filter(Boolean)
-    .map((item) => item.name ?? id);
+    .map((item) => item.name ?? item.id);
 }
