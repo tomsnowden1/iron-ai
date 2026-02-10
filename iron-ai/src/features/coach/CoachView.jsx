@@ -30,6 +30,7 @@ import { getCoachAccessState } from "./coachAccess";
 import { getCoachKeyMode } from "../../config/coachKeyMode";
 import {
   buildHeuristicWorkoutDraft,
+  getVisibleCoachActionExerciseCount,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -39,6 +40,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldShowCoachActionShowAllToggle,
   shouldForceWorkoutResponseMode,
 } from "./coachViewUiModel";
 import {
@@ -282,6 +284,7 @@ export default function CoachView({
   const [actionApplying, setActionApplying] = useState(false);
   const [actionConfirmOpen, setActionConfirmOpen] = useState(false);
   const [pendingHighRiskDraft, setPendingHighRiskDraft] = useState(null);
+  const [actionExercisesExpanded, setActionExercisesExpanded] = useState(false);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -299,6 +302,8 @@ export default function CoachView({
   const listRef = useRef(null);
   const streamingIdRef = useRef(null);
   const inputRef = useRef(null);
+  const actionTrayRef = useRef(null);
+  const lastActionScrollMessageIdRef = useRef(null);
 
   const accessState = useMemo(
     () => getCoachAccessState({ hasKey, keyStatus, keyMode: coachKeyMode }),
@@ -589,6 +594,7 @@ export default function CoachView({
   }, [visibleMessages]);
   const latestUserContent = latestUserMessage?.content ?? "";
   const actionDraft = actionState.draft;
+  const actionSourceMessageId = actionState.sourceMessageId ?? null;
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
     actionPayload?.name ?? actionPayload?.title ?? actionDraft?.title ?? "";
@@ -605,6 +611,45 @@ export default function CoachView({
   const actionDraftHasGyms =
     actionDraftKind === ActionDraftKinds.create_workout ||
     actionDraftKind === ActionDraftKinds.create_template;
+  const actionDraftExerciseRows = useMemo(
+    () =>
+      actionDraftExercises.map((entry, index) => {
+        const exercise = exerciseMap.get(entry.exerciseId);
+        const name = exercise?.name ?? `Exercise ${entry.exerciseId ?? index + 1}`;
+        const setCount = Array.isArray(entry.sets) ? entry.sets.length : null;
+        const repsValue = Array.isArray(entry.sets)
+          ? entry.sets
+              .map((set) => Number(set?.reps))
+              .find((value) => Number.isFinite(value))
+          : null;
+        const detailParts = [];
+        if (setCount) detailParts.push(`${setCount} sets`);
+        if (repsValue != null) detailParts.push(`${repsValue} reps`);
+        const meta = detailParts.length ? detailParts.join(" · ") : "Sets from draft";
+        return {
+          key: `${entry.exerciseId}-${index}`,
+          name,
+          meta,
+        };
+      }),
+    [actionDraftExercises, exerciseMap]
+  );
+  const visibleActionExerciseCount = getVisibleCoachActionExerciseCount(
+    actionDraftExerciseRows.length,
+    actionExercisesExpanded
+  );
+  const visibleActionExerciseRows = actionDraftExerciseRows.slice(
+    0,
+    visibleActionExerciseCount
+  );
+  const showActionExerciseToggle = shouldShowCoachActionShowAllToggle(
+    actionDraftExerciseRows.length
+  );
+  const hasDraftDetails = Boolean(
+    actionDraftKind === ActionDraftKinds.create_gym ||
+      actionPayload?.plannedDurationMins ||
+      actionPayload?.frequencyHint
+  );
   const actionEditTitle = String(actionEditDraft.title ?? "");
   const canSaveActionEdit = actionEditTitle.trim().length > 0;
 
@@ -692,6 +737,7 @@ export default function CoachView({
   useEffect(() => {
     if (!actionDraft) {
       setActionEditMode(false);
+      setActionExercisesExpanded(false);
       setActionEditDraft({ title: "", gymId: "" });
       setActionErrors([]);
       setActionWarnings([]);
@@ -703,9 +749,21 @@ export default function CoachView({
       title: actionDraftTitle,
       gymId: actionDraftGymId ?? "",
     });
+    setActionExercisesExpanded(false);
     setActionErrors([]);
     setPendingHighRiskDraft(null);
   }, [actionDraft, actionDraftTitle, actionDraftGymId]);
+
+  useEffect(() => {
+    if (!actionDraft || actionSourceMessageId == null) return;
+    const messageKey = String(actionSourceMessageId);
+    if (lastActionScrollMessageIdRef.current === messageKey) return;
+    lastActionScrollMessageIdRef.current = messageKey;
+    if (typeof window === "undefined") return;
+    window.requestAnimationFrame(() => {
+      actionTrayRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [actionDraft, actionSourceMessageId]);
 
   useEffect(() => {
     let active = true;
@@ -1938,6 +1996,7 @@ export default function CoachView({
       </Card>
 
       {actionDraft ? (
+        <div ref={actionTrayRef}>
         <Card className="coach-action-tray">
           <CardHeader>
             <div className="ui-row ui-row--between ui-row--wrap">
@@ -2026,67 +2085,60 @@ export default function CoachView({
               </div>
             )}
 
-            <details className="coach-action-details">
-              <summary>Draft details</summary>
-              <div className="coach-action-details__body">
-                {actionDraftKind === ActionDraftKinds.create_workout ||
-                actionDraftKind === ActionDraftKinds.create_template ? (
-                  <div className="coach-action-exercises">
-                    {actionDraftExercises.length ? (
-                      actionDraftExercises.map((entry, index) => {
-                        const exercise = exerciseMap.get(entry.exerciseId);
-                        const name =
-                          exercise?.name ?? `Exercise ${entry.exerciseId ?? index + 1}`;
-                        const setCount = Array.isArray(entry.sets)
-                          ? entry.sets.length
-                          : null;
-                        const repsValue = Array.isArray(entry.sets)
-                          ? entry.sets
-                              .map((set) => Number(set?.reps))
-                              .find((value) => Number.isFinite(value))
-                          : null;
-                        const detailParts = [];
-                        if (setCount) detailParts.push(`${setCount} sets`);
-                        if (repsValue != null) detailParts.push(`${repsValue} reps`);
-                        const meta =
-                          detailParts.length > 0
-                            ? detailParts.join(" · ")
-                            : "Sets from draft";
-                        return (
-                          <div key={`${entry.exerciseId}-${index}`} className="coach-action-exercise">
-                            <div className="coach-action-exercise__name">{name}</div>
-                            <div className="coach-action-exercise__meta">{meta}</div>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="template-meta">Exercises: (from draft)</div>
-                    )}
-                  </div>
-                ) : null}
-
-                {actionDraftKind === ActionDraftKinds.create_gym ? (
-                  <div className="template-meta">
-                    Equipment IDs:{" "}
-                    {Array.isArray(actionPayload?.equipmentIds) &&
-                    actionPayload.equipmentIds.length
-                      ? actionPayload.equipmentIds.join(", ")
-                      : "None specified"}
-                  </div>
-                ) : null}
-
-                {actionPayload?.plannedDurationMins ? (
-                  <div className="template-meta">
-                    Planned duration: {actionPayload.plannedDurationMins} mins
-                  </div>
-                ) : null}
-                {actionPayload?.frequencyHint ? (
-                  <div className="template-meta">
-                    Frequency: {actionPayload.frequencyHint}
-                  </div>
+            {actionDraftKind === ActionDraftKinds.create_workout ||
+            actionDraftKind === ActionDraftKinds.create_template ? (
+              <div className="coach-action-exercises">
+                {visibleActionExerciseRows.length ? (
+                  visibleActionExerciseRows.map((entry) => (
+                    <div key={entry.key} className="coach-action-exercise">
+                      <div className="coach-action-exercise__name">{entry.name}</div>
+                      <div className="coach-action-exercise__meta">{entry.meta}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="template-meta">Exercises: (from draft)</div>
+                )}
+                {showActionExerciseToggle ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => setActionExercisesExpanded((prev) => !prev)}
+                  >
+                    {actionExercisesExpanded
+                      ? "Show less"
+                      : `Show all (${actionDraftExerciseRows.length})`}
+                  </Button>
                 ) : null}
               </div>
-            </details>
+            ) : null}
+
+            {hasDraftDetails ? (
+              <details className="coach-action-details">
+                <summary>Draft details</summary>
+                <div className="coach-action-details__body">
+                  {actionDraftKind === ActionDraftKinds.create_gym ? (
+                    <div className="template-meta">
+                      Equipment IDs:{" "}
+                      {Array.isArray(actionPayload?.equipmentIds) &&
+                      actionPayload.equipmentIds.length
+                        ? actionPayload.equipmentIds.join(", ")
+                        : "None specified"}
+                    </div>
+                  ) : null}
+
+                  {actionPayload?.plannedDurationMins ? (
+                    <div className="template-meta">
+                      Planned duration: {actionPayload.plannedDurationMins} mins
+                    </div>
+                  ) : null}
+                  {actionPayload?.frequencyHint ? (
+                    <div className="template-meta">
+                      Frequency: {actionPayload.frequencyHint}
+                    </div>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
 
             {actionWarnings.length ? (
               <div className="coach-action-alert coach-action-alert--warning">
@@ -2147,6 +2199,7 @@ export default function CoachView({
             </Button>
           </CardFooter>
         </Card>
+        </div>
       ) : null}
 
       {state.proposals.length ? (

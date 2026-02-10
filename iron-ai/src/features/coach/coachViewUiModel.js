@@ -24,6 +24,23 @@ export function getCoachWorkoutActionConfig({ debugEnabled }) {
   };
 }
 
+export const COACH_ACTION_PREVIEW_MIN_EXERCISES = 5;
+export const COACH_ACTION_SHOW_ALL_THRESHOLD = 8;
+
+export function shouldShowCoachActionShowAllToggle(totalExercises) {
+  const total = Number(totalExercises);
+  if (!Number.isFinite(total) || total <= 0) return false;
+  return total > COACH_ACTION_SHOW_ALL_THRESHOLD;
+}
+
+export function getVisibleCoachActionExerciseCount(totalExercises, expanded) {
+  const total = Number(totalExercises);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  if (expanded) return total;
+  if (total <= COACH_ACTION_SHOW_ALL_THRESHOLD) return total;
+  return Math.min(total, COACH_ACTION_PREVIEW_MIN_EXERCISES);
+}
+
 const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
 const JSON_PLUMBING_LINE_REGEX =
   /^.*(\bjson\b|fenced|code block|template format|template payload).*$\n?/gim;
