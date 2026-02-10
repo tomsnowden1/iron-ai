@@ -3567,9 +3567,11 @@ export default function App() {
             onLaunchContextConsumed={() => setCoachLaunchContext(null)}
             onNotify={notify}
             onOpenTemplate={handleOpenTemplate}
+            activeWorkoutId={workoutId}
             onOpenWorkout={(id) => {
-              if (!id) return;
-              setWorkoutId(id);
+              const nextId = Number.parseInt(id, 10);
+              if (!Number.isFinite(nextId) || nextId <= 0) return;
+              setWorkoutId(nextId);
               setTab("workout");
             }}
             onOpenSettings={() => {
