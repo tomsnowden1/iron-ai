@@ -337,4 +337,64 @@ describe("coach orchestrator", () => {
     expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([4, 5]);
     expect(result.debug?.editResolution?.status).toBe("applied");
   });
+
+  it("falls back to deterministic workout draft when initial and repair outputs are invalid", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 11, name: "Barbell Bench Press" },
+      { exerciseId: 12, name: "Overhead Press" },
+      { exerciseId: 13, name: "Triceps Pushdown" },
+      { exerciseId: 14, name: "Incline Dumbbell Press" },
+      { exerciseId: 15, name: "Cable Fly" },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 11, name: "Barbell Bench Press", default_sets: 4, default_reps: 8 },
+      { id: 12, name: "Overhead Press", default_sets: 3, default_reps: 8 },
+      { id: 13, name: "Triceps Pushdown", default_sets: 3, default_reps: 12 },
+      { id: 14, name: "Incline Dumbbell Press", default_sets: 3, default_reps: 10 },
+      { id: 15, name: "Cable Fly", default_sets: 3, default_reps: 12 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Here's a push workout.",
+      toolCalls: [],
+    });
+    mocks.createChatCompletion.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: "Still invalid output without contract JSON.",
+          },
+        },
+      ],
+    });
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "push workout",
+      responseMode: "workout",
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.responseValidation?.status).toBe("repaired");
+    expect(result.actionDraft).toMatchObject({
+      kind: "create_workout",
+      title: "Push Workout",
+    });
+    expect(result.actionDraft?.payload?.exercises?.length).toBe(5);
+    expect(
+      result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)
+    ).toEqual([11, 12, 13, 14, 15]);
+    expect(result.assistant).toMatch(/formatting issue/i);
+  });
 });
