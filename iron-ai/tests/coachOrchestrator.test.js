@@ -271,4 +271,69 @@ describe("coach orchestrator", () => {
     expect(result.debug?.contextWindowRetry).toBe(true);
     expect(result.debug?.promptWindow?.retriedWithMinimalHistory).toBe(true);
   });
+
+  it("applies add-legs edit ops as a deterministic append to the current draft", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 1, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 2, name: "Overhead Press", primaryMuscles: ["shoulders"] },
+      { exerciseId: 4, name: "Leg Press", primaryMuscles: ["quads"] },
+      { exerciseId: 5, name: "Romanian Deadlift", primaryMuscles: ["hamstrings"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 1, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 2, name: "Overhead Press", primaryMuscles: ["shoulders"], default_sets: 3, default_reps: 10 },
+      { id: 4, name: "Leg Press", primaryMuscles: ["quads"], default_sets: 3, default_reps: 12 },
+      { id: 5, name: "Romanian Deadlift", primaryMuscles: ["hamstrings"], default_sets: 3, default_reps: 10 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Added 2 legs exercises.","editDraft":{"mode":"EDIT","ops":[{"op":"add_exercises","count":2,"muscleGroup":"legs","placement":"end","exerciseIds":[4,5]}]}}
+\`\`\``,
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Push Workout",
+      summary: "Push day",
+      payload: {
+        name: "Push Workout",
+        exercises: [
+          { exerciseId: 1, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+          { exerciseId: 2, sets: [{ reps: 10 }, { reps: 10 }, { reps: 10 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add 2 legs exercises",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.slice(0, 2)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([4, 5]);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+  });
 });

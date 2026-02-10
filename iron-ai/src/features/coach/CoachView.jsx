@@ -39,6 +39,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldForceWorkoutResponseMode,
 } from "./coachViewUiModel";
 import {
   buildTemplateDraftFromWorkoutPlan,
@@ -759,6 +760,18 @@ export default function CoachView({
 
       let streamedId = null;
       try {
+        const hasEditableWorkoutDraft =
+          actionDraft?.kind === ActionDraftKinds.create_workout &&
+          Array.isArray(actionDraft?.payload?.exercises) &&
+          actionDraft.payload.exercises.length > 0;
+        const shouldEditExistingDraft = shouldForceWorkoutResponseMode({
+          userMessage: trimmed,
+          hasVisibleWorkoutDraft: hasEditableWorkoutDraft,
+        });
+        const resolvedResponseMode =
+          responseMode === "general" && shouldEditExistingDraft
+            ? "workout"
+            : responseMode;
         const resolvedContextEnabled =
           forceContextEnabled == null
             ? effectiveContextEnabled
@@ -778,7 +791,13 @@ export default function CoachView({
           keyMode: coachKeyMode,
           chatHistory: chatHistoryRef.current,
           userMessage: trimmed,
-          responseMode,
+          responseMode: resolvedResponseMode,
+          draftEditConfig: shouldEditExistingDraft
+            ? {
+                mode: "edit",
+                currentDraft: actionDraft,
+              }
+            : null,
           contextConfig: {
             enabled: resolvedContextEnabled,
             scopes: contextScopes,
@@ -932,6 +951,7 @@ export default function CoachView({
       accessState,
       activeGymId,
       apiKey,
+      actionDraft,
       buildWorkoutDraftForMessage,
       contextScopes,
       effectiveContextEnabled,

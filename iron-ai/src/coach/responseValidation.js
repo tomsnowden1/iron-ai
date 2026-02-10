@@ -43,8 +43,29 @@ export const TemplateJsonSchema = z.object({
 const CONTEXT_CLAIM_REGEX =
   /available equipment|using .*equipment|based on .*equipment|i can see .*equipment|with your equipment/i;
 const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan)\b/i;
+const WORKOUT_EDIT_REQUEST_REGEX =
+  /\b(add|remove|swap|replace|adjust|change|include|exclude|without|update)\b/i;
+const LEG_EDIT_KEYWORD_REGEX =
+  /\b(leg|legs|quad|quads|hamstring|hamstrings|glute|glutes|calf|calves|adductor|abductor)\b/i;
+const ADD_COUNT_REGEX = /\badd\s+(\d+)\b/i;
 const WORKOUT_LIST_LINE_REGEX =
   /^\s*(?:[-*]|\d+[.)])\s+.+?(\d+\s*(?:sets?\s*(?:of)?\s*\d+\s*reps?|[x×]\s*\d+))/gim;
+const LEG_METADATA_TOKENS = [
+  "leg",
+  "legs",
+  "quad",
+  "quads",
+  "hamstring",
+  "hamstrings",
+  "glute",
+  "glutes",
+  "calf",
+  "calves",
+  "adductor",
+  "adductors",
+  "abductor",
+  "abductors",
+];
 
 function safeParseJson(value) {
   try {
@@ -109,6 +130,148 @@ function parsePositiveInt(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return parsed;
+}
+
+function normalizeToken(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function splitTokens(value) {
+  const normalized = normalizeToken(value);
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function isLegMetadataToken(token) {
+  const normalized = normalizeToken(token);
+  if (!normalized) return false;
+  return LEG_METADATA_TOKENS.some((entry) => normalized.includes(entry));
+}
+
+export function isLegExerciseByMetadata(exercise) {
+  if (!exercise || typeof exercise !== "object") return false;
+  const fields = [];
+  const maybePush = (value) => {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      value.forEach((entry) => maybePush(entry));
+      return;
+    }
+    fields.push(...splitTokens(value));
+  };
+  maybePush(exercise.primaryMuscles);
+  maybePush(exercise.secondaryMuscles);
+  maybePush(exercise.tags);
+  maybePush(exercise.muscle_group);
+  maybePush(exercise.muscleGroup);
+
+  return fields.some((token) => isLegMetadataToken(token));
+}
+
+export function parseCoachEditIntent(userMessage) {
+  const text = String(userMessage ?? "").trim();
+  if (!text) return { isEditRequest: false, kind: null, addCount: null };
+
+  const isEditRequest = WORKOUT_EDIT_REQUEST_REGEX.test(text);
+  const addMatch = text.match(ADD_COUNT_REGEX);
+  const addCount = addMatch ? parsePositiveInt(addMatch[1]) : null;
+  const includesLegKeywords = LEG_EDIT_KEYWORD_REGEX.test(text);
+
+  if (isEditRequest && addCount && includesLegKeywords) {
+    return {
+      isEditRequest: true,
+      kind: "add_legs_exercises",
+      addCount,
+    };
+  }
+
+  return {
+    isEditRequest,
+    kind: isEditRequest ? "generic_edit" : null,
+    addCount: null,
+  };
+}
+
+export function validateAddLegEditResult({
+  currentDraft,
+  nextDraft,
+  addCount,
+  exerciseCatalogById,
+}) {
+  const previousExercises = Array.isArray(currentDraft?.payload?.exercises)
+    ? currentDraft.payload.exercises
+    : [];
+  const nextExercises = Array.isArray(nextDraft?.payload?.exercises)
+    ? nextDraft.payload.exercises
+    : [];
+
+  if (!previousExercises.length) {
+    return { valid: false, error: "No current draft exercises are available to edit." };
+  }
+  if (nextExercises.length !== previousExercises.length + addCount) {
+    return {
+      valid: false,
+      error: `Expected ${addCount} appended exercises, but got ${
+        nextExercises.length - previousExercises.length
+      }.`,
+    };
+  }
+
+  for (let i = 0; i < previousExercises.length; i += 1) {
+    if (stableStringify(previousExercises[i]) !== stableStringify(nextExercises[i])) {
+      return {
+        valid: false,
+        error: "Existing exercises must remain unchanged and in the same order.",
+      };
+    }
+  }
+
+  const previousIds = new Set(
+    previousExercises
+      .map((entry) => parsePositiveInt(entry?.exerciseId))
+      .filter((id) => id != null)
+  );
+  const appended = nextExercises.slice(previousExercises.length);
+  for (let i = 0; i < appended.length; i += 1) {
+    const exerciseId = parsePositiveInt(appended[i]?.exerciseId);
+    if (exerciseId == null) {
+      return {
+        valid: false,
+        error: `Appended exercise at index ${i} must include a valid exerciseId.`,
+      };
+    }
+    if (previousIds.has(exerciseId)) {
+      return {
+        valid: false,
+        error: `Appended exerciseId ${exerciseId} already exists in the draft.`,
+      };
+    }
+    const exerciseMeta =
+      exerciseCatalogById instanceof Map ? exerciseCatalogById.get(exerciseId) : null;
+    if (!isLegExerciseByMetadata(exerciseMeta)) {
+      return {
+        valid: false,
+        error: `Appended exerciseId ${exerciseId} is not classified as legs.`,
+      };
+    }
+  }
+
+  return { valid: true, error: null };
 }
 
 function getActionDraftForWorkout(text) {
@@ -348,6 +511,9 @@ export function validateCoachResponse({
   contextEnabled,
   allowedCandidateIds,
   libraryIdSet,
+  currentDraft,
+  editIntent,
+  exerciseCatalogById,
 }) {
   const mode = classifyCoachResponseMode({ userMessage, responseMode });
   const text = String(assistantText ?? "").trim();
@@ -369,6 +535,25 @@ export function validateCoachResponse({
       });
       if (!idValidation.valid) {
         return { valid: false, parsed: null, error: idValidation.error, mode };
+      }
+      if (
+        editIntent?.kind === "add_legs_exercises" &&
+        currentDraft?.kind === ActionDraftKinds.create_workout
+      ) {
+        const addLegValidation = validateAddLegEditResult({
+          currentDraft,
+          nextDraft: actionDraft,
+          addCount: editIntent.addCount,
+          exerciseCatalogById,
+        });
+        if (!addLegValidation.valid) {
+          return {
+            valid: false,
+            parsed: null,
+            error: addLegValidation.error,
+            mode,
+          };
+        }
       }
       if (!contextEnabled) {
         const contextResult = validateContextOffWorkout(text);
