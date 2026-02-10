@@ -39,6 +39,8 @@ const DEFAULT_APPENDED_SET_COUNT = 3;
 const DEFAULT_APPENDED_REPS = 10;
 const SAFE_EDIT_FAILURE_MESSAGE =
   "I couldn't safely apply that edit while keeping your current workout intact. Please try again with a more specific change request.";
+const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
+  "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -369,6 +371,80 @@ function isLegMuscleGroup(value) {
     normalized.includes("adductor") ||
     normalized.includes("abductor")
   );
+}
+
+function resolveFallbackWorkoutTitle(userMessage) {
+  const normalized = normalizeText(userMessage);
+  if (normalized.includes("push")) return "Push Workout";
+  if (normalized.includes("pull")) return "Pull Workout";
+  if (
+    normalized.includes("leg") ||
+    normalized.includes("quad") ||
+    normalized.includes("hamstring") ||
+    normalized.includes("glute") ||
+    normalized.includes("calf")
+  ) {
+    return "Leg Workout";
+  }
+  return "Workout Plan";
+}
+
+function clampSetCount(value) {
+  const parsed = toPositiveInt(value);
+  if (parsed == null) return DEFAULT_APPENDED_SET_COUNT;
+  return Math.max(1, Math.min(parsed, 5));
+}
+
+function buildDeterministicWorkoutFallbackDraft({
+  userMessage,
+  selectedGym,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
+  const list = Array.isArray(exerciseCandidates) ? exerciseCandidates : [];
+  if (!list.length) return null;
+
+  const maxExercises = Math.min(8, list.length);
+  const targetExercises = list.length >= 5 ? 5 : maxExercises;
+  if (targetExercises <= 0) return null;
+
+  const seen = new Set();
+  const chosen = [];
+  for (let i = 0; i < list.length && chosen.length < targetExercises; i += 1) {
+    const candidate = list[i];
+    const exerciseId = toPositiveInt(candidate?.exerciseId ?? candidate?.id);
+    if (exerciseId == null || seen.has(exerciseId)) continue;
+    const exerciseMeta = exerciseCatalogById.get(exerciseId) ?? candidate ?? null;
+    const defaultSetCount = clampSetCount(exerciseMeta?.default_sets);
+    const defaultReps = toPositiveInt(exerciseMeta?.default_reps) ?? DEFAULT_APPENDED_REPS;
+    const exercise = {
+      exerciseId,
+      sets: Array.from({ length: defaultSetCount }, () => ({ reps: defaultReps })),
+    };
+    const name = String(exerciseMeta?.name ?? candidate?.name ?? "").trim();
+    if (name) exercise.name = name;
+    chosen.push(exercise);
+    seen.add(exerciseId);
+  }
+
+  if (!chosen.length) return null;
+
+  const title = resolveFallbackWorkoutTitle(userMessage);
+  const payload = {
+    name: title,
+    exercises: chosen,
+  };
+  const gymId = toPositiveInt(selectedGym?.id);
+  if (gymId != null) payload.gymId = gymId;
+
+  return {
+    kind: "create_workout",
+    confidence: 0.5,
+    risk: "low",
+    title,
+    summary: "Recovered workout draft from available exercise candidates.",
+    payload,
+  };
 }
 
 function buildLegEditCandidates({
@@ -1027,6 +1103,30 @@ export async function runCoachTurn({
   const parsedEditDraft = extractEditDraftPayloadFromAssistant(finalAssistant);
   const actionContractVersion = parsedActionDraft.contractVersion ?? null;
   const actionParseErrors = parsedActionDraft.parseErrors ?? null;
+
+  if (
+    !editModeEnabled &&
+    !actionDraft &&
+    responseValidation.mode === "workout" &&
+    responseValidation.status === "failed"
+  ) {
+    const fallbackDraft = buildDeterministicWorkoutFallbackDraft({
+      userMessage,
+      selectedGym: contextState?.selectedGym ?? null,
+      exerciseCandidates,
+      exerciseCatalogById,
+    });
+    if (fallbackDraft) {
+      actionDraft = fallbackDraft;
+      assistantText = FALLBACK_WORKOUT_ASSISTANT_MESSAGE;
+      responseValidation = {
+        status: "repaired",
+        mode: "workout",
+        repaired: true,
+        error: null,
+      };
+    }
+  }
 
   if (editModeEnabled) {
     const editContract = normalizeEditContract(parsedEditDraft);
