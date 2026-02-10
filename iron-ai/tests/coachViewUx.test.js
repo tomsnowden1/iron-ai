@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COACH_ACTION_PREVIEW_MIN_EXERCISES,
+  COACH_ACTION_SHOW_ALL_THRESHOLD,
   buildHeuristicWorkoutDraft,
+  getVisibleCoachActionExerciseCount,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -10,6 +13,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldShowCoachActionShowAllToggle,
   shouldForceWorkoutResponseMode,
 } from "../src/features/coach/coachViewUiModel";
 
@@ -119,5 +123,17 @@ Use this template payload.`);
         hasVisibleWorkoutDraft: true,
       })
     ).toBe(false);
+  });
+
+  it("shows exercise preview list by default and enables show-all only for larger drafts", () => {
+    expect(shouldShowCoachActionShowAllToggle(COACH_ACTION_SHOW_ALL_THRESHOLD)).toBe(
+      false
+    );
+    expect(shouldShowCoachActionShowAllToggle(9)).toBe(true);
+    expect(getVisibleCoachActionExerciseCount(9, false)).toBe(
+      COACH_ACTION_PREVIEW_MIN_EXERCISES
+    );
+    expect(getVisibleCoachActionExerciseCount(9, true)).toBe(9);
+    expect(getVisibleCoachActionExerciseCount(6, false)).toBe(6);
   });
 });
