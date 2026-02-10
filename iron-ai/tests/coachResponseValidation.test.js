@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyCoachResponseMode,
   extractWorkoutPlanOutput,
+  parseCoachEditIntent,
   validateCoachResponse,
   validateTemplateJsonOutput,
 } from "../src/coach/responseValidation";
@@ -135,5 +136,46 @@ describe("coach response validation", () => {
         responseMode: "workout",
       })
     ).toBe("workout");
+  });
+
+  it("fails add-legs edit validation when the model replaces the existing list", () => {
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Push Workout",
+      summary: "Push day",
+      payload: {
+        name: "Push Workout",
+        exercises: [
+          { exerciseId: 1, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+          { exerciseId: 2, sets: [{ reps: 10 }, { reps: 10 }, { reps: 10 }] },
+        ],
+      },
+    };
+    const editIntent = parseCoachEditIntent("add 2 legs exercises");
+    const exerciseCatalogById = new Map([
+      [1, { id: 1, primaryMuscles: ["chest"] }],
+      [2, { id: 2, primaryMuscles: ["shoulders"] }],
+      [3, { id: 3, primaryMuscles: ["quads"] }],
+      [4, { id: 4, primaryMuscles: ["hamstrings"] }],
+    ]);
+
+    const result = validateCoachResponse({
+      userMessage: "add 2 legs exercises",
+      assistantText: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Updated.","actionDraft":{"kind":"create_workout","confidence":0.9,"risk":"low","title":"Push Workout","summary":"Updated workout","payload":{"name":"Push Workout","exercises":[{"exerciseId":3,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":4,"sets":[{"reps":10},{"reps":10},{"reps":10}]},{"exerciseId":1,"sets":[{"reps":8},{"reps":8},{"reps":8}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]}]}}}
+\`\`\``,
+      responseMode: "workout",
+      contextEnabled: true,
+      allowedCandidateIds: new Set([1, 2, 3, 4]),
+      libraryIdSet: new Set([1, 2, 3, 4]),
+      currentDraft,
+      editIntent,
+      exerciseCatalogById,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(String(result.error ?? "")).toMatch(/unchanged/i);
   });
 });
