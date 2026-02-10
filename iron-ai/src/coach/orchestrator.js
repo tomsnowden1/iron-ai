@@ -29,6 +29,8 @@ import {
 const MAX_TOOL_LOOPS = 2;
 const COACH_TEMPERATURE = 0.2;
 const ENABLE_WRITE_TOOLS = false;
+const MAX_PROMPT_HISTORY_MESSAGES = 24;
+const MAX_PROMPT_HISTORY_CHARS = 32000;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -206,6 +208,76 @@ function buildAssistantToolCallMessage(toolCalls) {
   };
 }
 
+function estimateConversationTokens(messages) {
+  return Math.ceil(JSON.stringify(messages).length / 4);
+}
+
+function normalizePromptHistoryMessage(message) {
+  if (!message || typeof message !== "object") return null;
+  const role = String(message.role ?? "").trim();
+  if (role !== "user" && role !== "assistant") return null;
+  return {
+    role,
+    content:
+      typeof message.content === "string"
+        ? message.content
+        : String(message.content ?? ""),
+  };
+}
+
+function buildPromptHistoryWindow(chatHistory, userMessage) {
+  const normalizedHistory = Array.isArray(chatHistory)
+    ? chatHistory.map((entry) => normalizePromptHistoryMessage(entry)).filter(Boolean)
+    : [];
+  const nextUserMessage = String(userMessage ?? "");
+  const fullHistory = [...normalizedHistory, { role: "user", content: nextUserMessage }];
+  const byMessageLimit = fullHistory.slice(-MAX_PROMPT_HISTORY_MESSAGES);
+
+  const boundedHistory = [];
+  let charTotal = 0;
+  for (let i = byMessageLimit.length - 1; i >= 0; i -= 1) {
+    const message = byMessageLimit[i];
+    const content = String(message.content ?? "");
+    const nextTotal = charTotal + content.length;
+    if (boundedHistory.length > 0 && nextTotal > MAX_PROMPT_HISTORY_CHARS) {
+      continue;
+    }
+    boundedHistory.unshift({ role: message.role, content });
+    charTotal = nextTotal;
+  }
+
+  if (
+    !boundedHistory.length ||
+    boundedHistory[boundedHistory.length - 1]?.role !== "user"
+  ) {
+    boundedHistory.push({ role: "user", content: nextUserMessage });
+    charTotal += nextUserMessage.length;
+  }
+
+  return {
+    history: boundedHistory,
+    meta: {
+      originalMessages: fullHistory.length,
+      usedMessages: boundedHistory.length,
+      droppedMessages: Math.max(0, fullHistory.length - boundedHistory.length),
+      maxMessages: MAX_PROMPT_HISTORY_MESSAGES,
+      maxChars: MAX_PROMPT_HISTORY_CHARS,
+      charsUsed: charTotal,
+    },
+  };
+}
+
+function isContextWindowOverflowError(error) {
+  const code = String(error?.code ?? "").toLowerCase();
+  if (code.includes("context")) return true;
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    message.includes("context length") ||
+    message.includes("maximum context length") ||
+    message.includes("too many tokens")
+  );
+}
+
 export async function runCoachTurn({
   apiKey,
   keyMode = "user",
@@ -257,6 +329,8 @@ export async function runCoachTurn({
     actionDraft: null,
     contextState: null,
     responseValidation: null,
+    promptWindow: null,
+    contextWindowRetry: false,
   };
 
   const memorySummaryData = memoryEnabled ? summarizeCoachMemory(memorySummary) : null;
@@ -371,19 +445,20 @@ export async function runCoachTurn({
     summaryOnly,
   };
 
+  const systemMessages = buildSystemMessages({
+    contextSnapshot,
+    memorySummary: memorySummaryData,
+    requestContext,
+    contextState,
+    exerciseCandidates,
+  });
+  const promptHistoryWindow = buildPromptHistoryWindow(chatHistory, userMessage);
+
   let loop = 0;
-  let history = [...chatHistory, { role: "user", content: userMessage }];
-  let conversation = [
-    ...buildSystemMessages({
-      contextSnapshot,
-      memorySummary: memorySummaryData,
-      requestContext,
-      contextState,
-      exerciseCandidates,
-    }),
-    ...history,
-  ];
-  debug.estimatedTokens = Math.ceil(JSON.stringify(conversation).length / 4);
+  let history = promptHistoryWindow.history;
+  let conversation = [...systemMessages, ...history];
+  debug.promptWindow = promptHistoryWindow.meta;
+  debug.estimatedTokens = estimateConversationTokens(conversation);
 
   let payloadFingerprint = requestFingerprint;
   let payloadBuiltAt = Date.now();
@@ -421,16 +496,44 @@ export async function runCoachTurn({
 
   while (loop < MAX_TOOL_LOOPS) {
     loop += 1;
-    const streamResult = await streamChatCompletion({
-      apiKey,
-      useServerKey,
-      model: DEFAULT_COACH_MODEL,
-      messages: conversation,
-      tools,
-      onDelta: onStreamDelta,
-      onStart: onStreamStart,
-      onEnd: onStreamEnd,
-    });
+    let streamResult = null;
+    const runStreamRequest = (messages) =>
+      streamChatCompletion({
+        apiKey,
+        useServerKey,
+        model: DEFAULT_COACH_MODEL,
+        messages,
+        tools,
+        onDelta: onStreamDelta,
+        onStart: onStreamStart,
+        onEnd: onStreamEnd,
+      });
+
+    try {
+      streamResult = await runStreamRequest(conversation);
+    } catch (error) {
+      if (!debug.contextWindowRetry && isContextWindowOverflowError(error)) {
+        debug.contextWindowRetry = true;
+        debug.contextWindowRetryError =
+          String(error?.message ?? "").trim() || "Context window exceeded";
+        history = [{ role: "user", content: String(userMessage ?? "") }];
+        conversation = [...systemMessages, ...history];
+        debug.promptWindow = {
+          ...(debug.promptWindow ?? {}),
+          usedMessages: history.length,
+          droppedMessages: Math.max(
+            0,
+            (debug.promptWindow?.originalMessages ?? history.length) - history.length
+          ),
+          retriedWithMinimalHistory: true,
+          charsUsed: history[0]?.content?.length ?? 0,
+        };
+        debug.estimatedTokens = estimateConversationTokens(conversation);
+        streamResult = await runStreamRequest(conversation);
+      } else {
+        throw error;
+      }
+    }
 
     debug.toolCalls = streamResult.toolCalls ?? [];
 
@@ -444,16 +547,7 @@ export async function runCoachTurn({
 
     const assistantToolCallMessage = buildAssistantToolCallMessage(streamResult.toolCalls);
     history = [...history, assistantToolCallMessage];
-    conversation = [
-      ...buildSystemMessages({
-        contextSnapshot,
-        memorySummary: memorySummaryData,
-        requestContext,
-        contextState,
-        exerciseCandidates,
-      }),
-      ...history,
-    ];
+    conversation = [...systemMessages, ...history];
 
     pendingToolMessages = [];
     for (const toolCall of streamResult.toolCalls) {
@@ -563,16 +657,7 @@ export async function runCoachTurn({
     }
 
     history = [...history, ...pendingToolMessages];
-    conversation = [
-      ...buildSystemMessages({
-        contextSnapshot,
-        memorySummary: memorySummaryData,
-        requestContext,
-        contextState,
-        exerciseCandidates,
-      }),
-      ...history,
-    ];
+    conversation = [...systemMessages, ...history];
   }
 
   let responseValidation = {

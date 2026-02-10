@@ -173,4 +173,102 @@ describe("coach orchestrator", () => {
     expect(result.responseValidation.status).toBe("repaired");
     expect(result.actionDraft?.payload?.exercises?.length).toBeGreaterThan(0);
   });
+
+  it("bounds prompt history to recent user and assistant messages", async () => {
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Workout ready.",
+      toolCalls: [],
+    });
+
+    const longHistory = Array.from({ length: 80 }).flatMap((_, index) => [
+      { role: "user", content: `User message ${index}` },
+      { role: "assistant", content: `Assistant reply ${index}` },
+      { role: "tool", tool_call_id: `call_${index}`, content: `Tool payload ${index}` },
+    ]);
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: longHistory,
+      userMessage: "Need a push workout",
+      responseMode: "general",
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const sentMessages = mocks.streamChatCompletion.mock.calls[0]?.[0]?.messages ?? [];
+    const promptHistory = sentMessages.filter((entry) => entry.role !== "system");
+    expect(promptHistory.length).toBeLessThanOrEqual(24);
+    expect(promptHistory.every((entry) => entry.role !== "tool")).toBe(true);
+    expect(promptHistory[promptHistory.length - 1]).toMatchObject({
+      role: "user",
+      content: "Need a push workout",
+    });
+    expect(result.debug?.promptWindow?.droppedMessages).toBeGreaterThan(0);
+  });
+
+  it("retries once with minimal history when context window overflows", async () => {
+    mocks.streamChatCompletion
+      .mockRejectedValueOnce({
+        status: 400,
+        code: "context_length_exceeded",
+        message:
+          "This model's maximum context length has been exceeded.",
+      })
+      .mockResolvedValueOnce({
+        content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Push workout ready.","actionDraft":{"kind":"create_workout","confidence":0.9,"risk":"low","title":"Push Day","summary":"Push workout","payload":{"name":"Push Day","exercises":[{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]},{"exerciseId":3,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]}]}}}
+\`\`\``,
+        toolCalls: [],
+      });
+
+    const chatHistory = Array.from({ length: 18 }).flatMap((_, index) => [
+      { role: "user", content: `Earlier user ${index}` },
+      {
+        role: "assistant",
+        content: `Earlier assistant response ${index}`,
+      },
+    ]);
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory,
+      userMessage: "Need a push workout",
+      responseMode: "general",
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(mocks.streamChatCompletion).toHaveBeenCalledTimes(2);
+    const secondAttemptMessages =
+      mocks.streamChatCompletion.mock.calls[1]?.[0]?.messages ?? [];
+    const secondPromptHistory = secondAttemptMessages.filter(
+      (entry) => entry.role !== "system"
+    );
+    expect(secondPromptHistory).toEqual([
+      { role: "user", content: "Need a push workout" },
+    ]);
+    expect(result.assistant).toBe("Push workout ready.");
+    expect(result.debug?.contextWindowRetry).toBe(true);
+    expect(result.debug?.promptWindow?.retriedWithMinimalHistory).toBe(true);
+  });
 });
