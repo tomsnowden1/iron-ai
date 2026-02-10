@@ -117,6 +117,7 @@ describe("coach orchestrator", () => {
       exerciseCandidates: [{ exerciseId: 1, name: "Goblet Squat" }],
     });
     expect(SYSTEM_PROMPT).toMatch(/contextEnabled is false/i);
+    expect(SYSTEM_PROMPT).toMatch(/push workout, include at least one chest press/i);
     const contextMessage = messages.find((entry) =>
       entry.content.startsWith("Context availability (authoritative JSON):")
     );
