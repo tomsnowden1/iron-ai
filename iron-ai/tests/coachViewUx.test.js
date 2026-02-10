@@ -5,6 +5,7 @@ import {
   COACH_ACTION_SHOW_ALL_THRESHOLD,
   buildHeuristicWorkoutDraft,
   getVisibleCoachActionExerciseCount,
+  getSuggestedActionPrimaryLabel,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -135,5 +136,10 @@ Use this template payload.`);
     );
     expect(getVisibleCoachActionExerciseCount(9, true)).toBe(9);
     expect(getVisibleCoachActionExerciseCount(6, false)).toBe(6);
+  });
+
+  it("uses an open-workout primary CTA for workout suggested actions", () => {
+    expect(getSuggestedActionPrimaryLabel("create_workout")).toBe("Open workout");
+    expect(getSuggestedActionPrimaryLabel("create_template")).toBe("Apply");
   });
 });
