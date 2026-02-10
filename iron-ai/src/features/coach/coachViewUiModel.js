@@ -24,6 +24,10 @@ export function getCoachWorkoutActionConfig({ debugEnabled }) {
   };
 }
 
+export function getSuggestedActionPrimaryLabel(actionDraftKind) {
+  return actionDraftKind === "create_workout" ? "Open workout" : "Apply";
+}
+
 const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
 const JSON_PLUMBING_LINE_REGEX =
   /^.*(\bjson\b|fenced|code block|template format|template payload).*$\n?/gim;

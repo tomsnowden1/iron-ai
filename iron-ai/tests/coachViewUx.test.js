@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildHeuristicWorkoutDraft,
+  getSuggestedActionPrimaryLabel,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -119,5 +120,10 @@ Use this template payload.`);
         hasVisibleWorkoutDraft: true,
       })
     ).toBe(false);
+  });
+
+  it("uses an open-workout primary CTA for workout suggested actions", () => {
+    expect(getSuggestedActionPrimaryLabel("create_workout")).toBe("Open workout");
+    expect(getSuggestedActionPrimaryLabel("create_template")).toBe("Apply");
   });
 });

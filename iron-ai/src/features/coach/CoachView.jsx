@@ -36,6 +36,7 @@ import {
   isStartWorkoutIntentText,
   isTemplateIntentText,
   isInternalPromptMessage,
+  getSuggestedActionPrimaryLabel,
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
@@ -211,6 +212,7 @@ export default function CoachView({
   onOpenTemplate,
   onOpenWorkout,
   onNavigateToGyms,
+  activeWorkoutId,
 }) {
   const coachKeyMode = getCoachKeyMode();
   const { settings, apiKey, hasKey, keyStatus } = useSettings();
@@ -299,6 +301,8 @@ export default function CoachView({
   const listRef = useRef(null);
   const streamingIdRef = useRef(null);
   const inputRef = useRef(null);
+  const actionCardRef = useRef(null);
+  const lastActionSourceIdRef = useRef(null);
 
   const accessState = useMemo(
     () => getCoachAccessState({ hasKey, keyStatus, keyMode: coachKeyMode }),
@@ -589,6 +593,7 @@ export default function CoachView({
   }, [visibleMessages]);
   const latestUserContent = latestUserMessage?.content ?? "";
   const actionDraft = actionState.draft;
+  const actionSourceMessageId = actionState.sourceMessageId ?? null;
   const actionPayload = actionDraft?.payload ?? null;
   const actionDraftTitle =
     actionPayload?.name ?? actionPayload?.title ?? actionDraft?.title ?? "";
@@ -602,6 +607,8 @@ export default function CoachView({
   const actionDraftGym =
     sortedSpaces.find((space) => space.id === actionDraftGymId) ?? null;
   const actionDraftKind = actionDraft?.kind ?? null;
+  const actionPrimaryLabel = getSuggestedActionPrimaryLabel(actionDraftKind);
+  const [actionDetailsOpen, setActionDetailsOpen] = useState(true);
   const actionDraftHasGyms =
     actionDraftKind === ActionDraftKinds.create_workout ||
     actionDraftKind === ActionDraftKinds.create_template;
@@ -696,6 +703,8 @@ export default function CoachView({
       setActionErrors([]);
       setActionWarnings([]);
       setPendingHighRiskDraft(null);
+      setActionDetailsOpen(true);
+      lastActionSourceIdRef.current = null;
       return;
     }
     setActionEditMode(false);
@@ -706,6 +715,22 @@ export default function CoachView({
     setActionErrors([]);
     setPendingHighRiskDraft(null);
   }, [actionDraft, actionDraftTitle, actionDraftGymId]);
+
+  useEffect(() => {
+    if (!actionDraft) return;
+    const isNewAction =
+      actionSourceMessageId != null &&
+      actionSourceMessageId !== lastActionSourceIdRef.current;
+    if (!isNewAction) return;
+    setActionDetailsOpen(true);
+    window.setTimeout(() => {
+      actionCardRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 0);
+    lastActionSourceIdRef.current = actionSourceMessageId;
+  }, [actionDraft, actionSourceMessageId]);
 
   useEffect(() => {
     let active = true;
@@ -1332,6 +1357,9 @@ export default function CoachView({
           tone: "success",
           ...(canOpen ? { actionLabel: "Open", onAction: openAction } : {}),
         });
+        if (result.kind === ActionDraftKinds.create_workout && result.id != null) {
+          onOpenWorkout?.(result.id);
+        }
         actionDispatch({ type: "DISCARD" });
       } catch (err) {
         setActionErrors([err?.message ?? "Unable to apply draft."]);
@@ -1564,6 +1592,22 @@ export default function CoachView({
           </div>
         ) : null}
       </div>
+
+      {activeWorkoutId != null ? (
+        <div className="workout-resume-banner" role="status">
+          <div>
+            <div className="ui-strong">Workout is open</div>
+            <div className="template-meta">Resume your active session any time.</div>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onOpenWorkout?.(activeWorkoutId)}
+          >
+            Resume workout
+          </Button>
+        </div>
+      ) : null}
 
       <Card className="coach-card">
         <CardHeader>
@@ -1938,6 +1982,7 @@ export default function CoachView({
       </Card>
 
       {actionDraft ? (
+        <div ref={actionCardRef}>
         <Card className="coach-action-tray">
           <CardHeader>
             <div className="ui-row ui-row--between ui-row--wrap">
@@ -2026,7 +2071,14 @@ export default function CoachView({
               </div>
             )}
 
-            <details className="coach-action-details">
+            <details
+              className="coach-action-details"
+              open={actionEditMode || actionDetailsOpen}
+              onToggle={(event) => {
+                if (actionEditMode) return;
+                setActionDetailsOpen(event.currentTarget.open);
+              }}
+            >
               <summary>Draft details</summary>
               <div className="coach-action-details__body">
                 {actionDraftKind === ActionDraftKinds.create_workout ||
@@ -2111,7 +2163,7 @@ export default function CoachView({
               loading={actionApplying}
               disabled={actionApplying || actionEditMode}
             >
-              Apply
+              {actionPrimaryLabel}
             </Button>
             <Button
               variant="secondary"
@@ -2147,6 +2199,7 @@ export default function CoachView({
             </Button>
           </CardFooter>
         </Card>
+        </div>
       ) : null}
 
       {state.proposals.length ? (
