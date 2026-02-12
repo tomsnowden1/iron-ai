@@ -45,6 +45,8 @@ const CONTEXT_CLAIM_REGEX =
 const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan)\b/i;
 const WORKOUT_EDIT_REQUEST_REGEX =
   /\b(add|remove|swap|replace|adjust|change|include|exclude|without|update)\b/i;
+const SWAP_EDIT_REGEX =
+  /\b(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+?)(?:[.!?]|$)/i;
 const LEG_EDIT_KEYWORD_REGEX =
   /\b(leg|legs|quad|quads|hamstring|hamstrings|glute|glutes|calf|calves|adductor|abductor)\b/i;
 const ADD_COUNT_REGEX = /\badd\s+(\d+)\b/i;
@@ -185,18 +187,40 @@ export function isLegExerciseByMetadata(exercise) {
 
 export function parseCoachEditIntent(userMessage) {
   const text = String(userMessage ?? "").trim();
-  if (!text) return { isEditRequest: false, kind: null, addCount: null };
+  if (!text) {
+    return {
+      isEditRequest: false,
+      kind: null,
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    };
+  }
 
   const isEditRequest = WORKOUT_EDIT_REQUEST_REGEX.test(text);
   const addMatch = text.match(ADD_COUNT_REGEX);
   const addCount = addMatch ? parsePositiveInt(addMatch[1]) : null;
   const includesLegKeywords = LEG_EDIT_KEYWORD_REGEX.test(text);
+  const swapMatch = text.match(SWAP_EDIT_REGEX);
+  const fromExerciseName = swapMatch?.[1] ? String(swapMatch[1]).trim() : null;
+  const toExerciseName = swapMatch?.[2] ? String(swapMatch[2]).trim() : null;
 
   if (isEditRequest && addCount && includesLegKeywords) {
     return {
       isEditRequest: true,
       kind: "add_legs_exercises",
       addCount,
+      fromExerciseName: null,
+      toExerciseName: null,
+    };
+  }
+  if (isEditRequest && fromExerciseName && toExerciseName) {
+    return {
+      isEditRequest: true,
+      kind: "swap_exercise",
+      addCount: null,
+      fromExerciseName,
+      toExerciseName,
     };
   }
 
@@ -204,6 +228,8 @@ export function parseCoachEditIntent(userMessage) {
     isEditRequest,
     kind: isEditRequest ? "generic_edit" : null,
     addCount: null,
+    fromExerciseName: null,
+    toExerciseName: null,
   };
 }
 
