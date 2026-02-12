@@ -385,7 +385,6 @@ describe("coach orchestrator", () => {
     expect(result.debug?.editResolution?.status).toBe("applied");
     expect(result.assistant).toBe("Updated your workout.");
   });
-
   it("falls back to deterministic workout draft without a second repair request", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 11, name: "Barbell Bench Press" },
