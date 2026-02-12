@@ -193,7 +193,7 @@ export function buildSystemMessages({
     messages.push({
       role: "system",
       content:
-        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format: { mode: \"EDIT\", ops: [{ op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] }] }. Prefer EDIT mode whenever currentDraft is provided.",
+        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format supports ops like { op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] } and { op: \"swap_exercise\", fromExerciseId?: <id>, fromExerciseName?: <name>, toExerciseId?: <id>, toExerciseName?: <name> }. Prefer EDIT mode whenever currentDraft is provided.",
     });
   }
   return messages;
@@ -494,6 +494,76 @@ function normalizeEditContract(editDraft) {
   return { mode, ops };
 }
 
+function splitNormalizedTokens(value) {
+  const normalized = normalizeText(value);
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function scoreNameMatch(queryText, candidateText) {
+  const query = normalizeText(queryText);
+  const candidate = normalizeText(candidateText);
+  if (!query || !candidate) return 0;
+  if (query === candidate) return 1;
+  if (candidate.includes(query) || query.includes(candidate)) return 0.86;
+  const queryTokens = splitNormalizedTokens(query);
+  const candidateTokens = new Set(splitNormalizedTokens(candidate));
+  if (!queryTokens.length || !candidateTokens.size) return 0;
+  let overlap = 0;
+  queryTokens.forEach((token) => {
+    if (candidateTokens.has(token)) overlap += 1;
+  });
+  if (overlap === 0) return 0;
+  return overlap / queryTokens.length;
+}
+
+function toDraftExerciseName(entry, exerciseCatalogById) {
+  if (!entry || typeof entry !== "object") return "";
+  const explicitName = String(entry.name ?? entry.exerciseName ?? "").trim();
+  if (explicitName) return explicitName;
+  const exerciseId = toPositiveInt(entry.exerciseId);
+  if (exerciseId == null) return "";
+  return String(exerciseCatalogById.get(exerciseId)?.name ?? "").trim();
+}
+
+function resolveExerciseIdByName({
+  query,
+  options,
+  minimumScore = 0.6,
+  ambiguousMargin = 0.05,
+}) {
+  const name = String(query ?? "").trim();
+  if (!name) {
+    return { valid: false, exerciseId: null, error: "Exercise name is required." };
+  }
+  const scored = (Array.isArray(options) ? options : [])
+    .map((entry) => {
+      const exerciseId = toPositiveInt(entry?.exerciseId);
+      if (exerciseId == null) return null;
+      const label = String(entry?.name ?? "").trim();
+      const score = scoreNameMatch(name, label);
+      return { exerciseId, score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  if (!scored.length || scored[0].score < minimumScore) {
+    return {
+      valid: false,
+      exerciseId: null,
+      error: `Could not match "${name}" to a known exercise.`,
+    };
+  }
+  const top = scored[0];
+  const next = scored[1];
+  if (next && top.exerciseId !== next.exerciseId && top.score - next.score <= ambiguousMargin) {
+    return {
+      valid: false,
+      exerciseId: null,
+      error: `Exercise name "${name}" is ambiguous. Please be more specific.`,
+    };
+  }
+  return { valid: true, exerciseId: top.exerciseId, error: null };
+}
+
 function applyAddLegExercisesOperation({
   draft,
   operation,
@@ -564,11 +634,94 @@ function applyAddLegExercisesOperation({
   return { valid: true, error: null };
 }
 
+function applySwapExerciseOperation({
+  draft,
+  operation,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
+  const exercises = Array.isArray(draft?.payload?.exercises) ? draft.payload.exercises : [];
+  if (!exercises.length) {
+    return { valid: false, error: "Current workout draft has no exercises to swap." };
+  }
+
+  const draftOptions = exercises
+    .map((entry) => ({
+      exerciseId: toPositiveInt(entry?.exerciseId),
+      name: toDraftExerciseName(entry, exerciseCatalogById),
+    }))
+    .filter((entry) => entry.exerciseId != null && entry.name);
+  const catalogOptions = Array.from(exerciseCatalogById.entries()).map(([id, exercise]) => ({
+    exerciseId: id,
+    name: String(exercise?.name ?? "").trim(),
+  }));
+  const candidateOptions = Array.isArray(exerciseCandidates)
+    ? exerciseCandidates
+        .map((entry) => ({
+          exerciseId: toPositiveInt(entry?.exerciseId ?? entry?.id),
+          name: String(entry?.name ?? "").trim(),
+        }))
+        .filter((entry) => entry.exerciseId != null && entry.name)
+    : [];
+  const swapPool = [...candidateOptions, ...catalogOptions];
+
+  let fromExerciseId = toPositiveInt(operation?.fromExerciseId);
+  if (fromExerciseId == null) {
+    const fromName = operation?.fromExerciseName ?? operation?.fromExercise ?? null;
+    const resolved = resolveExerciseIdByName({
+      query: fromName,
+      options: draftOptions,
+    });
+    if (!resolved.valid) return { valid: false, error: resolved.error };
+    fromExerciseId = resolved.exerciseId;
+  }
+
+  let toExerciseId = toPositiveInt(operation?.toExerciseId);
+  if (toExerciseId == null) {
+    const toName = operation?.toExerciseName ?? operation?.toExercise ?? null;
+    const resolved = resolveExerciseIdByName({
+      query: toName,
+      options: swapPool,
+    });
+    if (!resolved.valid) return { valid: false, error: resolved.error };
+    toExerciseId = resolved.exerciseId;
+  }
+
+  if (fromExerciseId == null || toExerciseId == null) {
+    return { valid: false, error: "swap_exercise requires valid source and target exercises." };
+  }
+  if (fromExerciseId === toExerciseId) {
+    return { valid: true, error: null };
+  }
+
+  let replaced = 0;
+  const nextExercises = exercises.map((entry) => {
+    const exerciseId = toPositiveInt(entry?.exerciseId);
+    if (exerciseId !== fromExerciseId) return entry;
+    replaced += 1;
+    const nextEntry = { ...entry, exerciseId: toExerciseId };
+    const toMetaName = String(exerciseCatalogById.get(toExerciseId)?.name ?? "").trim();
+    if (toMetaName) {
+      nextEntry.name = toMetaName;
+    }
+    return nextEntry;
+  });
+  if (!replaced) {
+    return {
+      valid: false,
+      error: `Exercise ${fromExerciseId} is not present in the current workout draft.`,
+    };
+  }
+  draft.payload.exercises = nextExercises;
+  return { valid: true, error: null };
+}
+
 function applyEditOperations({
   currentDraft,
   editOps,
   legCandidates,
   exerciseCatalogById,
+  exerciseCandidates,
 }) {
   if (!currentDraft || typeof currentDraft !== "object") {
     return { valid: false, error: "Current workout draft is missing." };
@@ -586,6 +739,16 @@ function applyEditOperations({
         draft: nextDraft,
         operation,
         legCandidates,
+        exerciseCatalogById,
+      });
+      if (!result.valid) return result;
+      continue;
+    }
+    if (opName === "swap_exercise" || opName === "replace_exercise") {
+      const result = applySwapExerciseOperation({
+        draft: nextDraft,
+        operation,
+        exerciseCandidates,
         exerciseCatalogById,
       });
       if (!result.valid) return result;
@@ -739,7 +902,13 @@ export async function runCoachTurn({
     currentDraft.payload.exercises.length > 0;
   const editIntent = hasEditableWorkoutDraft
     ? parseCoachEditIntent(userMessage)
-    : { isEditRequest: false, kind: null, addCount: null };
+    : {
+        isEditRequest: false,
+        kind: null,
+        addCount: null,
+        fromExerciseName: null,
+        toExerciseName: null,
+      };
   const editModeEnabled = Boolean(hasEditableWorkoutDraft && editIntent.isEditRequest);
   const legEditCandidates = editModeEnabled
     ? buildLegEditCandidates({ exerciseCandidates, exerciseCatalogById })
@@ -1151,10 +1320,10 @@ export async function runCoachTurn({
     const editContract = normalizeEditContract(parsedEditDraft);
     let resolvedDraft = null;
     let editResolutionError = null;
-
+    const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
+    let fallbackOps = [];
     if (editIntent.kind === "add_legs_exercises") {
-      const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
-      const fallbackOps = [
+      fallbackOps = [
         {
           op: "add_exercises",
           count: editIntent.addCount,
@@ -1162,13 +1331,38 @@ export async function runCoachTurn({
           placement: "end",
         },
       ];
-      const opsToApply = opFromModel.length ? opFromModel : fallbackOps;
-      const editResult = applyEditOperations({
+    } else if (
+      editIntent.kind === "swap_exercise" &&
+      editIntent.fromExerciseName &&
+      editIntent.toExerciseName
+    ) {
+      fallbackOps = [
+        {
+          op: "swap_exercise",
+          fromExerciseName: editIntent.fromExerciseName,
+          toExerciseName: editIntent.toExerciseName,
+        },
+      ];
+    }
+    let opsToApply = opFromModel.length ? opFromModel : fallbackOps;
+    if (opsToApply.length) {
+      let editResult = applyEditOperations({
         currentDraft,
         editOps: opsToApply,
         legCandidates: legEditCandidates,
         exerciseCatalogById,
+        exerciseCandidates,
       });
+      if (!editResult.valid && fallbackOps.length && opFromModel.length) {
+        editResult = applyEditOperations({
+          currentDraft,
+          editOps: fallbackOps,
+          legCandidates: legEditCandidates,
+          exerciseCatalogById,
+          exerciseCandidates,
+        });
+        opsToApply = fallbackOps;
+      }
       if (editResult.valid) {
         resolvedDraft = editResult.draft;
       } else {
@@ -1199,7 +1393,7 @@ export async function runCoachTurn({
       actionDraft = resolvedDraft;
       debug.editResolution = {
         status: "applied",
-        mode: editContract.mode || "AUTO",
+        mode: opsToApply.length ? "EDIT" : editContract.mode || "AUTO",
       };
     } else {
       actionDraft = currentDraft ?? null;

@@ -138,6 +138,16 @@ describe("coach response validation", () => {
     ).toBe("workout");
   });
 
+  it("parses swap edit intent for change X to Y phrasing", () => {
+    const editIntent = parseCoachEditIntent("change back squat to pull up");
+    expect(editIntent).toMatchObject({
+      isEditRequest: true,
+      kind: "swap_exercise",
+      fromExerciseName: "back squat",
+      toExerciseName: "pull up",
+    });
+  });
+
   it("fails add-legs edit validation when the model replaces the existing list", () => {
     const currentDraft = {
       kind: "create_workout",
