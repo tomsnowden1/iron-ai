@@ -45,6 +45,78 @@ export function getSuggestedActionPrimaryLabel(actionDraftKind) {
   return actionDraftKind === "create_workout" ? "Open workout" : "Apply";
 }
 
+export function shouldShowSuggestedActionSaveTemplate(actionDraftKind) {
+  return actionDraftKind === "create_workout";
+}
+
+function toFinitePositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function resolveExerciseLabel(entry, index, exerciseNameById) {
+  const byDraft = String(entry?.name ?? entry?.exerciseName ?? "").trim();
+  if (byDraft) return byDraft;
+  const mapped = exerciseNameById?.get?.(entry?.exerciseId);
+  const byLookup = String(mapped ?? "").trim();
+  if (byLookup) return byLookup;
+  return `Exercise ${index + 1}`;
+}
+
+function resolveSetMeta(entry) {
+  const setCount = Array.isArray(entry?.sets)
+    ? entry.sets.length
+    : toFinitePositiveInt(entry?.sets);
+  if (!setCount) return "sets as needed";
+  const repsValue = Array.isArray(entry?.sets)
+    ? entry.sets
+        .map((set) => Number(set?.reps))
+        .find((value) => Number.isFinite(value))
+    : toFinitePositiveInt(entry?.reps);
+  if (Number.isFinite(repsValue) && repsValue > 0) {
+    return `${setCount} sets x ${repsValue} reps`;
+  }
+  return `${setCount} sets`;
+}
+
+export function buildCoachWorkoutSummaryFromDraft(draft, exerciseNameById = new Map()) {
+  const payload = draft?.payload ?? {};
+  const exercises = Array.isArray(payload.exercises) ? payload.exercises : [];
+  if (!exercises.length) {
+    return "Workout ready.";
+  }
+  const title =
+    String(payload.name ?? payload.title ?? draft?.title ?? "Workout").trim() ||
+    "Workout";
+  const lines = exercises.map((entry, index) => {
+    const name = resolveExerciseLabel(entry, index, exerciseNameById);
+    const meta = resolveSetMeta(entry);
+    return `${index + 1}. ${name} - ${meta}`;
+  });
+  return [`${title}`, ...lines].join("\n");
+}
+
+export function applyUniformSetCountToExercises(exercises, setCount) {
+  const list = Array.isArray(exercises) ? exercises : [];
+  const targetSetCount = toFinitePositiveInt(setCount);
+  if (!targetSetCount) return list;
+  return list.map((entry) => {
+    const currentSets = Array.isArray(entry?.sets)
+      ? entry.sets.filter((set) => set && typeof set === "object")
+      : [];
+    const templateSet = currentSets[0] ? { ...currentSets[0] } : {};
+    const nextSets = Array.from({ length: targetSetCount }, (_, index) => {
+      if (currentSets[index]) return { ...currentSets[index] };
+      return { ...templateSet };
+    });
+    return {
+      ...entry,
+      sets: nextSets,
+    };
+  });
+}
+
 const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
 const JSON_PLUMBING_LINE_REGEX =
   /^.*(\bjson\b|fenced|code block|template format|template payload).*$\n?/gim;

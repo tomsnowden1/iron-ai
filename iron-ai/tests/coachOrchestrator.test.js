@@ -129,23 +129,12 @@ describe("coach orchestrator", () => {
     expect(candidateMessage?.content).toContain('"exerciseId":1');
   });
 
-  it("retries once with repair prompt when workout output is invalid", async () => {
+  it("skips workout repair pass and uses deterministic fallback when workout output is invalid", async () => {
     mocks.streamChatCompletion.mockResolvedValue({
       content: `\`\`\`json
 {"name":"Leg Day","exercises":[]}
 \`\`\``,
       toolCalls: [],
-    });
-    mocks.createChatCompletion.mockResolvedValue({
-      choices: [
-        {
-          message: {
-            content: `\`\`\`json
-{"contractVersion":"coach_action_v1","assistantText":"Leg day is ready.","actionDraft":{"kind":"create_workout","confidence":0.9,"risk":"low","title":"Leg Day","summary":"Leg workout","payload":{"name":"Leg Day","exercises":[{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]},{"exerciseId":3,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]}]}}}
-\`\`\``,
-          },
-        },
-      ],
     });
 
     const result = await runCoachTurn({
@@ -167,10 +156,7 @@ describe("coach orchestrator", () => {
       memorySummary: null,
     });
 
-    expect(mocks.createChatCompletion).toHaveBeenCalledTimes(1);
-    const repairMessages = mocks.createChatCompletion.mock.calls[0]?.[0]?.messages ?? [];
-    const repairPrompt = repairMessages[repairMessages.length - 1]?.content ?? "";
-    expect(repairPrompt).toMatch(/candidate/i);
+    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
     expect(result.responseValidation.status).toBe("repaired");
     expect(result.actionDraft?.payload?.exercises?.length).toBeGreaterThan(0);
   });
@@ -338,7 +324,7 @@ describe("coach orchestrator", () => {
     expect(result.debug?.editResolution?.status).toBe("applied");
   });
 
-  it("falls back to deterministic workout draft when initial and repair outputs are invalid", async () => {
+  it("falls back to deterministic workout draft without a second repair request", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 11, name: "Barbell Bench Press" },
       { exerciseId: 12, name: "Overhead Press" },
@@ -356,15 +342,6 @@ describe("coach orchestrator", () => {
     mocks.streamChatCompletion.mockResolvedValue({
       content: "Here's a push workout.",
       toolCalls: [],
-    });
-    mocks.createChatCompletion.mockResolvedValue({
-      choices: [
-        {
-          message: {
-            content: "Still invalid output without contract JSON.",
-          },
-        },
-      ],
     });
 
     const result = await runCoachTurn({
@@ -396,5 +373,6 @@ describe("coach orchestrator", () => {
       result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)
     ).toEqual([11, 12, 13, 14, 15]);
     expect(result.assistant).toMatch(/formatting issue/i);
+    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
   });
 });
