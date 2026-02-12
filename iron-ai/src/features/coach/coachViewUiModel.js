@@ -59,14 +59,23 @@ function normalizeRequestType(value) {
   return value === "edit" ? "edit" : "draft";
 }
 
+function normalizeApplyReason(value) {
+  const safe = String(value ?? "").trim().toUpperCase();
+  if (!safe) return "UNKNOWN_SHAPE";
+  return safe;
+}
+
 export function buildCoachDebugTraceStamp({
   stamp,
+  commitSha,
   hasDraft,
   draftCount,
   applied,
+  applyReason,
 } = {}) {
   const source = stamp && typeof stamp === "object" ? stamp : {};
   return {
+    commitSha: String(commitSha ?? source.commitSha ?? "unknown"),
     model: String(source.model ?? "unknown"),
     provider: String(source.provider ?? "openai"),
     route: String(source.route ?? "unknown"),
@@ -76,12 +85,14 @@ export function buildCoachDebugTraceStamp({
     hasDraft: typeof hasDraft === "boolean" ? hasDraft : Boolean(source.hasDraft),
     draftCount: toNonNegativeInt(draftCount ?? source.draftCount),
     applied: typeof applied === "boolean" ? applied : Boolean(source.applied),
+    applyReason: normalizeApplyReason(applyReason ?? source.applyReason),
   };
 }
 
 export function buildCoachDebugTracePanel(stamp) {
   const trace = buildCoachDebugTraceStamp({ stamp });
   return {
+    commitSha: trace.commitSha,
     requestType: trace.requestType,
     model: trace.model,
     route: trace.route,
@@ -90,6 +101,7 @@ export function buildCoachDebugTracePanel(stamp) {
     hasDraft: trace.hasDraft,
     draftCount: trace.draftCount,
     applied: trace.applied,
+    applyReason: trace.applyReason,
   };
 }
 
