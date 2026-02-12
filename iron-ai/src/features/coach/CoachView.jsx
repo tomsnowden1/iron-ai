@@ -1085,6 +1085,9 @@ export default function CoachView({
         dispatch({ type: "ADD_TOOL_EVENTS", payload: result.toolEvents });
         dispatch({ type: "QUEUE_PROPOSALS", payload: result.proposals });
         dispatch({ type: "SET_DEBUG", payload: result.debug });
+        if (import.meta.env.DEV && result.debug?.stamp) {
+          console.info("coach_debug_stamp", result.debug.stamp);
+        }
         setContextContract(result.contextContract ?? null);
         setPayloadFingerprint(result.payloadFingerprint ?? null);
         setPayloadSummary(result.payloadSummary ?? null);
@@ -2935,6 +2938,12 @@ export default function CoachView({
           <CardBody className="ui-stack">
             <div>
               <span className="ui-muted">Model:</span> {state.debug?.model ?? "—"}
+            </div>
+            <div>
+              <span className="ui-muted">Debug stamp:</span>{" "}
+              {state.debug?.stamp
+                ? JSON.stringify(state.debug.stamp)
+                : "—"}
             </div>
             <div>
               <span className="ui-muted">Context truncated:</span>{" "}
