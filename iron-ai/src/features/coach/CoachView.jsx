@@ -30,6 +30,7 @@ import { getCoachAccessState } from "./coachAccess";
 import { getCoachKeyMode } from "../../config/coachKeyMode";
 import {
   applyUniformSetCountToExercises,
+  buildSwapConfirmationMessage,
   buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
   getVisibleCoachActionExerciseCount,
@@ -1175,6 +1176,19 @@ export default function CoachView({
           }
         }
         const resolvedActionDraft = result.actionDraft ?? fallbackActionDraft ?? null;
+        const swapConfirmationMessage =
+          shouldEditExistingDraft &&
+          result.debug?.editResolution?.status === "applied" &&
+          resolvedActionDraft
+            ? buildSwapConfirmationMessage({
+                previousDraft: actionDraft,
+                nextDraft: resolvedActionDraft,
+                exerciseNameById,
+              })
+            : null;
+        if (swapConfirmationMessage) {
+          onNotify?.(swapConfirmationMessage, { tone: "info" });
+        }
         const actionErrorSource = [
           draftState.error,
           result.responseValidation?.error,
@@ -1293,6 +1307,7 @@ export default function CoachView({
       keyStatus,
       memory,
       memoryEnabled,
+      onNotify,
       onLaunchContextConsumed,
       pendingLaunchContext,
       promptContextState,
