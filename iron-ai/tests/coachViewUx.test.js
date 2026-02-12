@@ -4,6 +4,8 @@ import {
   COACH_ACTION_PREVIEW_MIN_EXERCISES,
   COACH_ACTION_SHOW_ALL_THRESHOLD,
   applyUniformSetCountToExercises,
+  buildCoachDebugTracePanel,
+  buildCoachDebugTraceStamp,
   buildSwapConfirmationMessage,
   buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
@@ -251,5 +253,68 @@ Use this template payload.`);
     });
 
     expect(message).toBeNull();
+  });
+
+  it("builds a safe debug trace stamp with normalized fields only", () => {
+    const stamp = buildCoachDebugTraceStamp({
+      stamp: {
+        model: "gpt-4o-mini",
+        provider: "openai",
+        route: "/api/coach",
+        requestType: "edit",
+        hasOps: true,
+        opsCount: 2,
+      },
+      hasDraft: true,
+      draftCount: 7,
+      applied: true,
+    });
+
+    expect(stamp).toEqual({
+      model: "gpt-4o-mini",
+      provider: "openai",
+      route: "/api/coach",
+      requestType: "edit",
+      hasOps: true,
+      opsCount: 2,
+      hasDraft: true,
+      draftCount: 7,
+      applied: true,
+    });
+  });
+
+  it("projects the debug trace panel to the required safe shape", () => {
+    const trace = buildCoachDebugTracePanel({
+      model: "gpt-4o-mini",
+      provider: "openai",
+      route: "/api/coach",
+      requestType: "edit",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 8,
+      applied: false,
+    });
+
+    expect(Object.keys(trace)).toEqual([
+      "requestType",
+      "model",
+      "route",
+      "hasOps",
+      "opsCount",
+      "hasDraft",
+      "draftCount",
+      "applied",
+    ]);
+    expect(trace).toEqual({
+      requestType: "edit",
+      model: "gpt-4o-mini",
+      route: "/api/coach",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 8,
+      applied: false,
+    });
   });
 });

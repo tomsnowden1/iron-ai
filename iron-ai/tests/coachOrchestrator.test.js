@@ -330,6 +330,7 @@ describe("coach orchestrator", () => {
       { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
       { exerciseId: 21, name: "Push Up", primaryMuscles: ["chest"] },
       { exerciseId: 22, name: "Incline Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 24, name: "Plyo Push-up", primaryMuscles: ["chest"] },
       { exerciseId: 23, name: "Pull Up", primaryMuscles: ["back"] },
     ]);
     mocks.getAllExercises.mockResolvedValue([
@@ -337,6 +338,7 @@ describe("coach orchestrator", () => {
       { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
       { id: 21, name: "Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
       { id: 22, name: "Incline Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 24, name: "Plyo Push-up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 10 },
       { id: 23, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
     ]);
     mocks.streamChatCompletion.mockResolvedValue({
@@ -394,6 +396,9 @@ describe("coach orchestrator", () => {
       requestType: "edit",
       hasOps: false,
       opsCount: 0,
+      hasDraft: true,
+      draftCount: 4,
+      applied: false,
     });
   });
 

@@ -49,6 +49,50 @@ export function shouldShowSuggestedActionSaveTemplate(actionDraftKind) {
   return actionDraftKind === "create_workout";
 }
 
+function toNonNegativeInt(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function normalizeRequestType(value) {
+  return value === "edit" ? "edit" : "draft";
+}
+
+export function buildCoachDebugTraceStamp({
+  stamp,
+  hasDraft,
+  draftCount,
+  applied,
+} = {}) {
+  const source = stamp && typeof stamp === "object" ? stamp : {};
+  return {
+    model: String(source.model ?? "unknown"),
+    provider: String(source.provider ?? "openai"),
+    route: String(source.route ?? "unknown"),
+    requestType: normalizeRequestType(source.requestType),
+    hasOps: Boolean(source.hasOps),
+    opsCount: toNonNegativeInt(source.opsCount),
+    hasDraft: typeof hasDraft === "boolean" ? hasDraft : Boolean(source.hasDraft),
+    draftCount: toNonNegativeInt(draftCount ?? source.draftCount),
+    applied: typeof applied === "boolean" ? applied : Boolean(source.applied),
+  };
+}
+
+export function buildCoachDebugTracePanel(stamp) {
+  const trace = buildCoachDebugTraceStamp({ stamp });
+  return {
+    requestType: trace.requestType,
+    model: trace.model,
+    route: trace.route,
+    hasOps: trace.hasOps,
+    opsCount: trace.opsCount,
+    hasDraft: trace.hasDraft,
+    draftCount: trace.draftCount,
+    applied: trace.applied,
+  };
+}
+
 function toFinitePositiveInt(value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
