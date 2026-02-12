@@ -148,6 +148,39 @@ describe("coach response validation", () => {
     });
   });
 
+  it("parses swap intent for swap X for Y phrasing", () => {
+    const editIntent = parseCoachEditIntent("swap pull up for back squat");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "swap_exercise",
+      addCount: null,
+      fromExerciseName: "pull up",
+      toExerciseName: "back squat",
+    });
+  });
+
+  it("fails safely for ordinal references like first exercise", () => {
+    const editIntent = parseCoachEditIntent("change the first exercise to pull up");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "generic_edit",
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    });
+  });
+
+  it("fails safely for ambiguous plural replace phrasing", () => {
+    const editIntent = parseCoachEditIntent("replace squats with pull ups");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "generic_edit",
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    });
+  });
+
   it("fails add-legs edit validation when the model replaces the existing list", () => {
     const currentDraft = {
       kind: "create_workout",
