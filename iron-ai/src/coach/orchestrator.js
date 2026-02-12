@@ -703,7 +703,7 @@ function resolveNamedExerciseIds({
     if (!queryCompact) return false;
     return entry.compact.includes(queryCompact) || queryCompact.includes(entry.compact);
   });
-  if (strongMatches.length > count) {
+  if (count === 1 && strongMatches.length > 1) {
     const optionNames = strongMatches.slice(0, 3).map((entry) => entry.name);
     return {
       valid: false,
@@ -713,7 +713,15 @@ function resolveNamedExerciseIds({
       )}. Please specify the exact exercise name.`,
     };
   }
-  const resolvedIds = ranked.slice(0, count).map((entry) => entry.exerciseId);
+  const preferred = strongMatches.length ? strongMatches : ranked;
+  const resolvedIds = preferred.slice(0, count).map((entry) => entry.exerciseId);
+  if (resolvedIds.length < count) {
+    for (let i = 0; i < ranked.length && resolvedIds.length < count; i += 1) {
+      const exerciseId = ranked[i].exerciseId;
+      if (resolvedIds.includes(exerciseId)) continue;
+      resolvedIds.push(exerciseId);
+    }
+  }
   if (resolvedIds.length !== count) {
     return {
       valid: false,
@@ -1000,6 +1008,9 @@ export async function runCoachTurn({
       requestType: "draft",
       hasOps: false,
       opsCount: 0,
+      hasDraft: false,
+      draftCount: 0,
+      applied: false,
     },
     toolCalls: [],
     contextMeta: null,
@@ -1633,6 +1644,11 @@ export async function runCoachTurn({
   debug.actionParseErrors = actionParseErrors;
   debug.actionDraft = actionDraft;
   debug.responseValidation = responseValidation;
+  debug.stamp.hasDraft = Boolean(actionDraft);
+  debug.stamp.draftCount = Array.isArray(actionDraft?.payload?.exercises)
+    ? actionDraft.payload.exercises.length
+    : 0;
+  debug.stamp.applied = false;
 
   return {
     assistant: assistantText,
