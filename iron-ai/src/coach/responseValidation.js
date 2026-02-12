@@ -146,6 +146,21 @@ function splitTokens(value) {
   return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
 }
 
+function isAmbiguousSwapReference(value) {
+  const normalized = normalizeToken(value);
+  if (!normalized) return true;
+  if (/\b(first|second|third|fourth|fifth|last|next|previous)\s+exercise\b/i.test(normalized)) {
+    return true;
+  }
+  if (/\bexercise(?:s)?\b/i.test(normalized)) {
+    return true;
+  }
+  const tokens = splitTokens(normalized);
+  return tokens.some(
+    (token) => token.length > 3 && token.endsWith("s") && !token.endsWith("ss")
+  );
+}
+
 function stableStringify(value) {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
@@ -214,7 +229,13 @@ export function parseCoachEditIntent(userMessage) {
       toExerciseName: null,
     };
   }
-  if (isEditRequest && fromExerciseName && toExerciseName) {
+  if (
+    isEditRequest &&
+    fromExerciseName &&
+    toExerciseName &&
+    !isAmbiguousSwapReference(fromExerciseName) &&
+    !isAmbiguousSwapReference(toExerciseName)
+  ) {
     return {
       isEditRequest: true,
       kind: "swap_exercise",
