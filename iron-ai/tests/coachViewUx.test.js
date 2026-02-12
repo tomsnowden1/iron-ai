@@ -258,12 +258,14 @@ Use this template payload.`);
   it("builds a safe debug trace stamp with normalized fields only", () => {
     const stamp = buildCoachDebugTraceStamp({
       stamp: {
+        commitSha: "abc123",
         model: "gpt-4o-mini",
         provider: "openai",
         route: "/api/coach",
         requestType: "edit",
         hasOps: true,
         opsCount: 2,
+        applyReason: "APPLIED",
       },
       hasDraft: true,
       draftCount: 7,
@@ -271,6 +273,7 @@ Use this template payload.`);
     });
 
     expect(stamp).toEqual({
+      commitSha: "abc123",
       model: "gpt-4o-mini",
       provider: "openai",
       route: "/api/coach",
@@ -280,11 +283,13 @@ Use this template payload.`);
       hasDraft: true,
       draftCount: 7,
       applied: true,
+      applyReason: "APPLIED",
     });
   });
 
   it("projects the debug trace panel to the required safe shape", () => {
     const trace = buildCoachDebugTracePanel({
+      commitSha: "abc123",
       model: "gpt-4o-mini",
       provider: "openai",
       route: "/api/coach",
@@ -294,9 +299,11 @@ Use this template payload.`);
       hasDraft: true,
       draftCount: 8,
       applied: false,
+      applyReason: "OPS_EMPTY",
     });
 
     expect(Object.keys(trace)).toEqual([
+      "commitSha",
       "requestType",
       "model",
       "route",
@@ -305,8 +312,10 @@ Use this template payload.`);
       "hasDraft",
       "draftCount",
       "applied",
+      "applyReason",
     ]);
     expect(trace).toEqual({
+      commitSha: "abc123",
       requestType: "edit",
       model: "gpt-4o-mini",
       route: "/api/coach",
@@ -315,6 +324,7 @@ Use this template payload.`);
       hasDraft: true,
       draftCount: 8,
       applied: false,
+      applyReason: "OPS_EMPTY",
     });
   });
 });
