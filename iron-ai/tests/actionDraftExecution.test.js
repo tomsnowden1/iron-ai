@@ -116,4 +116,41 @@ describe.sequential("action draft execution", () => {
     expect(validation.valid).toBe(false);
     expect(validation.errors.join(" ")).toMatch(/Unknown exercise IDs/i);
   });
+
+  it("accepts nullable gymId by normalizing it before schema validation", async () => {
+    const exercises = await getAllExercises();
+    const exerciseId = exercises[0]?.id;
+    const draft = baseDraft(ActionDraftKinds.create_workout, {
+      name: "Null gym workout",
+      gymId: null,
+      exercises: [
+        {
+          exerciseId,
+          sets: [{ reps: 8 }],
+        },
+      ],
+    });
+
+    const validation = await validateActionDraft(draft);
+    expect(validation.valid).toBe(true);
+    expect(validation.normalizedDraft?.payload?.gymId).toBeNull();
+  });
+
+  it("returns schema path details for invalid draft inputs", async () => {
+    const invalidDraft = {
+      kind: ActionDraftKinds.create_workout,
+      confidence: 0.8,
+      risk: "low",
+      title: "Broken",
+      summary: "Broken",
+      payload: {
+        name: "Broken",
+        exercises: "not-an-array",
+      },
+    };
+
+    const validation = await validateActionDraft(invalidDraft);
+    expect(validation.valid).toBe(false);
+    expect(validation.errors.join(" ")).toMatch(/payload\.exercises/i);
+  });
 });

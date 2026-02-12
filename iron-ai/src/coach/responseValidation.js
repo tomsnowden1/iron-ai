@@ -45,9 +45,13 @@ const CONTEXT_CLAIM_REGEX =
 const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan)\b/i;
 const WORKOUT_EDIT_REQUEST_REGEX =
   /\b(add|remove|swap|replace|adjust|change|include|exclude|without|update)\b/i;
+const SWAP_EDIT_REGEX =
+  /\b(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+?)(?:[.!?]|$)/i;
 const LEG_EDIT_KEYWORD_REGEX =
   /\b(leg|legs|quad|quads|hamstring|hamstrings|glute|glutes|calf|calves|adductor|abductor)\b/i;
-const ADD_COUNT_REGEX = /\badd\s+(\d+)\b/i;
+const ADD_COUNT_REGEX = /\badd(?:\s+in)?\s+(\d+)\b/i;
+const ADD_NAMED_EXERCISE_REGEX =
+  /\badd(?:\s+in)?\s+(\d+)\s+(.+?)(?:\s+exercises?)?(?:[.!?]|$)/i;
 const WORKOUT_LIST_LINE_REGEX =
   /^\s*(?:[-*]|\d+[.)])\s+.+?(\d+\s*(?:sets?\s*(?:of)?\s*\d+\s*reps?|[x×]\s*\d+))/gim;
 const LEG_METADATA_TOKENS = [
@@ -144,6 +148,29 @@ function splitTokens(value) {
   return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
 }
 
+function normalizeNamedExerciseIntent(value) {
+  const normalized = String(value ?? "")
+    .replace(/\b(?:the|a|an|some|another|extra|more)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized || null;
+}
+
+function isAmbiguousSwapReference(value) {
+  const normalized = normalizeToken(value);
+  if (!normalized) return true;
+  if (/\b(first|second|third|fourth|fifth|last|next|previous)\s+exercise\b/i.test(normalized)) {
+    return true;
+  }
+  if (/\bexercise(?:s)?\b/i.test(normalized)) {
+    return true;
+  }
+  const tokens = splitTokens(normalized);
+  return tokens.some(
+    (token) => token.length > 3 && token.endsWith("s") && !token.endsWith("ss")
+  );
+}
+
 function stableStringify(value) {
   if (Array.isArray(value)) {
     return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
@@ -185,18 +212,59 @@ export function isLegExerciseByMetadata(exercise) {
 
 export function parseCoachEditIntent(userMessage) {
   const text = String(userMessage ?? "").trim();
-  if (!text) return { isEditRequest: false, kind: null, addCount: null };
+  if (!text) {
+    return {
+      isEditRequest: false,
+      kind: null,
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    };
+  }
 
   const isEditRequest = WORKOUT_EDIT_REQUEST_REGEX.test(text);
   const addMatch = text.match(ADD_COUNT_REGEX);
   const addCount = addMatch ? parsePositiveInt(addMatch[1]) : null;
+  const addNamedMatch = text.match(ADD_NAMED_EXERCISE_REGEX);
+  const addExerciseName = addNamedMatch
+    ? normalizeNamedExerciseIntent(addNamedMatch[2])
+    : null;
   const includesLegKeywords = LEG_EDIT_KEYWORD_REGEX.test(text);
+  const swapMatch = text.match(SWAP_EDIT_REGEX);
+  const fromExerciseName = swapMatch?.[1] ? String(swapMatch[1]).trim() : null;
+  const toExerciseName = swapMatch?.[2] ? String(swapMatch[2]).trim() : null;
 
   if (isEditRequest && addCount && includesLegKeywords) {
     return {
       isEditRequest: true,
       kind: "add_legs_exercises",
       addCount,
+      fromExerciseName: null,
+      toExerciseName: null,
+    };
+  }
+  if (isEditRequest && addCount && addExerciseName) {
+    return {
+      isEditRequest: true,
+      kind: "add_named_exercises",
+      addCount,
+      fromExerciseName: null,
+      toExerciseName: addExerciseName,
+    };
+  }
+  if (
+    isEditRequest &&
+    fromExerciseName &&
+    toExerciseName &&
+    !isAmbiguousSwapReference(fromExerciseName) &&
+    !isAmbiguousSwapReference(toExerciseName)
+  ) {
+    return {
+      isEditRequest: true,
+      kind: "swap_exercise",
+      addCount: null,
+      fromExerciseName,
+      toExerciseName,
     };
   }
 
@@ -204,6 +272,8 @@ export function parseCoachEditIntent(userMessage) {
     isEditRequest,
     kind: isEditRequest ? "generic_edit" : null,
     addCount: null,
+    fromExerciseName: null,
+    toExerciseName: null,
   };
 }
 

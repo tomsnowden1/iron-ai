@@ -29,6 +29,33 @@ const WORKOUT_TOKEN_HINTS = {
   push: ["push", "chest", "tricep", "triceps", "shoulder", "shoulders"],
   pull: ["pull", "back", "lat", "lats", "bicep", "biceps", "rear delt", "rear delts"],
 };
+const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan|day)\b/i;
+const PUSH_INTENT_TARGET_TOKENS = [
+  "chest",
+  "pector",
+  "shoulder",
+  "deltoid",
+  "delt",
+  "tricep",
+  "triceps",
+];
+const PUSH_REQUIRED_CATEGORIES = [
+  {
+    key: "chest_press",
+    muscleTokens: ["chest", "pector"],
+    movementTokens: ["bench", "incline", "chest press", "press"],
+  },
+  {
+    key: "shoulder_press",
+    muscleTokens: ["shoulder", "deltoid", "delt"],
+    movementTokens: ["overhead", "military", "shoulder press"],
+  },
+  {
+    key: "triceps_accessory",
+    muscleTokens: ["tricep", "triceps"],
+    movementTokens: ["pushdown", "skullcrusher", "dip", "extension"],
+  },
+];
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -66,34 +93,146 @@ function getExercisePrimaryMuscles(exercise) {
   return legacy ? [legacy] : [];
 }
 
+function getExerciseSearchSpaces(exercise) {
+  const name = String(exercise?.name ?? "");
+  const aliases = Array.isArray(exercise?.aliases) ? exercise.aliases : [];
+  const primary = getExercisePrimaryMuscles(exercise);
+  const secondary = Array.isArray(exercise?.secondaryMuscles) ? exercise.secondaryMuscles : [];
+  const tags = Array.isArray(exercise?.tags) ? exercise.tags : [];
+  const legacyMuscle = String(exercise?.muscle_group ?? "").trim();
+  const metadataValues = [...primary, ...secondary, ...tags];
+  if (legacyMuscle) metadataValues.push(legacyMuscle);
+
+  const metadataSearchSpace = metadataValues
+    .map((value) => normalizeSearchText(value))
+    .filter(Boolean)
+    .join(" ");
+  const nameSearchSpace = [name, ...aliases]
+    .map((value) => normalizeSearchText(value))
+    .filter(Boolean)
+    .join(" ");
+
+  return {
+    metadataSearchSpace,
+    nameSearchSpace,
+    hasMetadata: Boolean(metadataSearchSpace),
+  };
+}
+
+function matchesToken(searchSpace, token) {
+  const normalizedToken = normalizeSearchText(token);
+  if (!searchSpace || !normalizedToken) return false;
+  return searchSpace.includes(normalizedToken);
+}
+
+function matchesAnyToken(searchSpace, tokens) {
+  if (!searchSpace || !Array.isArray(tokens) || tokens.length === 0) return false;
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (matchesToken(searchSpace, tokens[i])) return true;
+  }
+  return false;
+}
+
+function metadataFirstMatch(searchSpaces, tokens) {
+  if (matchesAnyToken(searchSpaces.metadataSearchSpace, tokens)) return true;
+  if (!searchSpaces.hasMetadata) {
+    return matchesAnyToken(searchSpaces.nameSearchSpace, tokens);
+  }
+  return false;
+}
+
+function matchesPushCategory(searchSpaces, category) {
+  if (!category) return false;
+  const muscleMatch = metadataFirstMatch(searchSpaces, category.muscleTokens);
+  if (!muscleMatch) return false;
+  return matchesAnyToken(searchSpaces.nameSearchSpace, category.movementTokens);
+}
+
+function resolveWorkoutIntent(userMessage) {
+  const text = String(userMessage ?? "");
+  if (!WORKOUT_REQUEST_REGEX.test(text)) return null;
+  if (/\bpush\b/i.test(text)) return "push";
+  return null;
+}
+
 function resolveIntentKeywords(userMessage) {
   const normalized = normalizeSearchText(userMessage);
-  const keywords = new Set(tokenize(userMessage));
-  Object.values(WORKOUT_TOKEN_HINTS).forEach((tokens) => {
-    tokens.forEach((token) => {
-      if (normalized.includes(token)) keywords.add(token);
+  const tokenSet = new Set(tokenize(userMessage));
+  const keywords = new Set(tokenSet);
+  Object.entries(WORKOUT_TOKEN_HINTS).forEach(([group, tokens]) => {
+    const hasGroupMatch = tokens.some((token) => {
+      const normalizedToken = normalizeSearchText(token);
+      if (!normalizedToken) return false;
+      if (normalizedToken.includes(" ")) {
+        return normalized.includes(normalizedToken);
+      }
+      return tokenSet.has(normalizedToken);
     });
+    if (!hasGroupMatch) return;
+    keywords.add(group);
+    tokens.forEach((token) => keywords.add(normalizeSearchText(token)));
   });
   return keywords;
 }
 
-function scoreCandidateExercise(exercise, intentKeywords) {
+function scoreCandidateExercise(exercise, intentKeywords, intent = null, searchSpaces = null) {
+  const resolvedSearchSpaces = searchSpaces ?? getExerciseSearchSpaces(exercise);
   const name = String(exercise?.name ?? "");
-  const aliases = Array.isArray(exercise?.aliases) ? exercise.aliases : [];
-  const primary = getExercisePrimaryMuscles(exercise);
-  const searchSpace = [name, ...aliases, ...primary]
-    .map((value) => normalizeSearchText(value))
-    .filter(Boolean)
-    .join(" ");
-  if (!searchSpace) return 0;
+  if (!resolvedSearchSpaces.metadataSearchSpace && !resolvedSearchSpaces.nameSearchSpace) return 0;
 
   let score = 0;
   intentKeywords.forEach((keyword) => {
-    if (searchSpace.includes(keyword)) score += 1;
+    if (!keyword) return;
+    if (matchesToken(resolvedSearchSpaces.metadataSearchSpace, keyword)) {
+      score += 2;
+      return;
+    }
+    // Name matching is a fallback only when metadata is missing.
+    if (!resolvedSearchSpaces.hasMetadata && matchesToken(resolvedSearchSpaces.nameSearchSpace, keyword)) {
+      score += 1;
+    }
   });
+
+  if (intent === "push") {
+    if (metadataFirstMatch(resolvedSearchSpaces, PUSH_INTENT_TARGET_TOKENS)) {
+      score += 2;
+    }
+    PUSH_REQUIRED_CATEGORIES.forEach((category) => {
+      if (matchesPushCategory(resolvedSearchSpaces, category)) score += 3;
+    });
+  }
+
   if (score === 0) score = 0.1;
   if (name) score += 0.05;
   return score;
+}
+
+function ensurePushCoverage(ranked, maxCandidates) {
+  const list = Array.isArray(ranked) ? ranked : [];
+  if (!list.length) return [];
+
+  const selected = [];
+  const seen = new Set();
+  const pushEntry = (entry) => {
+    if (!entry) return;
+    const exerciseId = Number.parseInt(entry?.exercise?.id, 10);
+    if (!Number.isFinite(exerciseId) || exerciseId <= 0) return;
+    if (seen.has(exerciseId)) return;
+    seen.add(exerciseId);
+    selected.push(entry);
+  };
+
+  for (let i = 0; i < PUSH_REQUIRED_CATEGORIES.length && selected.length < maxCandidates; i += 1) {
+    const category = PUSH_REQUIRED_CATEGORIES[i];
+    const match = list.find((entry) => matchesPushCategory(entry.searchSpaces, category));
+    pushEntry(match);
+  }
+
+  for (let i = 0; i < list.length && selected.length < maxCandidates; i += 1) {
+    pushEntry(list[i]);
+  }
+
+  return selected;
 }
 
 function buildEquipmentPayload(availableEquipment) {
@@ -337,14 +476,34 @@ export async function getCoachExerciseCandidates({
     ? await getAvailableExercises(activeGymId)
     : await getAllExercises();
   const intentKeywords = resolveIntentKeywords(userMessage);
+  const workoutIntent = resolveWorkoutIntent(userMessage);
 
-  const ranked = [...pool]
+  const rankedPool = [...pool]
     .map((exercise) => ({
       exercise,
-      score: scoreCandidateExercise(exercise, intentKeywords),
+      searchSpaces: getExerciseSearchSpaces(exercise),
     }))
-    .sort((a, b) => b.score - a.score || String(a.exercise?.name ?? "").localeCompare(String(b.exercise?.name ?? "")))
-    .slice(0, safeMax)
+    .map((entry) => ({
+      ...entry,
+      score: scoreCandidateExercise(
+        entry.exercise,
+        intentKeywords,
+        workoutIntent,
+        entry.searchSpaces
+      ),
+    }))
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        String(a.exercise?.name ?? "").localeCompare(String(b.exercise?.name ?? ""))
+    );
+
+  const ranked =
+    workoutIntent === "push"
+      ? ensurePushCoverage(rankedPool, safeMax)
+      : rankedPool.slice(0, safeMax);
+
+  return ranked
     .map(({ exercise }) => ({
       exerciseId: exercise.id,
       name: exercise.name ?? "Unknown Exercise",
@@ -352,8 +511,6 @@ export async function getCoachExerciseCandidates({
       equipment: Array.isArray(exercise.equipment) ? exercise.equipment : [],
       primaryMuscles: getExercisePrimaryMuscles(exercise),
     }));
-
-  return ranked;
 }
 
 export async function getCoachRequestContext({ activeGymId } = {}) {

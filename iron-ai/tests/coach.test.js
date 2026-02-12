@@ -181,6 +181,104 @@ describe.sequential("coach platform", () => {
     ).toBe(true);
   });
 
+  it("prioritizes push workout candidates by metadata instead of name substring matches", async () => {
+    await db.table("exercises").clear();
+    const now = Date.now();
+    await db.table("exercises").bulkAdd([
+      {
+        name: "Barbell Bench Press",
+        slug: "barbell-bench-press-test",
+        default_sets: 3,
+        default_reps: 8,
+        muscle_group: "chest",
+        is_custom: false,
+        status: "extended",
+        aliases: ["bench press"],
+        primaryMuscles: ["chest"],
+        secondaryMuscles: ["triceps", "shoulders"],
+        equipment: ["barbell", "bench"],
+        requiredEquipmentIds: ["barbell", "bench"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "bench-press-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Overhead Press",
+        slug: "overhead-press-test",
+        default_sets: 3,
+        default_reps: 8,
+        muscle_group: "shoulders",
+        is_custom: false,
+        status: "extended",
+        aliases: ["military press"],
+        primaryMuscles: ["shoulders"],
+        secondaryMuscles: ["triceps"],
+        equipment: ["barbell"],
+        requiredEquipmentIds: ["barbell"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "overhead-press-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Triceps Pushdown",
+        slug: "triceps-pushdown-test",
+        default_sets: 3,
+        default_reps: 12,
+        muscle_group: "triceps",
+        is_custom: false,
+        status: "extended",
+        aliases: ["cable pushdown"],
+        primaryMuscles: ["triceps"],
+        secondaryMuscles: [],
+        equipment: ["cable_machine"],
+        requiredEquipmentIds: ["cable_machine"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "triceps-pushdown-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Single Leg Push-off",
+        slug: "single-leg-push-off-test",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: ["push off drill"],
+        primaryMuscles: ["quads"],
+        secondaryMuscles: ["glutes"],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "single-leg-push-off-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const candidates = await getCoachExerciseCandidates({
+      userMessage: "Need a push workout",
+      maxCandidates: 3,
+    });
+    const candidateNames = candidates.map((entry) => String(entry?.name ?? ""));
+
+    expect(candidateNames).toEqual(
+      expect.arrayContaining([
+        "Barbell Bench Press",
+        "Overhead Press",
+        "Triceps Pushdown",
+      ])
+    );
+    expect(candidateNames.some((name) => /single leg push-off/i.test(name))).toBe(false);
+  });
+
   it("normalizes gym names for matching", () => {
     expect(normalizeGymName("Condo")).toBe(normalizeGymName(" condo  "));
   });

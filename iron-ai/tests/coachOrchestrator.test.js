@@ -117,6 +117,7 @@ describe("coach orchestrator", () => {
       exerciseCandidates: [{ exerciseId: 1, name: "Goblet Squat" }],
     });
     expect(SYSTEM_PROMPT).toMatch(/contextEnabled is false/i);
+    expect(SYSTEM_PROMPT).toMatch(/push workout, include at least one chest press/i);
     const contextMessage = messages.find((entry) =>
       entry.content.startsWith("Context availability (authoritative JSON):")
     );
@@ -128,23 +129,12 @@ describe("coach orchestrator", () => {
     expect(candidateMessage?.content).toContain('"exerciseId":1');
   });
 
-  it("retries once with repair prompt when workout output is invalid", async () => {
+  it("skips workout repair pass and uses deterministic fallback when workout output is invalid", async () => {
     mocks.streamChatCompletion.mockResolvedValue({
       content: `\`\`\`json
 {"name":"Leg Day","exercises":[]}
 \`\`\``,
       toolCalls: [],
-    });
-    mocks.createChatCompletion.mockResolvedValue({
-      choices: [
-        {
-          message: {
-            content: `\`\`\`json
-{"contractVersion":"coach_action_v1","assistantText":"Leg day is ready.","actionDraft":{"kind":"create_workout","confidence":0.9,"risk":"low","title":"Leg Day","summary":"Leg workout","payload":{"name":"Leg Day","exercises":[{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]},{"exerciseId":3,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":1,"sets":[{"reps":12},{"reps":12},{"reps":12}]},{"exerciseId":2,"sets":[{"reps":10},{"reps":10},{"reps":10}]}]}}}
-\`\`\``,
-          },
-        },
-      ],
     });
 
     const result = await runCoachTurn({
@@ -166,10 +156,7 @@ describe("coach orchestrator", () => {
       memorySummary: null,
     });
 
-    expect(mocks.createChatCompletion).toHaveBeenCalledTimes(1);
-    const repairMessages = mocks.createChatCompletion.mock.calls[0]?.[0]?.messages ?? [];
-    const repairPrompt = repairMessages[repairMessages.length - 1]?.content ?? "";
-    expect(repairPrompt).toMatch(/candidate/i);
+    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
     expect(result.responseValidation.status).toBe("repaired");
     expect(result.actionDraft?.payload?.exercises?.length).toBeGreaterThan(0);
   });
@@ -335,5 +322,511 @@ describe("coach orchestrator", () => {
     expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
     expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([4, 5]);
     expect(result.debug?.editResolution?.status).toBe("applied");
+  });
+
+  it("applies add-named edits via deterministic fallback when model ops are missing", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 21, name: "Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 22, name: "Incline Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 24, name: "Plyo Push-up", primaryMuscles: ["chest"] },
+      { exerciseId: 23, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 21, name: "Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 22, name: "Incline Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 24, name: "Plyo Push-up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 10 },
+      { id: 23, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add 2 pushup exercises",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "bodyweight",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.slice(0, 2)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([21, 22]);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+    expect(result.debug?.stamp).toMatchObject({
+      model: "gpt-4o-mini",
+      provider: "openai",
+      route: "openai-direct",
+      requestType: "edit",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 4,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+  });
+
+  it("applies add-named fallback for add-in phrasing with runtime-shaped response", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 21, name: "Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 22, name: "Incline Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 23, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 21, name: "Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 22, name: "Incline Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 23, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Leg Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Leg Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add in 2 pushup exercise",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "bodyweight",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.slice(0, 2)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([21, 22]);
+    expect(result.debug?.stamp).toMatchObject({
+      requestType: "edit",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 4,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+  });
+
+  it("fails safely for broad add-edit targets that are not specific exercise names", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 21, name: "Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 22, name: "Incline Push Up", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 21, name: "Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 22, name: "Incline Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add 2 push exercises",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "bodyweight",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/exact exercise name/);
+  });
+
+  it("applies swap edit requests to the current draft when model ops are missing", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Pull Up", primaryMuscles: ["back"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change back squat to pull up",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "pull-up bar",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises).toHaveLength(2);
+    expect(updatedExercises[0]?.exerciseId).toBe(11);
+    expect(updatedExercises[1]).toEqual(currentDraft.payload.exercises[1]);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+    expect(result.assistant).toBe("Updated your workout.");
+  });
+
+  it("treats same-exercise swap edits as a safe no-op", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "No change needed.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change back squat to back squat",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+    expect(String(result.assistant ?? "").toLowerCase()).not.toMatch(/couldn'?t safely apply/);
+  });
+
+  it("rejects unknown swap targets safely without mutating the draft", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change back squat to superman pogo deadlift",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/more specific/);
+  });
+
+  it("asks for clarification when swap target matches multiple known exercises", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Pull Up", primaryMuscles: ["back"] },
+      { exerciseId: 13, name: "Assisted Pull Up", primaryMuscles: ["back"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+      { id: 13, name: "Assisted Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 10 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change back squat to pull up",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "pull-up bar",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/specify the exact exercise name/);
+    expect(result.assistant).toContain("Pull Up");
+    expect(result.assistant).toContain("Assisted Pull Up");
+  });
+  it("falls back to deterministic workout draft without a second repair request", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 11, name: "Barbell Bench Press" },
+      { exerciseId: 12, name: "Overhead Press" },
+      { exerciseId: 13, name: "Triceps Pushdown" },
+      { exerciseId: 14, name: "Incline Dumbbell Press" },
+      { exerciseId: 15, name: "Cable Fly" },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 11, name: "Barbell Bench Press", default_sets: 4, default_reps: 8 },
+      { id: 12, name: "Overhead Press", default_sets: 3, default_reps: 8 },
+      { id: 13, name: "Triceps Pushdown", default_sets: 3, default_reps: 12 },
+      { id: 14, name: "Incline Dumbbell Press", default_sets: 3, default_reps: 10 },
+      { id: 15, name: "Cable Fly", default_sets: 3, default_reps: 12 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Here's a push workout.",
+      toolCalls: [],
+    });
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "push workout",
+      responseMode: "workout",
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.responseValidation?.status).toBe("repaired");
+    expect(result.actionDraft).toMatchObject({
+      kind: "create_workout",
+      title: "Push Workout",
+    });
+    expect(result.actionDraft?.payload?.exercises?.length).toBe(5);
+    expect(
+      result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)
+    ).toEqual([11, 12, 13, 14, 15]);
+    expect(result.assistant).toMatch(/formatting issue/i);
+    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
   });
 });

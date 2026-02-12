@@ -138,6 +138,71 @@ describe("coach response validation", () => {
     ).toBe("workout");
   });
 
+  it("parses add named exercise intent for pushup phrasing", () => {
+    const editIntent = parseCoachEditIntent("add 2 pushup exercises");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "add_named_exercises",
+      addCount: 2,
+      fromExerciseName: null,
+      toExerciseName: "pushup",
+    });
+  });
+
+  it("parses add named exercise intent for add-in pushup phrasing", () => {
+    const editIntent = parseCoachEditIntent("add in 2 pushup exercise");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "add_named_exercises",
+      addCount: 2,
+      fromExerciseName: null,
+      toExerciseName: "pushup",
+    });
+  });
+
+  it("parses swap edit intent for change X to Y phrasing", () => {
+    const editIntent = parseCoachEditIntent("change back squat to pull up");
+    expect(editIntent).toMatchObject({
+      isEditRequest: true,
+      kind: "swap_exercise",
+      fromExerciseName: "back squat",
+      toExerciseName: "pull up",
+    });
+  });
+
+  it("parses swap intent for swap X for Y phrasing", () => {
+    const editIntent = parseCoachEditIntent("swap pull up for back squat");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "swap_exercise",
+      addCount: null,
+      fromExerciseName: "pull up",
+      toExerciseName: "back squat",
+    });
+  });
+
+  it("fails safely for ordinal references like first exercise", () => {
+    const editIntent = parseCoachEditIntent("change the first exercise to pull up");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "generic_edit",
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    });
+  });
+
+  it("fails safely for ambiguous plural replace phrasing", () => {
+    const editIntent = parseCoachEditIntent("replace squats with pull ups");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "generic_edit",
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    });
+  });
+
   it("fails add-legs edit validation when the model replaces the existing list", () => {
     const currentDraft = {
       kind: "create_workout",

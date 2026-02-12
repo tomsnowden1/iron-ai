@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  COACH_ACTION_PREVIEW_MIN_EXERCISES,
+  COACH_ACTION_SHOW_ALL_THRESHOLD,
+  applyUniformSetCountToExercises,
+  buildCoachDebugTracePanel,
+  buildCoachDebugTraceStamp,
+  buildSwapConfirmationMessage,
+  buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
+  getVisibleCoachActionExerciseCount,
   getSuggestedActionPrimaryLabel,
+  shouldShowSuggestedActionSaveTemplate,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -11,6 +20,7 @@ import {
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
+  shouldShowCoachActionShowAllToggle,
   shouldForceWorkoutResponseMode,
 } from "../src/features/coach/coachViewUiModel";
 
@@ -122,8 +132,199 @@ Use this template payload.`);
     ).toBe(false);
   });
 
+  it("shows exercise preview list by default and enables show-all only for larger drafts", () => {
+    expect(shouldShowCoachActionShowAllToggle(COACH_ACTION_SHOW_ALL_THRESHOLD)).toBe(
+      false
+    );
+    expect(shouldShowCoachActionShowAllToggle(9)).toBe(true);
+    expect(getVisibleCoachActionExerciseCount(9, false)).toBe(
+      COACH_ACTION_PREVIEW_MIN_EXERCISES
+    );
+    expect(getVisibleCoachActionExerciseCount(9, true)).toBe(9);
+    expect(getVisibleCoachActionExerciseCount(6, false)).toBe(6);
+  });
+
   it("uses an open-workout primary CTA for workout suggested actions", () => {
     expect(getSuggestedActionPrimaryLabel("create_workout")).toBe("Open workout");
     expect(getSuggestedActionPrimaryLabel("create_template")).toBe("Apply");
+  });
+
+  it("shows save-as-template action only for workout drafts", () => {
+    expect(shouldShowSuggestedActionSaveTemplate("create_workout")).toBe(true);
+    expect(shouldShowSuggestedActionSaveTemplate("create_template")).toBe(false);
+    expect(shouldShowSuggestedActionSaveTemplate("create_gym")).toBe(false);
+  });
+
+  it("builds chat workout summaries directly from the draft sets/reps", () => {
+    const summary = buildCoachWorkoutSummaryFromDraft(
+      {
+        title: "Push Workout",
+        payload: {
+          name: "Push Workout",
+          exercises: [
+            {
+              exerciseId: 10,
+              sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }],
+            },
+            {
+              exerciseId: 11,
+              sets: [{ reps: 12 }, { reps: 12 }, { reps: 12 }],
+            },
+          ],
+        },
+      },
+      new Map([
+        [10, "Barbell Bench Press"],
+        [11, "Triceps Pushdown"],
+      ])
+    );
+
+    expect(summary).toContain("Barbell Bench Press - 3 sets x 8 reps");
+    expect(summary).toContain("Triceps Pushdown - 3 sets x 12 reps");
+  });
+
+  it("applies a uniform set count to every exercise while preserving set shape", () => {
+    const updated = applyUniformSetCountToExercises(
+      [
+        {
+          exerciseId: 1,
+          sets: [{ reps: 8, weight: 135 }, { reps: 8, weight: 145 }],
+        },
+        {
+          exerciseId: 2,
+          sets: [{ reps: 12 }],
+        },
+      ],
+      4
+    );
+
+    expect(updated[0].sets).toHaveLength(4);
+    expect(updated[0].sets[2]).toEqual({ reps: 8, weight: 135 });
+    expect(updated[1].sets).toHaveLength(4);
+    expect(updated[1].sets[3]).toEqual({ reps: 12 });
+  });
+
+  it("builds a short swap confirmation message when one exercise is replaced", () => {
+    const message = buildSwapConfirmationMessage({
+      previousDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      nextDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 11, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      exerciseNameById: new Map([
+        [10, "Back Squat"],
+        [11, "Pull Up"],
+      ]),
+    });
+
+    expect(message).toBe("Replaced Back Squat -> Pull Up");
+  });
+
+  it("does not return swap confirmation for no-op swaps", () => {
+    const message = buildSwapConfirmationMessage({
+      previousDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      nextDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      exerciseNameById: new Map([[10, "Back Squat"]]),
+    });
+
+    expect(message).toBeNull();
+  });
+
+  it("builds a safe debug trace stamp with normalized fields only", () => {
+    const stamp = buildCoachDebugTraceStamp({
+      stamp: {
+        commitSha: "abc123",
+        model: "gpt-4o-mini",
+        provider: "openai",
+        route: "/api/coach",
+        requestType: "edit",
+        hasOps: true,
+        opsCount: 2,
+        applyReason: "APPLIED",
+      },
+      hasDraft: true,
+      draftCount: 7,
+      applied: true,
+    });
+
+    expect(stamp).toEqual({
+      commitSha: "abc123",
+      model: "gpt-4o-mini",
+      provider: "openai",
+      route: "/api/coach",
+      requestType: "edit",
+      hasOps: true,
+      opsCount: 2,
+      hasDraft: true,
+      draftCount: 7,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+  });
+
+  it("projects the debug trace panel to the required safe shape", () => {
+    const trace = buildCoachDebugTracePanel({
+      commitSha: "abc123",
+      model: "gpt-4o-mini",
+      provider: "openai",
+      route: "/api/coach",
+      requestType: "edit",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 8,
+      applied: false,
+      applyReason: "OPS_EMPTY",
+    });
+
+    expect(Object.keys(trace)).toEqual([
+      "commitSha",
+      "requestType",
+      "model",
+      "route",
+      "hasOps",
+      "opsCount",
+      "hasDraft",
+      "draftCount",
+      "applied",
+      "applyReason",
+    ]);
+    expect(trace).toEqual({
+      commitSha: "abc123",
+      requestType: "edit",
+      model: "gpt-4o-mini",
+      route: "/api/coach",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 8,
+      applied: false,
+      applyReason: "OPS_EMPTY",
+    });
   });
 });

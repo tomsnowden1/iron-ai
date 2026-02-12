@@ -39,6 +39,10 @@ const DEFAULT_APPENDED_SET_COUNT = 3;
 const DEFAULT_APPENDED_REPS = 10;
 const SAFE_EDIT_FAILURE_MESSAGE =
   "I couldn't safely apply that edit while keeping your current workout intact. Please try again with a more specific change request.";
+const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
+  "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
+const DEBUG_COMMIT_SHA =
+  import.meta.env?.VITE_COMMIT_SHA ?? import.meta.env?.VITE_GIT_SHA ?? "unknown";
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -58,6 +62,7 @@ export const SYSTEM_PROMPT = [
   "If contextEnabled is false, do NOT claim you can see equipment. Still provide a generic workout and include a brief nudge to enable context or choose a gym for personalization.",
   "If the user asks to adjust an existing workout draft, return an updated create_workout actionDraft even when contextEnabled is false.",
   "When asked to produce a workout, include at least 5 exercises with sets and reps.",
+  "When the user asks for a push workout, include at least one chest press, one shoulder press, and one triceps accessory.",
   "If context is missing, continue with safe generic assumptions when possible; only ask one clarifying question when the request is impossible without missing details.",
   "Do not invent user data. Use tools when you need workout history, templates, or exercises.",
   "Respect workout space equipment constraints. Never recommend exercises that require unavailable equipment.",
@@ -179,6 +184,16 @@ export function buildSystemMessages({
         content: `Requested edit intent: append exactly ${editIntent.addCount} NEW legs exercises to the END. Preserve all existing exercises, sets, reps, and order unchanged.`,
       });
     }
+    if (
+      editIntent.kind === "add_named_exercises" &&
+      editIntent.addCount &&
+      editIntent.toExerciseName
+    ) {
+      messages.push({
+        role: "system",
+        content: `Requested edit intent: append exactly ${editIntent.addCount} NEW exercises matching "${editIntent.toExerciseName}" to the END. Preserve all existing exercises, sets, reps, and order unchanged.`,
+      });
+    }
     if (Array.isArray(legEditCandidates) && legEditCandidates.length > 0) {
       messages.push({
         role: "system",
@@ -190,7 +205,7 @@ export function buildSystemMessages({
     messages.push({
       role: "system",
       content:
-        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format: { mode: \"EDIT\", ops: [{ op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] }] }. Prefer EDIT mode whenever currentDraft is provided.",
+        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format supports ops like { op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] } or { op: \"add_exercises\", count: <number>, placement: \"end\", exerciseName: <name> }, and { op: \"swap_exercise\", fromExerciseId?: <id>, fromExerciseName?: <name>, toExerciseId?: <id>, toExerciseName?: <name> }. Prefer EDIT mode whenever currentDraft is provided.",
     });
   }
   return messages;
@@ -371,6 +386,80 @@ function isLegMuscleGroup(value) {
   );
 }
 
+function resolveFallbackWorkoutTitle(userMessage) {
+  const normalized = normalizeText(userMessage);
+  if (normalized.includes("push")) return "Push Workout";
+  if (normalized.includes("pull")) return "Pull Workout";
+  if (
+    normalized.includes("leg") ||
+    normalized.includes("quad") ||
+    normalized.includes("hamstring") ||
+    normalized.includes("glute") ||
+    normalized.includes("calf")
+  ) {
+    return "Leg Workout";
+  }
+  return "Workout Plan";
+}
+
+function clampSetCount(value) {
+  const parsed = toPositiveInt(value);
+  if (parsed == null) return DEFAULT_APPENDED_SET_COUNT;
+  return Math.max(1, Math.min(parsed, 5));
+}
+
+function buildDeterministicWorkoutFallbackDraft({
+  userMessage,
+  selectedGym,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
+  const list = Array.isArray(exerciseCandidates) ? exerciseCandidates : [];
+  if (!list.length) return null;
+
+  const maxExercises = Math.min(8, list.length);
+  const targetExercises = list.length >= 5 ? 5 : maxExercises;
+  if (targetExercises <= 0) return null;
+
+  const seen = new Set();
+  const chosen = [];
+  for (let i = 0; i < list.length && chosen.length < targetExercises; i += 1) {
+    const candidate = list[i];
+    const exerciseId = toPositiveInt(candidate?.exerciseId ?? candidate?.id);
+    if (exerciseId == null || seen.has(exerciseId)) continue;
+    const exerciseMeta = exerciseCatalogById.get(exerciseId) ?? candidate ?? null;
+    const defaultSetCount = clampSetCount(exerciseMeta?.default_sets);
+    const defaultReps = toPositiveInt(exerciseMeta?.default_reps) ?? DEFAULT_APPENDED_REPS;
+    const exercise = {
+      exerciseId,
+      sets: Array.from({ length: defaultSetCount }, () => ({ reps: defaultReps })),
+    };
+    const name = String(exerciseMeta?.name ?? candidate?.name ?? "").trim();
+    if (name) exercise.name = name;
+    chosen.push(exercise);
+    seen.add(exerciseId);
+  }
+
+  if (!chosen.length) return null;
+
+  const title = resolveFallbackWorkoutTitle(userMessage);
+  const payload = {
+    name: title,
+    exercises: chosen,
+  };
+  const gymId = toPositiveInt(selectedGym?.id);
+  if (gymId != null) payload.gymId = gymId;
+
+  return {
+    kind: "create_workout",
+    confidence: 0.5,
+    risk: "low",
+    title,
+    summary: "Recovered workout draft from available exercise candidates.",
+    payload,
+  };
+}
+
 function buildLegEditCandidates({
   exerciseCandidates,
   exerciseCatalogById,
@@ -417,20 +506,249 @@ function normalizeEditContract(editDraft) {
   return { mode, ops };
 }
 
-function applyAddLegExercisesOperation({
+function splitNormalizedTokens(value) {
+  const normalized = normalizeText(value);
+  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+}
+
+function scoreNameMatch(queryText, candidateText) {
+  const query = normalizeText(queryText);
+  const candidate = normalizeText(candidateText);
+  if (!query || !candidate) return 0;
+  if (query === candidate) return 1;
+  const queryCompact = query.replace(/\s+/g, "");
+  const candidateCompact = candidate.replace(/\s+/g, "");
+  if (
+    queryCompact &&
+    candidateCompact &&
+    (candidateCompact.includes(queryCompact) || queryCompact.includes(candidateCompact))
+  ) {
+    return 0.9;
+  }
+  if (candidate.includes(query) || query.includes(candidate)) return 0.86;
+  const queryTokens = splitNormalizedTokens(query);
+  const candidateTokens = new Set(splitNormalizedTokens(candidate));
+  if (!queryTokens.length || !candidateTokens.size) return 0;
+  let overlap = 0;
+  queryTokens.forEach((token) => {
+    if (candidateTokens.has(token)) overlap += 1;
+  });
+  if (overlap === 0) return 0;
+  return overlap / queryTokens.length;
+}
+
+function toDraftExerciseName(entry, exerciseCatalogById) {
+  if (!entry || typeof entry !== "object") return "";
+  const explicitName = String(entry.name ?? entry.exerciseName ?? "").trim();
+  if (explicitName) return explicitName;
+  const exerciseId = toPositiveInt(entry.exerciseId);
+  if (exerciseId == null) return "";
+  return String(exerciseCatalogById.get(exerciseId)?.name ?? "").trim();
+}
+
+function resolveExerciseIdByName({
+  query,
+  options,
+  minimumScore = 0.6,
+  ambiguousMargin = 0.05,
+}) {
+  const name = String(query ?? "").trim();
+  if (!name) {
+    return { valid: false, exerciseId: null, error: "Exercise name is required." };
+  }
+  const scored = (Array.isArray(options) ? options : [])
+    .map((entry) => {
+      const exerciseId = toPositiveInt(entry?.exerciseId);
+      if (exerciseId == null) return null;
+      const label = String(entry?.name ?? "").trim();
+      const score = scoreNameMatch(name, label);
+      return { exerciseId, name: label, score };
+    })
+    .filter(Boolean);
+  const scoredById = new Map();
+  scored.forEach((entry) => {
+    const existing = scoredById.get(entry.exerciseId);
+    if (!existing || entry.score > existing.score) {
+      scoredById.set(entry.exerciseId, entry);
+    }
+  });
+  const ranked = Array.from(scoredById.values()).sort((a, b) => b.score - a.score);
+  if (!ranked.length || ranked[0].score < minimumScore) {
+    return {
+      valid: false,
+      exerciseId: null,
+      error: `Could not match "${name}" to a known exercise.`,
+    };
+  }
+  const top = ranked[0];
+  const next = ranked[1];
+  const queryNormalized = normalizeText(name);
+  const hasMultipleStrongMatches = ranked.filter((entry) => {
+    const labelNormalized = normalizeText(entry.name);
+    if (!queryNormalized || !labelNormalized.includes(queryNormalized)) return false;
+    return entry.score >= 0.8;
+  });
+  if (
+    (next && top.exerciseId !== next.exerciseId && top.score - next.score <= ambiguousMargin) ||
+    hasMultipleStrongMatches.length > 1
+  ) {
+    const topOptions = hasMultipleStrongMatches.length
+      ? hasMultipleStrongMatches
+      : ranked.slice(0, 3);
+    const optionNames = Array.from(
+      new Set(
+        topOptions
+          .map((entry) => String(entry.name ?? "").trim())
+          .filter(Boolean)
+          .slice(0, 3)
+      )
+    );
+    const optionSuffix = optionNames.length ? `: ${optionNames.join(", ")}.` : ".";
+    return {
+      valid: false,
+      exerciseId: null,
+      error: `Exercise name "${name}" matches multiple options${optionSuffix} Please specify the exact exercise name.`,
+    };
+  }
+  return { valid: true, exerciseId: top.exerciseId, error: null };
+}
+
+function buildEditFailureAssistantMessage(error) {
+  const baseMessage = SAFE_EDIT_FAILURE_MESSAGE;
+  const detail = String(error ?? "").trim();
+  if (!detail) return baseMessage;
+  if (/matches multiple options|please specify the exact exercise name/i.test(detail)) {
+    return `${baseMessage} ${detail}`;
+  }
+  return baseMessage;
+}
+
+function isGenericAddExerciseQuery(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return true;
+  return (
+    normalized === "push" ||
+    normalized === "pull" ||
+    normalized === "leg" ||
+    normalized === "legs" ||
+    normalized === "exercise" ||
+    normalized === "exercises"
+  );
+}
+
+function buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById }) {
+  const fromCandidates = Array.isArray(exerciseCandidates)
+    ? exerciseCandidates
+        .map((entry) => ({
+          exerciseId: toPositiveInt(entry?.exerciseId ?? entry?.id),
+          name: String(entry?.name ?? "").trim(),
+        }))
+        .filter((entry) => entry.exerciseId != null && entry.name)
+    : [];
+  const fromCatalog = Array.from(exerciseCatalogById.entries())
+    .map(([exerciseId, exercise]) => ({
+      exerciseId: toPositiveInt(exerciseId),
+      name: String(exercise?.name ?? "").trim(),
+    }))
+    .filter((entry) => entry.exerciseId != null && entry.name);
+  const mergedById = new Map();
+  [...fromCandidates, ...fromCatalog].forEach((entry) => {
+    if (!mergedById.has(entry.exerciseId)) mergedById.set(entry.exerciseId, entry);
+  });
+  return Array.from(mergedById.values());
+}
+
+function resolveNamedExerciseIds({
+  query,
+  count,
+  existingIds,
+  selectedSet,
+  pool,
+}) {
+  const target = String(query ?? "").trim();
+  if (!target) {
+    return { valid: false, ids: [], error: "Exercise name is required for add_exercises." };
+  }
+  if (isGenericAddExerciseQuery(target)) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Exercise name "${target}" is too broad. Please specify the exact exercise name.`,
+    };
+  }
+  const queryCompact = normalizeText(target).replace(/\s+/g, "");
+  const ranked = (Array.isArray(pool) ? pool : [])
+    .map((entry) => {
+      const exerciseId = toPositiveInt(entry?.exerciseId);
+      if (exerciseId == null) return null;
+      if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) return null;
+      const label = String(entry?.name ?? "").trim();
+      if (!label) return null;
+      return {
+        exerciseId,
+        name: label,
+        score: scoreNameMatch(target, label),
+        compact: normalizeText(label).replace(/\s+/g, ""),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  if (!ranked.length || ranked[0].score < 0.6) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Could not match "${target}" to a known exercise.`,
+    };
+  }
+  const strongMatches = ranked.filter((entry) => {
+    if (entry.score < 0.8) return false;
+    if (!queryCompact) return false;
+    return entry.compact.includes(queryCompact) || queryCompact.includes(entry.compact);
+  });
+  if (count === 1 && strongMatches.length > 1) {
+    const optionNames = strongMatches.slice(0, 3).map((entry) => entry.name);
+    return {
+      valid: false,
+      ids: [],
+      error: `Exercise name "${target}" matches multiple options: ${optionNames.join(
+        ", "
+      )}. Please specify the exact exercise name.`,
+    };
+  }
+  const preferred = strongMatches.length ? strongMatches : ranked;
+  const resolvedIds = preferred.slice(0, count).map((entry) => entry.exerciseId);
+  if (resolvedIds.length < count) {
+    for (let i = 0; i < ranked.length && resolvedIds.length < count; i += 1) {
+      const exerciseId = ranked[i].exerciseId;
+      if (resolvedIds.includes(exerciseId)) continue;
+      resolvedIds.push(exerciseId);
+    }
+  }
+  if (resolvedIds.length !== count) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Unable to append ${count} exercises matching "${target}".`,
+    };
+  }
+  return { valid: true, ids: resolvedIds, error: null };
+}
+
+function applyAddExercisesOperation({
   draft,
   operation,
   legCandidates,
+  exerciseCandidates,
   exerciseCatalogById,
 }) {
   const count = toPositiveInt(operation?.count);
   if (count == null) {
     return { valid: false, error: "add_exercises operation requires a positive count." };
   }
-  const muscleGroup = operation?.muscleGroup ?? operation?.muscle_group ?? "legs";
-  if (!isLegMuscleGroup(muscleGroup)) {
-    return { valid: false, error: "add_exercises currently supports legs-only edits." };
-  }
+  const muscleGroup = operation?.muscleGroup ?? operation?.muscle_group ?? null;
+  const exerciseName = String(
+    operation?.exerciseName ?? operation?.toExerciseName ?? operation?.exerciseQuery ?? ""
+  ).trim();
   const placement = String(operation?.placement ?? "end").trim().toLowerCase();
   if (placement !== "end") {
     return { valid: false, error: "add_exercises only supports placement=end." };
@@ -440,9 +758,19 @@ function applyAddLegExercisesOperation({
   const existingIds = new Set(
     exercises.map((entry) => toPositiveInt(entry?.exerciseId)).filter((id) => id != null)
   );
+  const isLegAdd = isLegMuscleGroup(muscleGroup);
+  if (!isLegAdd && !exerciseName) {
+    return {
+      valid: false,
+      error: "add_exercises requires a legs muscleGroup or a specific exercise name.",
+    };
+  }
   const legCandidateMap = new Map(
-    legCandidates.map((entry) => [toPositiveInt(entry?.exerciseId), entry]).filter(([id]) => id != null)
+    legCandidates
+      .map((entry) => [toPositiveInt(entry?.exerciseId), entry])
+      .filter(([id]) => id != null)
   );
+  const optionPool = buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById });
 
   const selected = [];
   const selectedSet = new Set();
@@ -451,23 +779,43 @@ function applyAddLegExercisesOperation({
     const exerciseId = toPositiveInt(rawId);
     if (exerciseId == null) return;
     if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) return;
-    if (!legCandidateMap.has(exerciseId)) return;
+    if (isLegAdd && !legCandidateMap.has(exerciseId)) return;
+    if (!isLegAdd && !optionPool.some((entry) => entry.exerciseId === exerciseId)) return;
     selectedSet.add(exerciseId);
     selected.push(exerciseId);
   });
 
-  for (let i = 0; i < legCandidates.length && selected.length < count; i += 1) {
-    const exerciseId = toPositiveInt(legCandidates[i]?.exerciseId);
-    if (exerciseId == null) continue;
-    if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) continue;
-    selectedSet.add(exerciseId);
-    selected.push(exerciseId);
+  if (isLegAdd) {
+    for (let i = 0; i < legCandidates.length && selected.length < count; i += 1) {
+      const exerciseId = toPositiveInt(legCandidates[i]?.exerciseId);
+      if (exerciseId == null) continue;
+      if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) continue;
+      selectedSet.add(exerciseId);
+      selected.push(exerciseId);
+    }
+  } else if (selected.length < count) {
+    const resolved = resolveNamedExerciseIds({
+      query: exerciseName,
+      count: count - selected.length,
+      existingIds,
+      selectedSet,
+      pool: optionPool,
+    });
+    if (!resolved.valid) {
+      return { valid: false, error: resolved.error };
+    }
+    resolved.ids.forEach((exerciseId) => {
+      selectedSet.add(exerciseId);
+      selected.push(exerciseId);
+    });
   }
 
   if (selected.length !== count) {
     return {
       valid: false,
-      error: `Unable to append ${count} new leg exercises with the available candidate list.`,
+      error: isLegAdd
+        ? `Unable to append ${count} new leg exercises with the available candidate list.`
+        : `Unable to append ${count} exercises with the available candidate list.`,
     };
   }
 
@@ -487,11 +835,94 @@ function applyAddLegExercisesOperation({
   return { valid: true, error: null };
 }
 
+function applySwapExerciseOperation({
+  draft,
+  operation,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
+  const exercises = Array.isArray(draft?.payload?.exercises) ? draft.payload.exercises : [];
+  if (!exercises.length) {
+    return { valid: false, error: "Current workout draft has no exercises to swap." };
+  }
+
+  const draftOptions = exercises
+    .map((entry) => ({
+      exerciseId: toPositiveInt(entry?.exerciseId),
+      name: toDraftExerciseName(entry, exerciseCatalogById),
+    }))
+    .filter((entry) => entry.exerciseId != null && entry.name);
+  const catalogOptions = Array.from(exerciseCatalogById.entries()).map(([id, exercise]) => ({
+    exerciseId: id,
+    name: String(exercise?.name ?? "").trim(),
+  }));
+  const candidateOptions = Array.isArray(exerciseCandidates)
+    ? exerciseCandidates
+        .map((entry) => ({
+          exerciseId: toPositiveInt(entry?.exerciseId ?? entry?.id),
+          name: String(entry?.name ?? "").trim(),
+        }))
+        .filter((entry) => entry.exerciseId != null && entry.name)
+    : [];
+  const swapPool = [...candidateOptions, ...catalogOptions];
+
+  let fromExerciseId = toPositiveInt(operation?.fromExerciseId);
+  if (fromExerciseId == null) {
+    const fromName = operation?.fromExerciseName ?? operation?.fromExercise ?? null;
+    const resolved = resolveExerciseIdByName({
+      query: fromName,
+      options: draftOptions,
+    });
+    if (!resolved.valid) return { valid: false, error: resolved.error };
+    fromExerciseId = resolved.exerciseId;
+  }
+
+  let toExerciseId = toPositiveInt(operation?.toExerciseId);
+  if (toExerciseId == null) {
+    const toName = operation?.toExerciseName ?? operation?.toExercise ?? null;
+    const resolved = resolveExerciseIdByName({
+      query: toName,
+      options: swapPool,
+    });
+    if (!resolved.valid) return { valid: false, error: resolved.error };
+    toExerciseId = resolved.exerciseId;
+  }
+
+  if (fromExerciseId == null || toExerciseId == null) {
+    return { valid: false, error: "swap_exercise requires valid source and target exercises." };
+  }
+  if (fromExerciseId === toExerciseId) {
+    return { valid: true, error: null };
+  }
+
+  let replaced = 0;
+  const nextExercises = exercises.map((entry) => {
+    const exerciseId = toPositiveInt(entry?.exerciseId);
+    if (exerciseId !== fromExerciseId) return entry;
+    replaced += 1;
+    const nextEntry = { ...entry, exerciseId: toExerciseId };
+    const toMetaName = String(exerciseCatalogById.get(toExerciseId)?.name ?? "").trim();
+    if (toMetaName) {
+      nextEntry.name = toMetaName;
+    }
+    return nextEntry;
+  });
+  if (!replaced) {
+    return {
+      valid: false,
+      error: `Exercise ${fromExerciseId} is not present in the current workout draft.`,
+    };
+  }
+  draft.payload.exercises = nextExercises;
+  return { valid: true, error: null };
+}
+
 function applyEditOperations({
   currentDraft,
   editOps,
   legCandidates,
   exerciseCatalogById,
+  exerciseCandidates,
 }) {
   if (!currentDraft || typeof currentDraft !== "object") {
     return { valid: false, error: "Current workout draft is missing." };
@@ -505,10 +936,21 @@ function applyEditOperations({
     const operation = editOps[i];
     const opName = String(operation?.op ?? "").trim();
     if (opName === "add_exercises") {
-      const result = applyAddLegExercisesOperation({
+      const result = applyAddExercisesOperation({
         draft: nextDraft,
         operation,
         legCandidates,
+        exerciseCandidates,
+        exerciseCatalogById,
+      });
+      if (!result.valid) return result;
+      continue;
+    }
+    if (opName === "swap_exercise" || opName === "replace_exercise") {
+      const result = applySwapExerciseOperation({
+        draft: nextDraft,
+        operation,
+        exerciseCandidates,
         exerciseCatalogById,
       });
       if (!result.valid) return result;
@@ -521,6 +963,19 @@ function applyEditOperations({
   }
 
   return { valid: true, error: null, draft: nextDraft };
+}
+
+function serializeDraftExercises(draft) {
+  const exercises = Array.isArray(draft?.payload?.exercises) ? draft.payload.exercises : [];
+  try {
+    return JSON.stringify(exercises);
+  } catch {
+    return "";
+  }
+}
+
+function didDraftExercisesChange(previousDraft, nextDraft) {
+  return serializeDraftExercises(previousDraft) !== serializeDraftExercises(nextDraft);
 }
 
 export async function runCoachTurn({
@@ -561,6 +1016,19 @@ export async function runCoachTurn({
   const proposals = [];
   const debug = {
     model: DEFAULT_COACH_MODEL,
+    stamp: {
+      commitSha: DEBUG_COMMIT_SHA,
+      model: DEFAULT_COACH_MODEL,
+      provider: "openai",
+      route: useServerKey ? "/api/coach" : "openai-direct",
+      requestType: "draft",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: false,
+      draftCount: 0,
+      applied: false,
+      applyReason: "UNKNOWN_SHAPE",
+    },
     toolCalls: [],
     contextMeta: null,
     contextContract: null,
@@ -662,8 +1130,15 @@ export async function runCoachTurn({
     currentDraft.payload.exercises.length > 0;
   const editIntent = hasEditableWorkoutDraft
     ? parseCoachEditIntent(userMessage)
-    : { isEditRequest: false, kind: null, addCount: null };
+    : {
+        isEditRequest: false,
+        kind: null,
+        addCount: null,
+        fromExerciseName: null,
+        toExerciseName: null,
+      };
   const editModeEnabled = Boolean(hasEditableWorkoutDraft && editIntent.isEditRequest);
+  debug.stamp.requestType = editModeEnabled ? "edit" : "draft";
   const legEditCandidates = editModeEnabled
     ? buildLegEditCandidates({ exerciseCandidates, exerciseCatalogById })
     : [];
@@ -953,63 +1428,81 @@ export async function runCoachTurn({
     });
     responseValidation.mode = firstValidation.mode;
     if (!firstValidation.valid) {
-      const repairPrompt = buildRepairPrompt({
-        validationMode: firstValidation.mode,
-        contextEnabled: contextState.contextEnabled,
-        invalidContent: finalAssistant,
-        selectedGym: contextState.selectedGym,
-        candidateExercises: exerciseCandidates,
-      });
-      let repairedAssistant = "";
-      try {
-        const repairCompletion = await createChatCompletion({
-          apiKey,
-          useServerKey,
-          model: DEFAULT_COACH_MODEL,
-          messages: [
-            ...conversation,
-            { role: "assistant", content: finalAssistant },
-            { role: "user", content: repairPrompt },
-          ],
-          temperature: COACH_TEMPERATURE,
-        });
-        repairedAssistant = extractCompletionContent(repairCompletion);
-      } catch {
-        repairedAssistant = "";
-      }
-
-      const repairedValidation = validateCoachResponse({
-        userMessage,
-        assistantText: repairedAssistant,
-        responseMode,
-        contextEnabled: contextState.contextEnabled,
-        allowedCandidateIds,
-        libraryIdSet,
-      });
-      if (repairedValidation.valid) {
-        finalAssistant = repairedAssistant;
-        responseValidation = {
-          status: "repaired",
-          mode: repairedValidation.mode,
-          repaired: true,
-          error: null,
-        };
-      } else {
+      if (firstValidation.mode === "workout") {
         finalAssistant = getValidationFailureMessage(firstValidation.mode);
         responseValidation = {
           status: "failed",
-          mode: repairedValidation.mode,
-          repaired: true,
-          error: repairedValidation.error ?? firstValidation.error ?? "Validation failed.",
+          mode: firstValidation.mode,
+          repaired: false,
+          error: firstValidation.error ?? "Validation failed.",
         };
-      }
-      if (history.length && history[history.length - 1]?.role === "assistant") {
-        history = [
-          ...history.slice(0, -1),
-          { ...history[history.length - 1], content: finalAssistant },
-        ];
+        if (history.length && history[history.length - 1]?.role === "assistant") {
+          history = [
+            ...history.slice(0, -1),
+            { ...history[history.length - 1], content: finalAssistant },
+          ];
+        } else {
+          history = [...history, { role: "assistant", content: finalAssistant }];
+        }
       } else {
-        history = [...history, { role: "assistant", content: finalAssistant }];
+        const repairPrompt = buildRepairPrompt({
+          validationMode: firstValidation.mode,
+          contextEnabled: contextState.contextEnabled,
+          invalidContent: finalAssistant,
+          selectedGym: contextState.selectedGym,
+          candidateExercises: exerciseCandidates,
+        });
+        let repairedAssistant = "";
+        try {
+          const repairCompletion = await createChatCompletion({
+            apiKey,
+            useServerKey,
+            model: DEFAULT_COACH_MODEL,
+            messages: [
+              ...conversation,
+              { role: "assistant", content: finalAssistant },
+              { role: "user", content: repairPrompt },
+            ],
+            temperature: COACH_TEMPERATURE,
+          });
+          repairedAssistant = extractCompletionContent(repairCompletion);
+        } catch {
+          repairedAssistant = "";
+        }
+
+        const repairedValidation = validateCoachResponse({
+          userMessage,
+          assistantText: repairedAssistant,
+          responseMode,
+          contextEnabled: contextState.contextEnabled,
+          allowedCandidateIds,
+          libraryIdSet,
+        });
+        if (repairedValidation.valid) {
+          finalAssistant = repairedAssistant;
+          responseValidation = {
+            status: "repaired",
+            mode: repairedValidation.mode,
+            repaired: true,
+            error: null,
+          };
+        } else {
+          finalAssistant = getValidationFailureMessage(firstValidation.mode);
+          responseValidation = {
+            status: "failed",
+            mode: repairedValidation.mode,
+            repaired: true,
+            error: repairedValidation.error ?? firstValidation.error ?? "Validation failed.",
+          };
+        }
+        if (history.length && history[history.length - 1]?.role === "assistant") {
+          history = [
+            ...history.slice(0, -1),
+            { ...history[history.length - 1], content: finalAssistant },
+          ];
+        } else {
+          history = [...history, { role: "assistant", content: finalAssistant }];
+        }
       }
     }
   } else {
@@ -1028,14 +1521,41 @@ export async function runCoachTurn({
   const actionContractVersion = parsedActionDraft.contractVersion ?? null;
   const actionParseErrors = parsedActionDraft.parseErrors ?? null;
 
+  if (
+    !editModeEnabled &&
+    !actionDraft &&
+    responseValidation.mode === "workout" &&
+    responseValidation.status === "failed"
+  ) {
+    const fallbackDraft = buildDeterministicWorkoutFallbackDraft({
+      userMessage,
+      selectedGym: contextState?.selectedGym ?? null,
+      exerciseCandidates,
+      exerciseCatalogById,
+    });
+    if (fallbackDraft) {
+      actionDraft = fallbackDraft;
+      assistantText = FALLBACK_WORKOUT_ASSISTANT_MESSAGE;
+      responseValidation = {
+        status: "repaired",
+        mode: "workout",
+        repaired: true,
+        error: null,
+      };
+    }
+  }
+
   if (editModeEnabled) {
     const editContract = normalizeEditContract(parsedEditDraft);
     let resolvedDraft = null;
     let editResolutionError = null;
-
+    const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
+    debug.stamp.hasOps = opFromModel.length > 0;
+    debug.stamp.opsCount = opFromModel.length;
+    debug.stamp.applyReason = opFromModel.length ? "UNKNOWN_SHAPE" : "OPS_EMPTY";
+    let fallbackOps = [];
     if (editIntent.kind === "add_legs_exercises") {
-      const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
-      const fallbackOps = [
+      fallbackOps = [
         {
           op: "add_exercises",
           count: editIntent.addCount,
@@ -1043,24 +1563,72 @@ export async function runCoachTurn({
           placement: "end",
         },
       ];
-      const opsToApply = opFromModel.length ? opFromModel : fallbackOps;
-      const editResult = applyEditOperations({
+    } else if (
+      editIntent.kind === "add_named_exercises" &&
+      editIntent.addCount &&
+      editIntent.toExerciseName
+    ) {
+      fallbackOps = [
+        {
+          op: "add_exercises",
+          count: editIntent.addCount,
+          placement: "end",
+          exerciseName: editIntent.toExerciseName,
+        },
+      ];
+    } else if (
+      editIntent.kind === "swap_exercise" &&
+      editIntent.fromExerciseName &&
+      editIntent.toExerciseName
+    ) {
+      fallbackOps = [
+        {
+          op: "swap_exercise",
+          fromExerciseName: editIntent.fromExerciseName,
+          toExerciseName: editIntent.toExerciseName,
+        },
+      ];
+    }
+    let opsToApply = opFromModel.length ? opFromModel : fallbackOps;
+    if (opsToApply.length) {
+      let editResult = applyEditOperations({
         currentDraft,
         editOps: opsToApply,
         legCandidates: legEditCandidates,
         exerciseCatalogById,
+        exerciseCandidates,
       });
+      if (!editResult.valid && fallbackOps.length && opFromModel.length) {
+        editResult = applyEditOperations({
+          currentDraft,
+          editOps: fallbackOps,
+          legCandidates: legEditCandidates,
+          exerciseCatalogById,
+          exerciseCandidates,
+        });
+        opsToApply = fallbackOps;
+      }
       if (editResult.valid) {
         resolvedDraft = editResult.draft;
+        debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+        debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
       } else {
         editResolutionError = editResult.error;
+        debug.stamp.applied = false;
+        debug.stamp.applyReason = "APPLY_SKIPPED";
       }
     } else if (editContract.mode === "CREATE" && actionDraft) {
       resolvedDraft = actionDraft;
+      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
     } else if (actionDraft) {
       resolvedDraft = actionDraft;
+      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
     } else {
       editResolutionError = "No editable workout draft update was returned.";
+      debug.stamp.applied = false;
+      debug.stamp.applyReason = "NO_DRAFT_RETURNED";
     }
 
     if (resolvedDraft && editIntent.kind === "add_legs_exercises") {
@@ -1080,16 +1648,19 @@ export async function runCoachTurn({
       actionDraft = resolvedDraft;
       debug.editResolution = {
         status: "applied",
-        mode: editContract.mode || "AUTO",
+        mode: opsToApply.length ? "EDIT" : editContract.mode || "AUTO",
       };
     } else {
       actionDraft = currentDraft ?? null;
-      assistantText = SAFE_EDIT_FAILURE_MESSAGE;
+      assistantText = buildEditFailureAssistantMessage(editResolutionError);
       debug.editResolution = {
         status: "failed",
         mode: editContract.mode || "AUTO",
         error: editResolutionError ?? "Unable to apply edit.",
       };
+      if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
+        debug.stamp.applyReason = "APPLY_SKIPPED";
+      }
     }
   }
 
@@ -1104,6 +1675,18 @@ export async function runCoachTurn({
   debug.actionParseErrors = actionParseErrors;
   debug.actionDraft = actionDraft;
   debug.responseValidation = responseValidation;
+  debug.stamp.hasDraft = Boolean(actionDraft);
+  debug.stamp.draftCount = Array.isArray(actionDraft?.payload?.exercises)
+    ? actionDraft.payload.exercises.length
+    : 0;
+  if (!editModeEnabled) {
+    debug.stamp.applied = Boolean(actionDraft);
+    if (!debug.stamp.applied) {
+      debug.stamp.applyReason = "NO_DRAFT_RETURNED";
+    } else if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
+      debug.stamp.applyReason = "APPLIED";
+    }
+  }
 
   return {
     assistant: assistantText,

@@ -47,6 +47,18 @@ function resolveUniqueName(name, existingNames) {
   return { name: candidate, changed: true };
 }
 
+function normalizeDraftForSchema(draft) {
+  if (!draft || typeof draft !== "object" || Array.isArray(draft)) return draft;
+  const normalized = { ...draft };
+  if (normalized.payload && typeof normalized.payload === "object" && !Array.isArray(normalized.payload)) {
+    const payload = { ...normalized.payload };
+    if (payload.gymId === null) delete payload.gymId;
+    if (payload.spaceId === null) delete payload.spaceId;
+    normalized.payload = payload;
+  }
+  return normalized;
+}
+
 function normalizeSetEntry(set) {
   if (!set || typeof set !== "object") return {};
   const reps = parseNumber(set.reps);
@@ -105,11 +117,36 @@ async function resolveRestDefaults() {
 
 function formatZodIssues(error) {
   if (!error?.issues?.length) return ["Invalid action draft."];
-  return error.issues.map((issue) => issue.message);
+  const formatted = [];
+  const pushIssue = (issue) => {
+    if (!issue || typeof issue !== "object") return;
+    if (issue.code === "invalid_union" && Array.isArray(issue.errors)) {
+      issue.errors.forEach((nestedGroup) => {
+        if (!Array.isArray(nestedGroup)) return;
+        nestedGroup.forEach((nestedIssue) => pushIssue(nestedIssue));
+      });
+      return;
+    }
+    const pathParts = Array.isArray(issue.path) ? issue.path : [];
+    const path = pathParts.reduce((acc, part) => {
+      if (typeof part === "number") {
+        return `${acc}[${part}]`;
+      }
+      if (!acc) return String(part);
+      return `${acc}.${String(part)}`;
+    }, "");
+    if (!path) {
+      formatted.push(issue.message);
+      return;
+    }
+    formatted.push(`${path}: ${issue.message}`);
+  };
+  error.issues.forEach((issue) => pushIssue(issue));
+  return Array.from(new Set(formatted.filter(Boolean)));
 }
 
 export async function validateActionDraft(draft, options = {}) {
-  const parsed = ActionDraftSchema.safeParse(draft);
+  const parsed = ActionDraftSchema.safeParse(normalizeDraftForSchema(draft));
   if (!parsed.success) {
     return { valid: false, errors: formatZodIssues(parsed.error), warnings: [] };
   }

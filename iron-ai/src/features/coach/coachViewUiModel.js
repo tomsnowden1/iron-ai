@@ -24,8 +24,213 @@ export function getCoachWorkoutActionConfig({ debugEnabled }) {
   };
 }
 
+export const COACH_ACTION_PREVIEW_MIN_EXERCISES = 5;
+export const COACH_ACTION_SHOW_ALL_THRESHOLD = 8;
+
+export function shouldShowCoachActionShowAllToggle(totalExercises) {
+  const total = Number(totalExercises);
+  if (!Number.isFinite(total) || total <= 0) return false;
+  return total > COACH_ACTION_SHOW_ALL_THRESHOLD;
+}
+
+export function getVisibleCoachActionExerciseCount(totalExercises, expanded) {
+  const total = Number(totalExercises);
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  if (expanded) return total;
+  if (total <= COACH_ACTION_SHOW_ALL_THRESHOLD) return total;
+  return Math.min(total, COACH_ACTION_PREVIEW_MIN_EXERCISES);
+}
+
 export function getSuggestedActionPrimaryLabel(actionDraftKind) {
   return actionDraftKind === "create_workout" ? "Open workout" : "Apply";
+}
+
+export function shouldShowSuggestedActionSaveTemplate(actionDraftKind) {
+  return actionDraftKind === "create_workout";
+}
+
+function toNonNegativeInt(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function normalizeRequestType(value) {
+  return value === "edit" ? "edit" : "draft";
+}
+
+function normalizeApplyReason(value) {
+  const safe = String(value ?? "").trim().toUpperCase();
+  if (!safe) return "UNKNOWN_SHAPE";
+  return safe;
+}
+
+export function buildCoachDebugTraceStamp({
+  stamp,
+  commitSha,
+  hasDraft,
+  draftCount,
+  applied,
+  applyReason,
+} = {}) {
+  const source = stamp && typeof stamp === "object" ? stamp : {};
+  return {
+    commitSha: String(commitSha ?? source.commitSha ?? "unknown"),
+    model: String(source.model ?? "unknown"),
+    provider: String(source.provider ?? "openai"),
+    route: String(source.route ?? "unknown"),
+    requestType: normalizeRequestType(source.requestType),
+    hasOps: Boolean(source.hasOps),
+    opsCount: toNonNegativeInt(source.opsCount),
+    hasDraft: typeof hasDraft === "boolean" ? hasDraft : Boolean(source.hasDraft),
+    draftCount: toNonNegativeInt(draftCount ?? source.draftCount),
+    applied: typeof applied === "boolean" ? applied : Boolean(source.applied),
+    applyReason: normalizeApplyReason(applyReason ?? source.applyReason),
+  };
+}
+
+export function buildCoachDebugTracePanel(stamp) {
+  const trace = buildCoachDebugTraceStamp({ stamp });
+  return {
+    commitSha: trace.commitSha,
+    requestType: trace.requestType,
+    model: trace.model,
+    route: trace.route,
+    hasOps: trace.hasOps,
+    opsCount: trace.opsCount,
+    hasDraft: trace.hasDraft,
+    draftCount: trace.draftCount,
+    applied: trace.applied,
+    applyReason: trace.applyReason,
+  };
+}
+
+function toFinitePositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function resolveExerciseLabel(entry, index, exerciseNameById) {
+  const byDraft = String(entry?.name ?? entry?.exerciseName ?? "").trim();
+  if (byDraft) return byDraft;
+  const mapped = exerciseNameById?.get?.(entry?.exerciseId);
+  const byLookup = String(mapped ?? "").trim();
+  if (byLookup) return byLookup;
+  return `Exercise ${index + 1}`;
+}
+
+function resolveSetMeta(entry) {
+  const setCount = Array.isArray(entry?.sets)
+    ? entry.sets.length
+    : toFinitePositiveInt(entry?.sets);
+  if (!setCount) return "sets as needed";
+  const repsValue = Array.isArray(entry?.sets)
+    ? entry.sets
+        .map((set) => Number(set?.reps))
+        .find((value) => Number.isFinite(value))
+    : toFinitePositiveInt(entry?.reps);
+  if (Number.isFinite(repsValue) && repsValue > 0) {
+    return `${setCount} sets x ${repsValue} reps`;
+  }
+  return `${setCount} sets`;
+}
+
+export function buildCoachWorkoutSummaryFromDraft(draft, exerciseNameById = new Map()) {
+  const payload = draft?.payload ?? {};
+  const exercises = Array.isArray(payload.exercises) ? payload.exercises : [];
+  if (!exercises.length) {
+    return "Workout ready.";
+  }
+  const title =
+    String(payload.name ?? payload.title ?? draft?.title ?? "Workout").trim() ||
+    "Workout";
+  const lines = exercises.map((entry, index) => {
+    const name = resolveExerciseLabel(entry, index, exerciseNameById);
+    const meta = resolveSetMeta(entry);
+    return `${index + 1}. ${name} - ${meta}`;
+  });
+  return [`${title}`, ...lines].join("\n");
+}
+
+export function applyUniformSetCountToExercises(exercises, setCount) {
+  const list = Array.isArray(exercises) ? exercises : [];
+  const targetSetCount = toFinitePositiveInt(setCount);
+  if (!targetSetCount) return list;
+  return list.map((entry) => {
+    const currentSets = Array.isArray(entry?.sets)
+      ? entry.sets.filter((set) => set && typeof set === "object")
+      : [];
+    const templateSet = currentSets[0] ? { ...currentSets[0] } : {};
+    const nextSets = Array.from({ length: targetSetCount }, (_, index) => {
+      if (currentSets[index]) return { ...currentSets[index] };
+      return { ...templateSet };
+    });
+    return {
+      ...entry,
+      sets: nextSets,
+    };
+  });
+}
+
+function toPositiveExerciseId(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function resolveExerciseName(entry, exerciseId, exerciseNameById) {
+  const fromEntry = String(entry?.name ?? entry?.exerciseName ?? "").trim();
+  if (fromEntry) return fromEntry;
+  const fromLookup = String(exerciseNameById?.get?.(exerciseId) ?? "").trim();
+  if (fromLookup) return fromLookup;
+  return `Exercise ${exerciseId}`;
+}
+
+export function buildSwapConfirmationMessage({
+  previousDraft,
+  nextDraft,
+  exerciseNameById = new Map(),
+}) {
+  const prevExercises = Array.isArray(previousDraft?.payload?.exercises)
+    ? previousDraft.payload.exercises
+    : [];
+  const nextExercises = Array.isArray(nextDraft?.payload?.exercises)
+    ? nextDraft.payload.exercises
+    : [];
+  if (!prevExercises.length || prevExercises.length !== nextExercises.length) {
+    return null;
+  }
+
+  let fromExerciseId = null;
+  let toExerciseId = null;
+  let fromEntry = null;
+  let toEntry = null;
+
+  for (let i = 0; i < prevExercises.length; i += 1) {
+    const prevId = toPositiveExerciseId(prevExercises[i]?.exerciseId);
+    const nextId = toPositiveExerciseId(nextExercises[i]?.exerciseId);
+    if (prevId == null || nextId == null) return null;
+    if (prevId === nextId) continue;
+    if (fromExerciseId == null) {
+      fromExerciseId = prevId;
+      toExerciseId = nextId;
+      fromEntry = prevExercises[i];
+      toEntry = nextExercises[i];
+      continue;
+    }
+    if (fromExerciseId !== prevId || toExerciseId !== nextId) {
+      return null;
+    }
+  }
+
+  if (fromExerciseId == null || toExerciseId == null || fromExerciseId === toExerciseId) {
+    return null;
+  }
+
+  const fromName = resolveExerciseName(fromEntry, fromExerciseId, exerciseNameById);
+  const toName = resolveExerciseName(toEntry, toExerciseId, exerciseNameById);
+  return `Replaced ${fromName} -> ${toName}`;
 }
 
 const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
