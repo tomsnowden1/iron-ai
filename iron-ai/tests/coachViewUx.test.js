@@ -4,6 +4,7 @@ import {
   COACH_ACTION_PREVIEW_MIN_EXERCISES,
   COACH_ACTION_SHOW_ALL_THRESHOLD,
   applyUniformSetCountToExercises,
+  buildSwapConfirmationMessage,
   buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
   getVisibleCoachActionExerciseCount,
@@ -199,5 +200,56 @@ Use this template payload.`);
     expect(updated[0].sets[2]).toEqual({ reps: 8, weight: 135 });
     expect(updated[1].sets).toHaveLength(4);
     expect(updated[1].sets[3]).toEqual({ reps: 12 });
+  });
+
+  it("builds a short swap confirmation message when one exercise is replaced", () => {
+    const message = buildSwapConfirmationMessage({
+      previousDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      nextDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 11, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      exerciseNameById: new Map([
+        [10, "Back Squat"],
+        [11, "Pull Up"],
+      ]),
+    });
+
+    expect(message).toBe("Replaced Back Squat -> Pull Up");
+  });
+
+  it("does not return swap confirmation for no-op swaps", () => {
+    const message = buildSwapConfirmationMessage({
+      previousDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      nextDraft: {
+        payload: {
+          exercises: [
+            { exerciseId: 10, sets: [{ reps: 5 }] },
+            { exerciseId: 12, sets: [{ reps: 8 }] },
+          ],
+        },
+      },
+      exerciseNameById: new Map([[10, "Back Squat"]]),
+    });
+
+    expect(message).toBeNull();
   });
 });

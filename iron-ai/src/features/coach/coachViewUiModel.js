@@ -117,6 +117,66 @@ export function applyUniformSetCountToExercises(exercises, setCount) {
   });
 }
 
+function toPositiveExerciseId(value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function resolveExerciseName(entry, exerciseId, exerciseNameById) {
+  const fromEntry = String(entry?.name ?? entry?.exerciseName ?? "").trim();
+  if (fromEntry) return fromEntry;
+  const fromLookup = String(exerciseNameById?.get?.(exerciseId) ?? "").trim();
+  if (fromLookup) return fromLookup;
+  return `Exercise ${exerciseId}`;
+}
+
+export function buildSwapConfirmationMessage({
+  previousDraft,
+  nextDraft,
+  exerciseNameById = new Map(),
+}) {
+  const prevExercises = Array.isArray(previousDraft?.payload?.exercises)
+    ? previousDraft.payload.exercises
+    : [];
+  const nextExercises = Array.isArray(nextDraft?.payload?.exercises)
+    ? nextDraft.payload.exercises
+    : [];
+  if (!prevExercises.length || prevExercises.length !== nextExercises.length) {
+    return null;
+  }
+
+  let fromExerciseId = null;
+  let toExerciseId = null;
+  let fromEntry = null;
+  let toEntry = null;
+
+  for (let i = 0; i < prevExercises.length; i += 1) {
+    const prevId = toPositiveExerciseId(prevExercises[i]?.exerciseId);
+    const nextId = toPositiveExerciseId(nextExercises[i]?.exerciseId);
+    if (prevId == null || nextId == null) return null;
+    if (prevId === nextId) continue;
+    if (fromExerciseId == null) {
+      fromExerciseId = prevId;
+      toExerciseId = nextId;
+      fromEntry = prevExercises[i];
+      toEntry = nextExercises[i];
+      continue;
+    }
+    if (fromExerciseId !== prevId || toExerciseId !== nextId) {
+      return null;
+    }
+  }
+
+  if (fromExerciseId == null || toExerciseId == null || fromExerciseId === toExerciseId) {
+    return null;
+  }
+
+  const fromName = resolveExerciseName(fromEntry, fromExerciseId, exerciseNameById);
+  const toName = resolveExerciseName(toEntry, toExerciseId, exerciseNameById);
+  return `Replaced ${fromName} -> ${toName}`;
+}
+
 const JSON_CODE_BLOCK_REGEX = /```json[\s\S]*?```/gi;
 const JSON_PLUMBING_LINE_REGEX =
   /^.*(\bjson\b|fenced|code block|template format|template payload).*$\n?/gim;
