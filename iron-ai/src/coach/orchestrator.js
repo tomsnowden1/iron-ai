@@ -182,6 +182,16 @@ export function buildSystemMessages({
         content: `Requested edit intent: append exactly ${editIntent.addCount} NEW legs exercises to the END. Preserve all existing exercises, sets, reps, and order unchanged.`,
       });
     }
+    if (
+      editIntent.kind === "add_named_exercises" &&
+      editIntent.addCount &&
+      editIntent.toExerciseName
+    ) {
+      messages.push({
+        role: "system",
+        content: `Requested edit intent: append exactly ${editIntent.addCount} NEW exercises matching "${editIntent.toExerciseName}" to the END. Preserve all existing exercises, sets, reps, and order unchanged.`,
+      });
+    }
     if (Array.isArray(legEditCandidates) && legEditCandidates.length > 0) {
       messages.push({
         role: "system",
@@ -193,7 +203,7 @@ export function buildSystemMessages({
     messages.push({
       role: "system",
       content:
-        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format supports ops like { op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] } and { op: \"swap_exercise\", fromExerciseId?: <id>, fromExerciseName?: <name>, toExerciseId?: <id>, toExerciseName?: <name> }. Prefer EDIT mode whenever currentDraft is provided.",
+        "Draft editing contract: return coach_action_v1 JSON with assistantText and either (A) actionDraft for CREATE mode, or (B) editDraft for EDIT mode. EDIT mode format supports ops like { op: \"add_exercises\", count: <number>, muscleGroup: \"legs\", placement: \"end\", exerciseIds?: [<id>...] } or { op: \"add_exercises\", count: <number>, placement: \"end\", exerciseName: <name> }, and { op: \"swap_exercise\", fromExerciseId?: <id>, fromExerciseName?: <name>, toExerciseId?: <id>, toExerciseName?: <name> }. Prefer EDIT mode whenever currentDraft is provided.",
     });
   }
   return messages;
@@ -504,6 +514,15 @@ function scoreNameMatch(queryText, candidateText) {
   const candidate = normalizeText(candidateText);
   if (!query || !candidate) return 0;
   if (query === candidate) return 1;
+  const queryCompact = query.replace(/\s+/g, "");
+  const candidateCompact = candidate.replace(/\s+/g, "");
+  if (
+    queryCompact &&
+    candidateCompact &&
+    (candidateCompact.includes(queryCompact) || queryCompact.includes(candidateCompact))
+  ) {
+    return 0.9;
+  }
   if (candidate.includes(query) || query.includes(candidate)) return 0.86;
   const queryTokens = splitNormalizedTokens(query);
   const candidateTokens = new Set(splitNormalizedTokens(candidate));
@@ -602,20 +621,124 @@ function buildEditFailureAssistantMessage(error) {
   return baseMessage;
 }
 
-function applyAddLegExercisesOperation({
+function isGenericAddExerciseQuery(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return true;
+  return (
+    normalized === "push" ||
+    normalized === "pull" ||
+    normalized === "leg" ||
+    normalized === "legs" ||
+    normalized === "exercise" ||
+    normalized === "exercises"
+  );
+}
+
+function buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById }) {
+  const fromCandidates = Array.isArray(exerciseCandidates)
+    ? exerciseCandidates
+        .map((entry) => ({
+          exerciseId: toPositiveInt(entry?.exerciseId ?? entry?.id),
+          name: String(entry?.name ?? "").trim(),
+        }))
+        .filter((entry) => entry.exerciseId != null && entry.name)
+    : [];
+  const fromCatalog = Array.from(exerciseCatalogById.entries())
+    .map(([exerciseId, exercise]) => ({
+      exerciseId: toPositiveInt(exerciseId),
+      name: String(exercise?.name ?? "").trim(),
+    }))
+    .filter((entry) => entry.exerciseId != null && entry.name);
+  const mergedById = new Map();
+  [...fromCandidates, ...fromCatalog].forEach((entry) => {
+    if (!mergedById.has(entry.exerciseId)) mergedById.set(entry.exerciseId, entry);
+  });
+  return Array.from(mergedById.values());
+}
+
+function resolveNamedExerciseIds({
+  query,
+  count,
+  existingIds,
+  selectedSet,
+  pool,
+}) {
+  const target = String(query ?? "").trim();
+  if (!target) {
+    return { valid: false, ids: [], error: "Exercise name is required for add_exercises." };
+  }
+  if (isGenericAddExerciseQuery(target)) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Exercise name "${target}" is too broad. Please specify the exact exercise name.`,
+    };
+  }
+  const queryCompact = normalizeText(target).replace(/\s+/g, "");
+  const ranked = (Array.isArray(pool) ? pool : [])
+    .map((entry) => {
+      const exerciseId = toPositiveInt(entry?.exerciseId);
+      if (exerciseId == null) return null;
+      if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) return null;
+      const label = String(entry?.name ?? "").trim();
+      if (!label) return null;
+      return {
+        exerciseId,
+        name: label,
+        score: scoreNameMatch(target, label),
+        compact: normalizeText(label).replace(/\s+/g, ""),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+  if (!ranked.length || ranked[0].score < 0.6) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Could not match "${target}" to a known exercise.`,
+    };
+  }
+  const strongMatches = ranked.filter((entry) => {
+    if (entry.score < 0.8) return false;
+    if (!queryCompact) return false;
+    return entry.compact.includes(queryCompact) || queryCompact.includes(entry.compact);
+  });
+  if (strongMatches.length > count) {
+    const optionNames = strongMatches.slice(0, 3).map((entry) => entry.name);
+    return {
+      valid: false,
+      ids: [],
+      error: `Exercise name "${target}" matches multiple options: ${optionNames.join(
+        ", "
+      )}. Please specify the exact exercise name.`,
+    };
+  }
+  const resolvedIds = ranked.slice(0, count).map((entry) => entry.exerciseId);
+  if (resolvedIds.length !== count) {
+    return {
+      valid: false,
+      ids: [],
+      error: `Unable to append ${count} exercises matching "${target}".`,
+    };
+  }
+  return { valid: true, ids: resolvedIds, error: null };
+}
+
+function applyAddExercisesOperation({
   draft,
   operation,
   legCandidates,
+  exerciseCandidates,
   exerciseCatalogById,
 }) {
   const count = toPositiveInt(operation?.count);
   if (count == null) {
     return { valid: false, error: "add_exercises operation requires a positive count." };
   }
-  const muscleGroup = operation?.muscleGroup ?? operation?.muscle_group ?? "legs";
-  if (!isLegMuscleGroup(muscleGroup)) {
-    return { valid: false, error: "add_exercises currently supports legs-only edits." };
-  }
+  const muscleGroup = operation?.muscleGroup ?? operation?.muscle_group ?? null;
+  const exerciseName = String(
+    operation?.exerciseName ?? operation?.toExerciseName ?? operation?.exerciseQuery ?? ""
+  ).trim();
   const placement = String(operation?.placement ?? "end").trim().toLowerCase();
   if (placement !== "end") {
     return { valid: false, error: "add_exercises only supports placement=end." };
@@ -625,9 +748,19 @@ function applyAddLegExercisesOperation({
   const existingIds = new Set(
     exercises.map((entry) => toPositiveInt(entry?.exerciseId)).filter((id) => id != null)
   );
+  const isLegAdd = isLegMuscleGroup(muscleGroup);
+  if (!isLegAdd && !exerciseName) {
+    return {
+      valid: false,
+      error: "add_exercises requires a legs muscleGroup or a specific exercise name.",
+    };
+  }
   const legCandidateMap = new Map(
-    legCandidates.map((entry) => [toPositiveInt(entry?.exerciseId), entry]).filter(([id]) => id != null)
+    legCandidates
+      .map((entry) => [toPositiveInt(entry?.exerciseId), entry])
+      .filter(([id]) => id != null)
   );
+  const optionPool = buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById });
 
   const selected = [];
   const selectedSet = new Set();
@@ -636,23 +769,43 @@ function applyAddLegExercisesOperation({
     const exerciseId = toPositiveInt(rawId);
     if (exerciseId == null) return;
     if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) return;
-    if (!legCandidateMap.has(exerciseId)) return;
+    if (isLegAdd && !legCandidateMap.has(exerciseId)) return;
+    if (!isLegAdd && !optionPool.some((entry) => entry.exerciseId === exerciseId)) return;
     selectedSet.add(exerciseId);
     selected.push(exerciseId);
   });
 
-  for (let i = 0; i < legCandidates.length && selected.length < count; i += 1) {
-    const exerciseId = toPositiveInt(legCandidates[i]?.exerciseId);
-    if (exerciseId == null) continue;
-    if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) continue;
-    selectedSet.add(exerciseId);
-    selected.push(exerciseId);
+  if (isLegAdd) {
+    for (let i = 0; i < legCandidates.length && selected.length < count; i += 1) {
+      const exerciseId = toPositiveInt(legCandidates[i]?.exerciseId);
+      if (exerciseId == null) continue;
+      if (existingIds.has(exerciseId) || selectedSet.has(exerciseId)) continue;
+      selectedSet.add(exerciseId);
+      selected.push(exerciseId);
+    }
+  } else if (selected.length < count) {
+    const resolved = resolveNamedExerciseIds({
+      query: exerciseName,
+      count: count - selected.length,
+      existingIds,
+      selectedSet,
+      pool: optionPool,
+    });
+    if (!resolved.valid) {
+      return { valid: false, error: resolved.error };
+    }
+    resolved.ids.forEach((exerciseId) => {
+      selectedSet.add(exerciseId);
+      selected.push(exerciseId);
+    });
   }
 
   if (selected.length !== count) {
     return {
       valid: false,
-      error: `Unable to append ${count} new leg exercises with the available candidate list.`,
+      error: isLegAdd
+        ? `Unable to append ${count} new leg exercises with the available candidate list.`
+        : `Unable to append ${count} exercises with the available candidate list.`,
     };
   }
 
@@ -773,10 +926,11 @@ function applyEditOperations({
     const operation = editOps[i];
     const opName = String(operation?.op ?? "").trim();
     if (opName === "add_exercises") {
-      const result = applyAddLegExercisesOperation({
+      const result = applyAddExercisesOperation({
         draft: nextDraft,
         operation,
         legCandidates,
+        exerciseCandidates,
         exerciseCatalogById,
       });
       if (!result.valid) return result;
@@ -839,6 +993,14 @@ export async function runCoachTurn({
   const proposals = [];
   const debug = {
     model: DEFAULT_COACH_MODEL,
+    stamp: {
+      model: DEFAULT_COACH_MODEL,
+      provider: "openai",
+      route: useServerKey ? "/api/coach" : "openai-direct",
+      requestType: "draft",
+      hasOps: false,
+      opsCount: 0,
+    },
     toolCalls: [],
     contextMeta: null,
     contextContract: null,
@@ -948,6 +1110,7 @@ export async function runCoachTurn({
         toExerciseName: null,
       };
   const editModeEnabled = Boolean(hasEditableWorkoutDraft && editIntent.isEditRequest);
+  debug.stamp.requestType = editModeEnabled ? "edit" : "draft";
   const legEditCandidates = editModeEnabled
     ? buildLegEditCandidates({ exerciseCandidates, exerciseCatalogById })
     : [];
@@ -1359,6 +1522,8 @@ export async function runCoachTurn({
     let resolvedDraft = null;
     let editResolutionError = null;
     const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
+    debug.stamp.hasOps = opFromModel.length > 0;
+    debug.stamp.opsCount = opFromModel.length;
     let fallbackOps = [];
     if (editIntent.kind === "add_legs_exercises") {
       fallbackOps = [
@@ -1367,6 +1532,19 @@ export async function runCoachTurn({
           count: editIntent.addCount,
           muscleGroup: "legs",
           placement: "end",
+        },
+      ];
+    } else if (
+      editIntent.kind === "add_named_exercises" &&
+      editIntent.addCount &&
+      editIntent.toExerciseName
+    ) {
+      fallbackOps = [
+        {
+          op: "add_exercises",
+          count: editIntent.addCount,
+          placement: "end",
+          exerciseName: editIntent.toExerciseName,
         },
       ];
     } else if (

@@ -138,6 +138,17 @@ describe("coach response validation", () => {
     ).toBe("workout");
   });
 
+  it("parses add named exercise intent for pushup phrasing", () => {
+    const editIntent = parseCoachEditIntent("add 2 pushup exercises");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "add_named_exercises",
+      addCount: 2,
+      fromExerciseName: null,
+      toExerciseName: "pushup",
+    });
+  });
+
   it("parses swap edit intent for change X to Y phrasing", () => {
     const editIntent = parseCoachEditIntent("change back squat to pull up");
     expect(editIntent).toMatchObject({
