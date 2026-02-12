@@ -6,6 +6,7 @@ import {
   buildHeuristicWorkoutDraft,
   getVisibleCoachActionExerciseCount,
   getSuggestedActionPrimaryLabel,
+  shouldShowSuggestedActionSaveTemplate,
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
@@ -141,5 +142,11 @@ Use this template payload.`);
   it("uses an open-workout primary CTA for workout suggested actions", () => {
     expect(getSuggestedActionPrimaryLabel("create_workout")).toBe("Open workout");
     expect(getSuggestedActionPrimaryLabel("create_template")).toBe("Apply");
+  });
+
+  it("shows save-as-template action only for workout drafts", () => {
+    expect(shouldShowSuggestedActionSaveTemplate("create_workout")).toBe(true);
+    expect(shouldShowSuggestedActionSaveTemplate("create_template")).toBe(false);
+    expect(shouldShowSuggestedActionSaveTemplate("create_gym")).toBe(false);
   });
 });

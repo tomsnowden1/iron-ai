@@ -38,6 +38,7 @@ import {
   isTemplateIntentText,
   isInternalPromptMessage,
   getSuggestedActionPrimaryLabel,
+  shouldShowSuggestedActionSaveTemplate,
   resolveCoachErrorMessage,
   sanitizeCoachAssistantText,
   resolveCoachDisplayText,
@@ -48,6 +49,11 @@ import {
   buildTemplateDraftFromWorkoutPlan,
   resolveTemplateDraftInfo,
 } from "./templateDraft";
+import {
+  clearPersistedSuggestedAction,
+  readPersistedSuggestedAction,
+  writePersistedSuggestedAction,
+} from "./suggestedActionStorage";
 import {
   getCoachChatState,
   setCoachChatState,
@@ -367,6 +373,18 @@ export default function CoachView({
   }, []);
 
   useEffect(() => {
+    const persisted = readPersistedSuggestedAction();
+    if (!persisted?.draft) return;
+    actionDispatch({
+      type: "SET_FROM_MESSAGE",
+      payload: {
+        messageId: persisted.sourceMessageId ?? null,
+        actionDraft: persisted.draft,
+      },
+    });
+  }, []);
+
+  useEffect(() => {
     if (!chatStateLoaded) return;
     if (chatPersistTimerRef.current) {
       clearTimeout(chatPersistTimerRef.current);
@@ -654,8 +672,20 @@ export default function CoachView({
       actionPayload?.plannedDurationMins ||
       actionPayload?.frequencyHint
   );
+  const canSaveActionAsTemplate = shouldShowSuggestedActionSaveTemplate(actionDraftKind);
   const actionEditTitle = String(actionEditDraft.title ?? "");
   const canSaveActionEdit = actionEditTitle.trim().length > 0;
+
+  useEffect(() => {
+    if (!actionDraft) {
+      clearPersistedSuggestedAction();
+      return;
+    }
+    writePersistedSuggestedAction({
+      sourceMessageId: actionSourceMessageId,
+      draft: actionDraft,
+    });
+  }, [actionDraft, actionSourceMessageId]);
 
   const buildContextPreview = useCallback(async () => {
     if (!contextEnabled || !contextPreviewOpen) return;
@@ -1315,6 +1345,7 @@ export default function CoachView({
   );
 
   const handleDiscardActionDraft = useCallback(() => {
+    clearPersistedSuggestedAction();
     actionDispatch({ type: "DISCARD" });
     setActionEditMode(false);
     setActionErrors([]);
@@ -1393,6 +1424,7 @@ export default function CoachView({
           (result.kind === ActionDraftKinds.create_template && onOpenTemplate) ||
           (result.kind === ActionDraftKinds.create_gym && onNavigateToGyms);
 
+        clearPersistedSuggestedAction();
         onNotify?.(label, {
           tone: "success",
           ...(canOpen ? { actionLabel: "Open", onAction: openAction } : {}),
@@ -1418,6 +1450,80 @@ export default function CoachView({
       onOpenWorkout,
     ]
   );
+
+  const handleSaveActionAsTemplate = useCallback(async () => {
+    if (!actionDraft || actionApplying) return;
+    if (actionDraft.kind !== ActionDraftKinds.create_workout) return;
+
+    setActionApplying(true);
+    setActionErrors([]);
+    try {
+      const payload = { ...(actionDraft.payload ?? {}) };
+      const templateName =
+        String(
+          payload.name ??
+            payload.title ??
+            actionDraftTitle ??
+            actionDraft.title ??
+            "Coach Template"
+        ).trim() || "Coach Template";
+      const templateDraft = {
+        ...actionDraft,
+        kind: ActionDraftKinds.create_template,
+        title: templateName,
+        payload: {
+          ...payload,
+          name: templateName,
+          title: templateName,
+          gymId:
+            Number.isFinite(Number(payload.gymId)) &&
+            Number.parseInt(String(payload.gymId), 10) > 0
+              ? Number.parseInt(String(payload.gymId), 10)
+              : activeGymId ?? null,
+          exercises: Array.isArray(payload.exercises) ? payload.exercises : [],
+        },
+      };
+      const validation = await validateActionDraft(templateDraft, {
+        defaultGymId: activeGymId,
+      });
+      setActionWarnings(validation.warnings ?? []);
+      if (!validation.valid || !validation.normalizedDraft) {
+        setActionErrors(
+          validation.errors?.length
+            ? validation.errors
+            : ["Unable to save template from draft."]
+        );
+        return;
+      }
+      const result = await executeActionDraft(validation.normalizedDraft);
+      onNotify?.("Created template.", {
+        tone: "success",
+        ...(onOpenTemplate && result.id != null
+          ? {
+              actionLabel: "Open",
+              onAction: () => onOpenTemplate(result.id),
+            }
+          : {}),
+      });
+      if (result.id != null) {
+        onOpenTemplate?.(result.id);
+      }
+      clearPersistedSuggestedAction();
+      actionDispatch({ type: "DISCARD" });
+    } catch (err) {
+      setActionErrors([err?.message ?? "Unable to save template from draft."]);
+    } finally {
+      setActionApplying(false);
+    }
+  }, [
+    actionApplying,
+    actionDispatch,
+    actionDraft,
+    actionDraftTitle,
+    activeGymId,
+    onNotify,
+    onOpenTemplate,
+  ]);
 
   const handleConfirmActionDraft = useCallback(() => {
     if (!pendingHighRiskDraft) {
@@ -2212,6 +2318,16 @@ export default function CoachView({
             >
               {actionEditMode ? "Save" : "Edit"}
             </Button>
+            {canSaveActionAsTemplate && !actionEditMode ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleSaveActionAsTemplate}
+                disabled={actionApplying}
+              >
+                Save as template
+              </Button>
+            ) : null}
             {actionEditMode ? (
               <Button
                 variant="ghost"
