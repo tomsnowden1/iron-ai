@@ -541,27 +541,65 @@ function resolveExerciseIdByName({
       if (exerciseId == null) return null;
       const label = String(entry?.name ?? "").trim();
       const score = scoreNameMatch(name, label);
-      return { exerciseId, score };
+      return { exerciseId, name: label, score };
     })
-    .filter(Boolean)
-    .sort((a, b) => b.score - a.score);
-  if (!scored.length || scored[0].score < minimumScore) {
+    .filter(Boolean);
+  const scoredById = new Map();
+  scored.forEach((entry) => {
+    const existing = scoredById.get(entry.exerciseId);
+    if (!existing || entry.score > existing.score) {
+      scoredById.set(entry.exerciseId, entry);
+    }
+  });
+  const ranked = Array.from(scoredById.values()).sort((a, b) => b.score - a.score);
+  if (!ranked.length || ranked[0].score < minimumScore) {
     return {
       valid: false,
       exerciseId: null,
       error: `Could not match "${name}" to a known exercise.`,
     };
   }
-  const top = scored[0];
-  const next = scored[1];
-  if (next && top.exerciseId !== next.exerciseId && top.score - next.score <= ambiguousMargin) {
+  const top = ranked[0];
+  const next = ranked[1];
+  const queryNormalized = normalizeText(name);
+  const hasMultipleStrongMatches = ranked.filter((entry) => {
+    const labelNormalized = normalizeText(entry.name);
+    if (!queryNormalized || !labelNormalized.includes(queryNormalized)) return false;
+    return entry.score >= 0.8;
+  });
+  if (
+    (next && top.exerciseId !== next.exerciseId && top.score - next.score <= ambiguousMargin) ||
+    hasMultipleStrongMatches.length > 1
+  ) {
+    const topOptions = hasMultipleStrongMatches.length
+      ? hasMultipleStrongMatches
+      : ranked.slice(0, 3);
+    const optionNames = Array.from(
+      new Set(
+        topOptions
+          .map((entry) => String(entry.name ?? "").trim())
+          .filter(Boolean)
+          .slice(0, 3)
+      )
+    );
+    const optionSuffix = optionNames.length ? `: ${optionNames.join(", ")}.` : ".";
     return {
       valid: false,
       exerciseId: null,
-      error: `Exercise name "${name}" is ambiguous. Please be more specific.`,
+      error: `Exercise name "${name}" matches multiple options${optionSuffix} Please specify the exact exercise name.`,
     };
   }
   return { valid: true, exerciseId: top.exerciseId, error: null };
+}
+
+function buildEditFailureAssistantMessage(error) {
+  const baseMessage = SAFE_EDIT_FAILURE_MESSAGE;
+  const detail = String(error ?? "").trim();
+  if (!detail) return baseMessage;
+  if (/matches multiple options|please specify the exact exercise name/i.test(detail)) {
+    return `${baseMessage} ${detail}`;
+  }
+  return baseMessage;
 }
 
 function applyAddLegExercisesOperation({
@@ -1397,7 +1435,7 @@ export async function runCoachTurn({
       };
     } else {
       actionDraft = currentDraft ?? null;
-      assistantText = SAFE_EDIT_FAILURE_MESSAGE;
+      assistantText = buildEditFailureAssistantMessage(editResolutionError);
       debug.editResolution = {
         status: "failed",
         mode: editContract.mode || "AUTO",

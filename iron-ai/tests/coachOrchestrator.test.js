@@ -500,6 +500,70 @@ describe("coach orchestrator", () => {
     expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
     expect(String(result.assistant ?? "").toLowerCase()).toMatch(/more specific/);
   });
+
+  it("asks for clarification when swap target matches multiple known exercises", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Pull Up", primaryMuscles: ["back"] },
+      { exerciseId: 13, name: "Assisted Pull Up", primaryMuscles: ["back"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+      { id: 13, name: "Assisted Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 10 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change back squat to pull up",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "pull-up bar",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/specify the exact exercise name/);
+    expect(result.assistant).toContain("Pull Up");
+    expect(result.assistant).toContain("Assisted Pull Up");
+  });
   it("falls back to deterministic workout draft without a second repair request", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 11, name: "Barbell Bench Press" },
