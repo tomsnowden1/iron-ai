@@ -76,6 +76,9 @@ import { sortSpacesByName } from "../../workoutSpaces/logic";
 
 import BottomSheet from "../../components/ui/BottomSheet";
 
+const COACH_DEBUG_COMMIT_SHA =
+  import.meta.env.VITE_COMMIT_SHA ?? import.meta.env.VITE_GIT_SHA ?? "unknown";
+
 function createMessage(id, role, content, meta) {
   return {
     id,
@@ -810,7 +813,11 @@ export default function CoachView({
   const actionEditTitle = String(actionEditDraft.title ?? "");
   const canSaveActionEdit = actionEditTitle.trim().length > 0;
   const coachDebugTrace = useMemo(
-    () => buildCoachDebugTracePanel(state.debug?.stamp),
+    () =>
+      buildCoachDebugTracePanel({
+        ...(state.debug?.stamp ?? {}),
+        commitSha: state.debug?.stamp?.commitSha ?? COACH_DEBUG_COMMIT_SHA,
+      }),
     [state.debug?.stamp]
   );
 
@@ -1185,13 +1192,36 @@ export default function CoachView({
           }
         }
         const resolvedActionDraft = result.actionDraft ?? fallbackActionDraft ?? null;
+        const previousExerciseSnapshot = shouldEditExistingDraft
+          ? JSON.stringify(actionDraft?.payload?.exercises ?? [])
+          : "";
+        const nextExerciseSnapshot = JSON.stringify(
+          resolvedActionDraft?.payload?.exercises ?? []
+        );
+        const appliedUpdate = shouldEditExistingDraft
+          ? previousExerciseSnapshot !== nextExerciseSnapshot
+          : Boolean(resolvedActionDraft);
+        const stampedApplyReason = String(result.debug?.stamp?.applyReason ?? "")
+          .trim()
+          .toUpperCase();
+        const applyReason = shouldEditExistingDraft
+          ? appliedUpdate
+            ? "APPLIED"
+            : stampedApplyReason && stampedApplyReason !== "APPLIED"
+              ? stampedApplyReason
+              : "STATE_NOT_UPDATED"
+          : resolvedActionDraft
+            ? "APPLIED"
+            : "NO_DRAFT_RETURNED";
         const updatedDebugStamp = buildCoachDebugTraceStamp({
           stamp: result.debug?.stamp,
+          commitSha: COACH_DEBUG_COMMIT_SHA,
           hasDraft: Boolean(resolvedActionDraft),
           draftCount: Array.isArray(resolvedActionDraft?.payload?.exercises)
             ? resolvedActionDraft.payload.exercises.length
             : 0,
-          applied: Boolean(resolvedActionDraft),
+          applied: appliedUpdate,
+          applyReason,
         });
         dispatch({
           type: "SET_DEBUG",

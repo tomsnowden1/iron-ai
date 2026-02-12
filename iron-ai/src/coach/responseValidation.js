@@ -49,9 +49,9 @@ const SWAP_EDIT_REGEX =
   /\b(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+?)(?:[.!?]|$)/i;
 const LEG_EDIT_KEYWORD_REGEX =
   /\b(leg|legs|quad|quads|hamstring|hamstrings|glute|glutes|calf|calves|adductor|abductor)\b/i;
-const ADD_COUNT_REGEX = /\badd\s+(\d+)\b/i;
+const ADD_COUNT_REGEX = /\badd(?:\s+in)?\s+(\d+)\b/i;
 const ADD_NAMED_EXERCISE_REGEX =
-  /\badd\s+(\d+)\s+(.+?)(?:\s+exercises?)?(?:[.!?]|$)/i;
+  /\badd(?:\s+in)?\s+(\d+)\s+(.+?)(?:\s+exercises?)?(?:[.!?]|$)/i;
 const WORKOUT_LIST_LINE_REGEX =
   /^\s*(?:[-*]|\d+[.)])\s+.+?(\d+\s*(?:sets?\s*(?:of)?\s*\d+\s*reps?|[x×]\s*\d+))/gim;
 const LEG_METADATA_TOKENS = [

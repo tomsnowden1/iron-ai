@@ -41,6 +41,8 @@ const SAFE_EDIT_FAILURE_MESSAGE =
   "I couldn't safely apply that edit while keeping your current workout intact. Please try again with a more specific change request.";
 const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
   "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
+const DEBUG_COMMIT_SHA =
+  import.meta.env?.VITE_COMMIT_SHA ?? import.meta.env?.VITE_GIT_SHA ?? "unknown";
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -963,6 +965,19 @@ function applyEditOperations({
   return { valid: true, error: null, draft: nextDraft };
 }
 
+function serializeDraftExercises(draft) {
+  const exercises = Array.isArray(draft?.payload?.exercises) ? draft.payload.exercises : [];
+  try {
+    return JSON.stringify(exercises);
+  } catch {
+    return "";
+  }
+}
+
+function didDraftExercisesChange(previousDraft, nextDraft) {
+  return serializeDraftExercises(previousDraft) !== serializeDraftExercises(nextDraft);
+}
+
 export async function runCoachTurn({
   apiKey,
   keyMode = "user",
@@ -1002,6 +1017,7 @@ export async function runCoachTurn({
   const debug = {
     model: DEFAULT_COACH_MODEL,
     stamp: {
+      commitSha: DEBUG_COMMIT_SHA,
       model: DEFAULT_COACH_MODEL,
       provider: "openai",
       route: useServerKey ? "/api/coach" : "openai-direct",
@@ -1011,6 +1027,7 @@ export async function runCoachTurn({
       hasDraft: false,
       draftCount: 0,
       applied: false,
+      applyReason: "UNKNOWN_SHAPE",
     },
     toolCalls: [],
     contextMeta: null,
@@ -1535,6 +1552,7 @@ export async function runCoachTurn({
     const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
     debug.stamp.hasOps = opFromModel.length > 0;
     debug.stamp.opsCount = opFromModel.length;
+    debug.stamp.applyReason = opFromModel.length ? "UNKNOWN_SHAPE" : "OPS_EMPTY";
     let fallbackOps = [];
     if (editIntent.kind === "add_legs_exercises") {
       fallbackOps = [
@@ -1592,15 +1610,25 @@ export async function runCoachTurn({
       }
       if (editResult.valid) {
         resolvedDraft = editResult.draft;
+        debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+        debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
       } else {
         editResolutionError = editResult.error;
+        debug.stamp.applied = false;
+        debug.stamp.applyReason = "APPLY_SKIPPED";
       }
     } else if (editContract.mode === "CREATE" && actionDraft) {
       resolvedDraft = actionDraft;
+      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
     } else if (actionDraft) {
       resolvedDraft = actionDraft;
+      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
     } else {
       editResolutionError = "No editable workout draft update was returned.";
+      debug.stamp.applied = false;
+      debug.stamp.applyReason = "NO_DRAFT_RETURNED";
     }
 
     if (resolvedDraft && editIntent.kind === "add_legs_exercises") {
@@ -1630,6 +1658,9 @@ export async function runCoachTurn({
         mode: editContract.mode || "AUTO",
         error: editResolutionError ?? "Unable to apply edit.",
       };
+      if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
+        debug.stamp.applyReason = "APPLY_SKIPPED";
+      }
     }
   }
 
@@ -1648,7 +1679,14 @@ export async function runCoachTurn({
   debug.stamp.draftCount = Array.isArray(actionDraft?.payload?.exercises)
     ? actionDraft.payload.exercises.length
     : 0;
-  debug.stamp.applied = false;
+  if (!editModeEnabled) {
+    debug.stamp.applied = Boolean(actionDraft);
+    if (!debug.stamp.applied) {
+      debug.stamp.applyReason = "NO_DRAFT_RETURNED";
+    } else if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
+      debug.stamp.applyReason = "APPLIED";
+    }
+  }
 
   return {
     assistant: assistantText,

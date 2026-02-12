@@ -389,7 +389,7 @@ describe("coach orchestrator", () => {
     expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
     expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([21, 22]);
     expect(result.debug?.editResolution?.status).toBe("applied");
-    expect(result.debug?.stamp).toEqual({
+    expect(result.debug?.stamp).toMatchObject({
       model: "gpt-4o-mini",
       provider: "openai",
       route: "openai-direct",
@@ -398,7 +398,81 @@ describe("coach orchestrator", () => {
       opsCount: 0,
       hasDraft: true,
       draftCount: 4,
-      applied: false,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+  });
+
+  it("applies add-named fallback for add-in phrasing with runtime-shaped response", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 21, name: "Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 22, name: "Incline Push Up", primaryMuscles: ["chest"] },
+      { exerciseId: 23, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 21, name: "Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 22, name: "Incline Push Up", primaryMuscles: ["chest"], default_sets: 3, default_reps: 12 },
+      { id: 23, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Leg Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Leg Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add in 2 pushup exercise",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "bodyweight",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.slice(0, 2)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([21, 22]);
+    expect(result.debug?.stamp).toMatchObject({
+      requestType: "edit",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 4,
+      applied: true,
+      applyReason: "APPLIED",
     });
   });
 
