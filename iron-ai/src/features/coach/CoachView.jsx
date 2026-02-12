@@ -30,6 +30,8 @@ import { getCoachAccessState } from "./coachAccess";
 import { getCoachKeyMode } from "../../config/coachKeyMode";
 import {
   applyUniformSetCountToExercises,
+  buildCoachDebugTracePanel,
+  buildCoachDebugTraceStamp,
   buildSwapConfirmationMessage,
   buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
@@ -807,6 +809,10 @@ export default function CoachView({
   const canSaveActionAsTemplate = shouldShowSuggestedActionSaveTemplate(actionDraftKind);
   const actionEditTitle = String(actionEditDraft.title ?? "");
   const canSaveActionEdit = actionEditTitle.trim().length > 0;
+  const coachDebugTrace = useMemo(
+    () => buildCoachDebugTracePanel(state.debug?.stamp),
+    [state.debug?.stamp]
+  );
 
   useEffect(() => {
     if (!actionDraft) {
@@ -1179,6 +1185,24 @@ export default function CoachView({
           }
         }
         const resolvedActionDraft = result.actionDraft ?? fallbackActionDraft ?? null;
+        const updatedDebugStamp = buildCoachDebugTraceStamp({
+          stamp: result.debug?.stamp,
+          hasDraft: Boolean(resolvedActionDraft),
+          draftCount: Array.isArray(resolvedActionDraft?.payload?.exercises)
+            ? resolvedActionDraft.payload.exercises.length
+            : 0,
+          applied: Boolean(resolvedActionDraft),
+        });
+        dispatch({
+          type: "SET_DEBUG",
+          payload: {
+            ...(result.debug ?? {}),
+            stamp: updatedDebugStamp,
+          },
+        });
+        if (import.meta.env.DEV) {
+          console.info("coach_debug_trace", buildCoachDebugTracePanel(updatedDebugStamp));
+        }
         const swapConfirmationMessage =
           shouldEditExistingDraft &&
           result.debug?.editResolution?.status === "applied" &&
@@ -2926,6 +2950,19 @@ export default function CoachView({
                 </div>
               </div>
             </details>
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {debugEnabled ? (
+        <Card className="dev-panel">
+          <CardHeader>
+            <div className="ui-section-title">Coach Debug Trace</div>
+          </CardHeader>
+          <CardBody>
+            <pre className="coach-debug__payload">
+              {JSON.stringify(coachDebugTrace, null, 2)}
+            </pre>
           </CardBody>
         </Card>
       ) : null}
