@@ -17,6 +17,22 @@ const sampleDraft = {
 };
 
 describe("action draft state", () => {
+  it("moves to building immediately when a draft request starts", () => {
+    const withDraft = actionDraftReducer(initialActionDraftState, {
+      type: "SET_FROM_MESSAGE",
+      payload: {
+        messageId: 11,
+        actionDraft: sampleDraft,
+      },
+    });
+    const next = actionDraftReducer(withDraft, {
+      type: "BUILD_START",
+      payload: { clearDraft: true },
+    });
+    expect(next.status).toBe("building");
+    expect(next.draft).toBeNull();
+  });
+
   it("stores a draft when a message provides one", () => {
     const next = actionDraftReducer(initialActionDraftState, {
       type: "SET_FROM_MESSAGE",
@@ -28,6 +44,7 @@ describe("action draft state", () => {
     });
     expect(next.draft).toEqual(sampleDraft);
     expect(next.sourceMessageId).toBe(42);
+    expect(next.status).toBe("ready");
   });
 
   it("clears the draft when discarded", () => {
@@ -37,6 +54,7 @@ describe("action draft state", () => {
     });
     const cleared = actionDraftReducer(withDraft, { type: "DISCARD" });
     expect(cleared.draft).toBeNull();
+    expect(cleared.status).toBe("idle");
   });
 
   it("updates the draft payload when edited", () => {
@@ -49,5 +67,20 @@ describe("action draft state", () => {
       payload: { draft: { ...sampleDraft, title: "Updated" } },
     });
     expect(updated.draft.title).toBe("Updated");
+    expect(updated.status).toBe("ready");
+  });
+
+  it("stores an actionable error while preserving the last draft", () => {
+    const withDraft = actionDraftReducer(initialActionDraftState, {
+      type: "SET_FROM_MESSAGE",
+      payload: { messageId: 3, actionDraft: sampleDraft },
+    });
+    const errored = actionDraftReducer(withDraft, {
+      type: "SET_ERROR",
+      payload: { error: "payload.exercises[0].exerciseId: Required" },
+    });
+    expect(errored.status).toBe("error");
+    expect(errored.error).toMatch(/payload\.exercises\[0\]\.exerciseId/i);
+    expect(errored.draft).toEqual(sampleDraft);
   });
 });

@@ -1305,6 +1305,10 @@
     border: 1px solid var(--color-border-subtle);
   }
 
+  .coach-action--building {
+    opacity: 0.95;
+  }
+
   .coach-action-badges {
     display: flex;
     flex-wrap: wrap;
@@ -1377,6 +1381,52 @@
   .coach-action-exercise__meta {
     font-size: var(--text-xs);
     color: var(--color-text-muted);
+  }
+
+  .coach-action-skeleton {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .coach-action-skeleton__row {
+    height: 14px;
+    width: 100%;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-text-muted) 14%, transparent);
+    animation: coach-action-pulse 1.2s ease-in-out infinite;
+  }
+
+  .coach-action-skeleton__row:nth-child(2) {
+    width: 82%;
+  }
+
+  .coach-action-skeleton__row:nth-child(3) {
+    width: 72%;
+  }
+
+  .coach-action-skeleton__row:nth-child(4) {
+    width: 90%;
+  }
+
+  .coach-action-skeleton__row:nth-child(5) {
+    width: 68%;
+  }
+
+  .coach-action-skeleton__row:nth-child(6) {
+    width: 76%;
+  }
+
+  @keyframes coach-action-pulse {
+    0% {
+      opacity: 0.45;
+    }
+    50% {
+      opacity: 0.95;
+    }
+    100% {
+      opacity: 0.45;
+    }
   }
 
   .coach-action-alert {

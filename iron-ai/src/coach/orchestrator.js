@@ -1030,63 +1030,81 @@ export async function runCoachTurn({
     });
     responseValidation.mode = firstValidation.mode;
     if (!firstValidation.valid) {
-      const repairPrompt = buildRepairPrompt({
-        validationMode: firstValidation.mode,
-        contextEnabled: contextState.contextEnabled,
-        invalidContent: finalAssistant,
-        selectedGym: contextState.selectedGym,
-        candidateExercises: exerciseCandidates,
-      });
-      let repairedAssistant = "";
-      try {
-        const repairCompletion = await createChatCompletion({
-          apiKey,
-          useServerKey,
-          model: DEFAULT_COACH_MODEL,
-          messages: [
-            ...conversation,
-            { role: "assistant", content: finalAssistant },
-            { role: "user", content: repairPrompt },
-          ],
-          temperature: COACH_TEMPERATURE,
-        });
-        repairedAssistant = extractCompletionContent(repairCompletion);
-      } catch {
-        repairedAssistant = "";
-      }
-
-      const repairedValidation = validateCoachResponse({
-        userMessage,
-        assistantText: repairedAssistant,
-        responseMode,
-        contextEnabled: contextState.contextEnabled,
-        allowedCandidateIds,
-        libraryIdSet,
-      });
-      if (repairedValidation.valid) {
-        finalAssistant = repairedAssistant;
-        responseValidation = {
-          status: "repaired",
-          mode: repairedValidation.mode,
-          repaired: true,
-          error: null,
-        };
-      } else {
+      if (firstValidation.mode === "workout") {
         finalAssistant = getValidationFailureMessage(firstValidation.mode);
         responseValidation = {
           status: "failed",
-          mode: repairedValidation.mode,
-          repaired: true,
-          error: repairedValidation.error ?? firstValidation.error ?? "Validation failed.",
+          mode: firstValidation.mode,
+          repaired: false,
+          error: firstValidation.error ?? "Validation failed.",
         };
-      }
-      if (history.length && history[history.length - 1]?.role === "assistant") {
-        history = [
-          ...history.slice(0, -1),
-          { ...history[history.length - 1], content: finalAssistant },
-        ];
+        if (history.length && history[history.length - 1]?.role === "assistant") {
+          history = [
+            ...history.slice(0, -1),
+            { ...history[history.length - 1], content: finalAssistant },
+          ];
+        } else {
+          history = [...history, { role: "assistant", content: finalAssistant }];
+        }
       } else {
-        history = [...history, { role: "assistant", content: finalAssistant }];
+        const repairPrompt = buildRepairPrompt({
+          validationMode: firstValidation.mode,
+          contextEnabled: contextState.contextEnabled,
+          invalidContent: finalAssistant,
+          selectedGym: contextState.selectedGym,
+          candidateExercises: exerciseCandidates,
+        });
+        let repairedAssistant = "";
+        try {
+          const repairCompletion = await createChatCompletion({
+            apiKey,
+            useServerKey,
+            model: DEFAULT_COACH_MODEL,
+            messages: [
+              ...conversation,
+              { role: "assistant", content: finalAssistant },
+              { role: "user", content: repairPrompt },
+            ],
+            temperature: COACH_TEMPERATURE,
+          });
+          repairedAssistant = extractCompletionContent(repairCompletion);
+        } catch {
+          repairedAssistant = "";
+        }
+
+        const repairedValidation = validateCoachResponse({
+          userMessage,
+          assistantText: repairedAssistant,
+          responseMode,
+          contextEnabled: contextState.contextEnabled,
+          allowedCandidateIds,
+          libraryIdSet,
+        });
+        if (repairedValidation.valid) {
+          finalAssistant = repairedAssistant;
+          responseValidation = {
+            status: "repaired",
+            mode: repairedValidation.mode,
+            repaired: true,
+            error: null,
+          };
+        } else {
+          finalAssistant = getValidationFailureMessage(firstValidation.mode);
+          responseValidation = {
+            status: "failed",
+            mode: repairedValidation.mode,
+            repaired: true,
+            error: repairedValidation.error ?? firstValidation.error ?? "Validation failed.",
+          };
+        }
+        if (history.length && history[history.length - 1]?.role === "assistant") {
+          history = [
+            ...history.slice(0, -1),
+            { ...history[history.length - 1], content: finalAssistant },
+          ];
+        } else {
+          history = [...history, { role: "assistant", content: finalAssistant }];
+        }
       }
     }
   } else {

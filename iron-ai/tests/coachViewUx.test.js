@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   COACH_ACTION_PREVIEW_MIN_EXERCISES,
   COACH_ACTION_SHOW_ALL_THRESHOLD,
+  applyUniformSetCountToExercises,
+  buildCoachWorkoutSummaryFromDraft,
   buildHeuristicWorkoutDraft,
   getVisibleCoachActionExerciseCount,
   getSuggestedActionPrimaryLabel,
@@ -148,5 +150,54 @@ Use this template payload.`);
     expect(shouldShowSuggestedActionSaveTemplate("create_workout")).toBe(true);
     expect(shouldShowSuggestedActionSaveTemplate("create_template")).toBe(false);
     expect(shouldShowSuggestedActionSaveTemplate("create_gym")).toBe(false);
+  });
+
+  it("builds chat workout summaries directly from the draft sets/reps", () => {
+    const summary = buildCoachWorkoutSummaryFromDraft(
+      {
+        title: "Push Workout",
+        payload: {
+          name: "Push Workout",
+          exercises: [
+            {
+              exerciseId: 10,
+              sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }],
+            },
+            {
+              exerciseId: 11,
+              sets: [{ reps: 12 }, { reps: 12 }, { reps: 12 }],
+            },
+          ],
+        },
+      },
+      new Map([
+        [10, "Barbell Bench Press"],
+        [11, "Triceps Pushdown"],
+      ])
+    );
+
+    expect(summary).toContain("Barbell Bench Press - 3 sets x 8 reps");
+    expect(summary).toContain("Triceps Pushdown - 3 sets x 12 reps");
+  });
+
+  it("applies a uniform set count to every exercise while preserving set shape", () => {
+    const updated = applyUniformSetCountToExercises(
+      [
+        {
+          exerciseId: 1,
+          sets: [{ reps: 8, weight: 135 }, { reps: 8, weight: 145 }],
+        },
+        {
+          exerciseId: 2,
+          sets: [{ reps: 12 }],
+        },
+      ],
+      4
+    );
+
+    expect(updated[0].sets).toHaveLength(4);
+    expect(updated[0].sets[2]).toEqual({ reps: 8, weight: 135 });
+    expect(updated[1].sets).toHaveLength(4);
+    expect(updated[1].sets[3]).toEqual({ reps: 12 });
   });
 });
