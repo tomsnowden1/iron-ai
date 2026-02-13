@@ -534,8 +534,176 @@ describe("coach orchestrator", () => {
 
     expect(result.actionDraft).toEqual(currentDraft);
     expect(result.debug?.editResolution?.status).toBe("failed");
-    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
-    expect(String(result.assistant ?? "").toLowerCase()).toMatch(/exact exercise name/);
+    expect(result.debug?.stamp).toMatchObject({
+      modeChosen: "edit",
+      modeReason: "ACTIVE_DRAFT_EDIT_MODE",
+      candidateCount: 4,
+    });
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(
+      /do you want chest, shoulders, or triceps exercises/
+    );
+  });
+
+  it("applies a clarified push follow-up to the same draft using recent add count", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 12, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 31, name: "Incline Dumbbell Press", primaryMuscles: ["chest"] },
+      { exerciseId: 32, name: "Seated Dumbbell Shoulder Press", primaryMuscles: ["shoulders"] },
+      { exerciseId: 33, name: "Triceps Pushdown", primaryMuscles: ["triceps"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 12, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      {
+        id: 31,
+        name: "Incline Dumbbell Press",
+        primaryMuscles: ["chest"],
+        default_sets: 3,
+        default_reps: 10,
+      },
+      {
+        id: 32,
+        name: "Seated Dumbbell Shoulder Press",
+        primaryMuscles: ["shoulders"],
+        default_sets: 3,
+        default_reps: 10,
+      },
+      {
+        id: 33,
+        name: "Triceps Pushdown",
+        primaryMuscles: ["triceps"],
+        default_sets: 3,
+        default_reps: 12,
+      },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Got it.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Leg Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Leg Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [
+        { role: "user", content: "add 2 push exercises to it" },
+        {
+          role: "assistant",
+          content: "Do you want chest, shoulders, or triceps exercises added to this workout?",
+        },
+      ],
+      userMessage: "I meant chest push exercises",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.slice(0, 2)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([31, 32]);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+    expect(result.debug?.stamp).toMatchObject({
+      modeChosen: "edit",
+      fallbackUsed: true,
+      fallbackReason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      opsProduced: 1,
+    });
+  });
+
+  it("keeps edit requests safe when candidate pool is empty and avoids alphabetical fallback", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 1, name: "90/90 Breathing", default_sets: 3, default_reps: 8 },
+      { id: 2, name: "Ab Adductor Machine", default_sets: 3, default_reps: 12 },
+      { id: 3, name: "Sit-Up", default_sets: 3, default_reps: 12 },
+      { id: 4, name: "Bench Press", default_sets: 3, default_reps: 8 },
+      { id: 5, name: "Dumbbell Shoulder Press", default_sets: 3, default_reps: 10 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Leg Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Leg Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add 2 push exercises to it",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: false,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: false,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: [],
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(result.debug?.stamp).toMatchObject({
+      modeChosen: "edit",
+      candidateCount: 0,
+    });
+    expect(String(result.assistant ?? "").toLowerCase()).toMatch(
+      /do you want chest, shoulders, or triceps exercises/
+    );
+    expect(result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)).toEqual([
+      10,
+      12,
+    ]);
   });
 
   it("applies swap edit requests to the current draft when model ops are missing", async () => {
