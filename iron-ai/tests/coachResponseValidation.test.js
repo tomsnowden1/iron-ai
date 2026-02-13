@@ -160,6 +160,28 @@ describe("coach response validation", () => {
     });
   });
 
+  it("parses clarification follow-ups as add-named edit intent", () => {
+    const editIntent = parseCoachEditIntent("I meant chest push exercises");
+    expect(editIntent).toEqual({
+      isEditRequest: true,
+      kind: "add_named_exercises",
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: "chest push exercises",
+    });
+  });
+
+  it("does not treat explicit new-workout requests as edits", () => {
+    const editIntent = parseCoachEditIntent("create a new push workout");
+    expect(editIntent).toEqual({
+      isEditRequest: false,
+      kind: null,
+      addCount: null,
+      fromExerciseName: null,
+      toExerciseName: null,
+    });
+  });
+
   it("parses swap edit intent for change X to Y phrasing", () => {
     const editIntent = parseCoachEditIntent("change back squat to pull up");
     expect(editIntent).toMatchObject({

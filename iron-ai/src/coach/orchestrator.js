@@ -43,6 +43,8 @@ const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
   "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
 const DEBUG_COMMIT_SHA =
   import.meta.env?.VITE_COMMIT_SHA ?? import.meta.env?.VITE_GIT_SHA ?? "unknown";
+const EXPLICIT_NEW_WORKOUT_REGEX =
+  /\b(?:make|create|build|start)\b[\w\s]{0,20}\b(?:a\s+)?(?:new|another|different)\b[\w\s]{0,20}\b(?:workout|routine|session|plan|draft)\b|\b(?:new|another|different)\s+(?:workout|routine|session|plan|draft)\b/i;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -617,6 +619,12 @@ function buildEditFailureAssistantMessage(error) {
   const baseMessage = SAFE_EDIT_FAILURE_MESSAGE;
   const detail = String(error ?? "").trim();
   if (!detail) return baseMessage;
+  if (/do you want .* exercises added to this workout\?/i.test(detail)) {
+    return detail;
+  }
+  if (/how many exercises should i add/i.test(detail)) {
+    return detail;
+  }
   if (/matches multiple options|please specify the exact exercise name/i.test(detail)) {
     return `${baseMessage} ${detail}`;
   }
@@ -626,14 +634,113 @@ function buildEditFailureAssistantMessage(error) {
 function isGenericAddExerciseQuery(value) {
   const normalized = normalizeText(value);
   if (!normalized) return true;
-  return (
-    normalized === "push" ||
-    normalized === "pull" ||
-    normalized === "leg" ||
-    normalized === "legs" ||
-    normalized === "exercise" ||
-    normalized === "exercises"
-  );
+  const tokens = splitNormalizedTokens(normalized);
+  if (!tokens.length) return true;
+  const genericTokens = new Set([
+    "push",
+    "pull",
+    "leg",
+    "legs",
+    "exercise",
+    "exercises",
+    "it",
+    "that",
+    "this",
+  ]);
+  return tokens.every((token) => genericTokens.has(token));
+}
+
+function buildBroadAddClarificationQuestion(value) {
+  const normalized = normalizeText(value);
+  if (normalized.includes("push")) {
+    return "Do you want chest, shoulders, or triceps exercises added to this workout?";
+  }
+  if (normalized.includes("pull")) {
+    return "Do you want back or biceps exercises added to this workout?";
+  }
+  if (normalized.includes("leg")) {
+    return "Do you want quads, hamstrings, glutes, or calves exercises added to this workout?";
+  }
+  return "Which exact exercise names should I add to this workout?";
+}
+
+function collectExerciseOptionTokens(entry) {
+  const fields = [];
+  fields.push(String(entry?.name ?? ""));
+  const appendList = (value) => {
+    if (!Array.isArray(value)) return;
+    value.forEach((item) => fields.push(String(item ?? "")));
+  };
+  appendList(entry?.primaryMuscles);
+  appendList(entry?.secondaryMuscles);
+  appendList(entry?.tags);
+  return splitNormalizedTokens(fields.join(" "));
+}
+
+function scoreSemanticAddQuery(queryText, entry) {
+  const queryTokens = new Set(splitNormalizedTokens(queryText));
+  if (!queryTokens.size) return 0;
+  const entryTokens = new Set(collectExerciseOptionTokens(entry));
+  if (!entryTokens.size) return 0;
+
+  let score = 0;
+  if (queryTokens.has("push")) {
+    if (
+      entryTokens.has("press") ||
+      entryTokens.has("push") ||
+      entryTokens.has("fly") ||
+      entryTokens.has("dip")
+    ) {
+      score += 2;
+    }
+    if (
+      entryTokens.has("chest") ||
+      entryTokens.has("shoulder") ||
+      entryTokens.has("shoulders") ||
+      entryTokens.has("tricep") ||
+      entryTokens.has("triceps")
+    ) {
+      score += 2;
+    }
+  }
+  if (
+    queryTokens.has("chest") &&
+    (entryTokens.has("chest") || entryTokens.has("pec") || entryTokens.has("pectoral"))
+  ) {
+    score += 2;
+  }
+  if (
+    (queryTokens.has("shoulder") || queryTokens.has("shoulders")) &&
+    (entryTokens.has("shoulder") || entryTokens.has("shoulders") || entryTokens.has("delt"))
+  ) {
+    score += 2;
+  }
+  if (
+    (queryTokens.has("tricep") || queryTokens.has("triceps")) &&
+    (entryTokens.has("tricep") || entryTokens.has("triceps"))
+  ) {
+    score += 2;
+  }
+  return score;
+}
+
+function inferRecentAddCountFromHistory(chatHistory) {
+  const history = Array.isArray(chatHistory) ? chatHistory : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const message = history[i];
+    if (message?.role !== "user") continue;
+    const intent = parseCoachEditIntent(message?.content ?? "");
+    const parsedIntentCount = toPositiveInt(intent?.addCount);
+    if (parsedIntentCount != null) return parsedIntentCount;
+    const explicitCountMatch = String(message?.content ?? "").match(/\badd(?:\s+in)?\s+(\d+)\b/i);
+    const explicitCount = explicitCountMatch ? toPositiveInt(explicitCountMatch[1]) : null;
+    if (explicitCount != null) return explicitCount;
+  }
+  return null;
+}
+
+function isExplicitNewWorkoutRequest(value) {
+  return EXPLICIT_NEW_WORKOUT_REGEX.test(String(value ?? ""));
 }
 
 function buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById }) {
@@ -642,6 +749,9 @@ function buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById }) {
         .map((entry) => ({
           exerciseId: toPositiveInt(entry?.exerciseId ?? entry?.id),
           name: String(entry?.name ?? "").trim(),
+          primaryMuscles: Array.isArray(entry?.primaryMuscles) ? entry.primaryMuscles : [],
+          secondaryMuscles: Array.isArray(entry?.secondaryMuscles) ? entry.secondaryMuscles : [],
+          tags: Array.isArray(entry?.tags) ? entry.tags : [],
         }))
         .filter((entry) => entry.exerciseId != null && entry.name)
     : [];
@@ -649,6 +759,9 @@ function buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById }) {
     .map(([exerciseId, exercise]) => ({
       exerciseId: toPositiveInt(exerciseId),
       name: String(exercise?.name ?? "").trim(),
+      primaryMuscles: Array.isArray(exercise?.primaryMuscles) ? exercise.primaryMuscles : [],
+      secondaryMuscles: Array.isArray(exercise?.secondaryMuscles) ? exercise.secondaryMuscles : [],
+      tags: Array.isArray(exercise?.tags) ? exercise.tags : [],
     }))
     .filter((entry) => entry.exerciseId != null && entry.name);
   const mergedById = new Map();
@@ -673,7 +786,7 @@ function resolveNamedExerciseIds({
     return {
       valid: false,
       ids: [],
-      error: `Exercise name "${target}" is too broad. Please specify the exact exercise name.`,
+      error: buildBroadAddClarificationQuestion(target),
     };
   }
   const queryCompact = normalizeText(target).replace(/\s+/g, "");
@@ -688,16 +801,20 @@ function resolveNamedExerciseIds({
         exerciseId,
         name: label,
         score: scoreNameMatch(target, label),
+        semanticScore: scoreSemanticAddQuery(target, entry),
         compact: normalizeText(label).replace(/\s+/g, ""),
       };
     })
     .filter(Boolean)
-    .sort((a, b) => b.score - a.score);
-  if (!ranked.length || ranked[0].score < 0.6) {
+    .sort((a, b) => {
+      if (b.semanticScore !== a.semanticScore) return b.semanticScore - a.semanticScore;
+      return b.score - a.score;
+    });
+  if (!ranked.length || (ranked[0].score < 0.6 && ranked[0].semanticScore < 2)) {
     return {
       valid: false,
       ids: [],
-      error: `Could not match "${target}" to a known exercise.`,
+      error: `Could not safely match "${target}" to known exercises. Which exact exercise names should I add to this workout?`,
     };
   }
   const strongMatches = ranked.filter((entry) => {
@@ -1028,6 +1145,16 @@ export async function runCoachTurn({
       draftCount: 0,
       applied: false,
       applyReason: "UNKNOWN_SHAPE",
+      contextEnabled: Boolean(contextConfig?.enabled),
+      activeDraftId: null,
+      modeChosen: "draft",
+      modeReason: "NO_EDITABLE_DRAFT",
+      intent: null,
+      candidateCount: 0,
+      fallbackUsed: false,
+      fallbackReason: "NONE",
+      opsProduced: 0,
+      validationErrors: null,
     },
     toolCalls: [],
     contextMeta: null,
@@ -1085,6 +1212,43 @@ export async function runCoachTurn({
   let libraryIdSet = new Set();
   let allowedCandidateIds = new Set();
   let exerciseCatalogById = new Map();
+  const currentDraft = draftEditConfig?.currentDraft ?? null;
+  const hasEditableWorkoutDraft =
+    currentDraft?.kind === "create_workout" &&
+    Array.isArray(currentDraft?.payload?.exercises) &&
+    currentDraft.payload.exercises.length > 0;
+  const requestedEditMode = draftEditConfig?.mode === "edit";
+  const editIntent = hasEditableWorkoutDraft
+    ? parseCoachEditIntent(userMessage)
+    : {
+        isEditRequest: false,
+        kind: null,
+        addCount: null,
+        fromExerciseName: null,
+        toExerciseName: null,
+      };
+  const explicitNewWorkoutRequest = isExplicitNewWorkoutRequest(userMessage);
+  const editModeEnabled = Boolean(
+    hasEditableWorkoutDraft &&
+      !explicitNewWorkoutRequest &&
+      (requestedEditMode || editIntent.isEditRequest)
+  );
+  debug.stamp.requestType = editModeEnabled ? "edit" : "draft";
+  debug.stamp.activeDraftId =
+    draftEditConfig?.draftId ??
+    draftEditConfig?.activeDraftId ??
+    (hasEditableWorkoutDraft ? "visible_suggested_draft" : null);
+  debug.stamp.modeChosen = editModeEnabled ? "edit" : "draft";
+  if (!hasEditableWorkoutDraft) {
+    debug.stamp.modeReason = "NO_EDITABLE_DRAFT";
+  } else if (explicitNewWorkoutRequest) {
+    debug.stamp.modeReason = "EXPLICIT_CREATE_REQUEST";
+  } else if (editModeEnabled) {
+    debug.stamp.modeReason = requestedEditMode ? "ACTIVE_DRAFT_EDIT_MODE" : "EDIT_INTENT_DETECTED";
+  } else {
+    debug.stamp.modeReason = "NO_EDIT_INTENT";
+  }
+  debug.stamp.intent = editIntent.kind ?? null;
   try {
     libraryExercises = await getAllExercises();
     libraryIdSet = new Set(
@@ -1107,7 +1271,7 @@ export async function runCoachTurn({
   } catch {
     exerciseCandidates = [];
   }
-  if (!exerciseCandidates.length && libraryExercises.length) {
+  if (!exerciseCandidates.length && libraryExercises.length && !editModeEnabled) {
     exerciseCandidates = libraryExercises.slice(0, 40).map((exercise) => ({
       exerciseId: exercise.id,
       name: exercise.name ?? "Unknown Exercise",
@@ -1116,34 +1280,21 @@ export async function runCoachTurn({
       primaryMuscles: Array.isArray(exercise.primaryMuscles)
         ? exercise.primaryMuscles
         : [],
-    }));
+      }));
+    debug.stamp.fallbackUsed = true;
+    debug.stamp.fallbackReason = "LIBRARY_CANDIDATE_FALLBACK";
   }
   allowedCandidateIds = new Set(
     exerciseCandidates
       .map((candidate) => Number.parseInt(candidate?.exerciseId ?? candidate?.id, 10))
       .filter((id) => Number.isFinite(id) && id > 0)
   );
-  const currentDraft = draftEditConfig?.currentDraft ?? null;
-  const hasEditableWorkoutDraft =
-    currentDraft?.kind === "create_workout" &&
-    Array.isArray(currentDraft?.payload?.exercises) &&
-    currentDraft.payload.exercises.length > 0;
-  const editIntent = hasEditableWorkoutDraft
-    ? parseCoachEditIntent(userMessage)
-    : {
-        isEditRequest: false,
-        kind: null,
-        addCount: null,
-        fromExerciseName: null,
-        toExerciseName: null,
-      };
-  const editModeEnabled = Boolean(hasEditableWorkoutDraft && editIntent.isEditRequest);
-  debug.stamp.requestType = editModeEnabled ? "edit" : "draft";
   const legEditCandidates = editModeEnabled
     ? buildLegEditCandidates({ exerciseCandidates, exerciseCatalogById })
     : [];
   debug.editIntent = editIntent;
   debug.editLegCandidateCount = legEditCandidates.length;
+  debug.stamp.candidateCount = exerciseCandidates.length;
 
   let contextSnapshot = null;
   let contextContract = null;
@@ -1536,6 +1687,8 @@ export async function runCoachTurn({
     if (fallbackDraft) {
       actionDraft = fallbackDraft;
       assistantText = FALLBACK_WORKOUT_ASSISTANT_MESSAGE;
+      debug.stamp.fallbackUsed = true;
+      debug.stamp.fallbackReason = "DETERMINISTIC_DRAFT_RECOVERY";
       responseValidation = {
         status: "repaired",
         mode: "workout",
@@ -1553,6 +1706,7 @@ export async function runCoachTurn({
     debug.stamp.hasOps = opFromModel.length > 0;
     debug.stamp.opsCount = opFromModel.length;
     debug.stamp.applyReason = opFromModel.length ? "UNKNOWN_SHAPE" : "OPS_EMPTY";
+    debug.stamp.opsProduced = 0;
     let fallbackOps = [];
     if (editIntent.kind === "add_legs_exercises") {
       fallbackOps = [
@@ -1565,17 +1719,21 @@ export async function runCoachTurn({
       ];
     } else if (
       editIntent.kind === "add_named_exercises" &&
-      editIntent.addCount &&
       editIntent.toExerciseName
     ) {
+      const addCount = toPositiveInt(editIntent.addCount) ?? inferRecentAddCountFromHistory(chatHistory);
+      if (addCount == null) {
+        editResolutionError = "How many exercises should I add to your current workout?";
+      } else {
       fallbackOps = [
         {
           op: "add_exercises",
-          count: editIntent.addCount,
+          count: addCount,
           placement: "end",
           exerciseName: editIntent.toExerciseName,
         },
       ];
+      }
     } else if (
       editIntent.kind === "swap_exercise" &&
       editIntent.fromExerciseName &&
@@ -1590,6 +1748,11 @@ export async function runCoachTurn({
       ];
     }
     let opsToApply = opFromModel.length ? opFromModel : fallbackOps;
+    debug.stamp.opsProduced = opsToApply.length;
+    if (fallbackOps.length && !opFromModel.length) {
+      debug.stamp.fallbackUsed = true;
+      debug.stamp.fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_OPS";
+    }
     if (opsToApply.length) {
       let editResult = applyEditOperations({
         currentDraft,
@@ -1607,6 +1770,9 @@ export async function runCoachTurn({
           exerciseCandidates,
         });
         opsToApply = fallbackOps;
+        debug.stamp.fallbackUsed = true;
+        debug.stamp.fallbackReason = "EDIT_OP_VALIDATION_RETRY";
+        debug.stamp.opsProduced = opsToApply.length;
       }
       if (editResult.valid) {
         resolvedDraft = editResult.draft;
@@ -1617,18 +1783,11 @@ export async function runCoachTurn({
         debug.stamp.applied = false;
         debug.stamp.applyReason = "APPLY_SKIPPED";
       }
-    } else if (editContract.mode === "CREATE" && actionDraft) {
-      resolvedDraft = actionDraft;
-      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
-      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
-    } else if (actionDraft) {
-      resolvedDraft = actionDraft;
-      debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
-      debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
     } else {
-      editResolutionError = "No editable workout draft update was returned.";
+      editResolutionError =
+        editResolutionError ?? "No editable workout draft update was returned.";
       debug.stamp.applied = false;
-      debug.stamp.applyReason = "NO_DRAFT_RETURNED";
+      debug.stamp.applyReason = "APPLY_SKIPPED";
     }
 
     if (resolvedDraft && editIntent.kind === "add_legs_exercises") {
@@ -1687,6 +1846,12 @@ export async function runCoachTurn({
       debug.stamp.applyReason = "APPLIED";
     }
   }
+  const validationErrors = [
+    responseValidation?.error ?? null,
+    debug.editResolution?.error ?? null,
+    ...(Array.isArray(actionParseErrors) ? actionParseErrors : []),
+  ].filter((value) => String(value ?? "").trim());
+  debug.stamp.validationErrors = validationErrors.length ? validationErrors : null;
 
   return {
     assistant: assistantText,
