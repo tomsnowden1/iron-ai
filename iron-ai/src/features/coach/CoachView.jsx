@@ -39,7 +39,7 @@ import {
   getCoachWorkoutActionConfig,
   hasWorkoutCardPayload,
   hasWorkoutIntent,
-  isStartWorkoutIntentText,
+  isStartWorkoutIntentText as _isStartWorkoutIntentText,
   isTemplateIntentText,
   isInternalPromptMessage,
   getSuggestedActionPrimaryLabel,
@@ -1501,7 +1501,7 @@ export default function CoachView({
     [onNotify]
   );
 
-  const handleAdjustChip = useCallback((messageId, chipText) => {
+  const _handleAdjustChip = useCallback((messageId, chipText) => {
     setAdjustMessageId(messageId);
     if (chipText) {
       setInput(chipText);
@@ -1515,7 +1515,7 @@ export default function CoachView({
     }
   }, []);
 
-  const handleStartWorkoutFromMessage = useCallback(
+  const _handleStartWorkoutFromMessage = useCallback(
     async (message) => {
       if (!message || message.role !== "assistant") return;
       const existing = startedWorkoutByMessageId[message.id];
@@ -1590,7 +1590,7 @@ export default function CoachView({
     ]
   );
 
-  const handleCreateTemplateFromMessage = useCallback(
+  const _handleCreateTemplateFromMessage = useCallback(
     async (message) => {
       if (!message || message.role !== "assistant") return;
       const existing = createdTemplateByMessageId[message.id];
@@ -2253,10 +2253,10 @@ export default function CoachView({
                   : null;
               const templateDraft =
                 templateDraftInfo?.draft ?? inferredTemplateDraft ?? fallbackDraft ?? null;
-              const createdTemplate = createdTemplateByMessageId[message.id] ?? null;
-              const startedWorkout = startedWorkoutByMessageId[message.id] ?? null;
-              const isCreatingTemplate = templateCreatingMessageId === message.id;
-              const isStartingWorkout = startingWorkoutMessageId === message.id;
+              const _createdTemplate = createdTemplateByMessageId[message.id] ?? null;
+              const _startedWorkout = startedWorkoutByMessageId[message.id] ?? null;
+              const _isCreatingTemplate = templateCreatingMessageId === message.id;
+              const _isStartingWorkout = startingWorkoutMessageId === message.id;
               const templateError =
                 isAssistant && templateDraftInfo?.found && !templateDraftInfo?.valid
                   ? templateDraftInfo.error
@@ -2264,7 +2264,7 @@ export default function CoachView({
               const recoveryJson =
                 templateDraftInfo?.rawJson ?? workoutPlanInfo?.rawJson ?? message.content ?? "";
               const workoutPayload = workoutPlanInfo?.valid ? workoutPlanInfo.parsed : null;
-              const workoutName =
+              const _workoutName =
                 workoutPayload?.name ??
                 templateDraft?.name ??
                 "Workout Draft";
@@ -2294,8 +2294,8 @@ export default function CoachView({
                     })
                   : [];
               const hasWorkoutCard = hasWorkoutCardPayload(message.role, workoutExercises);
-              const mappingStatus = getDraftMappingStatus(templateDraft);
-              const draftReady =
+              const _mappingStatus = getDraftMappingStatus(templateDraft);
+              const _draftReady =
                 Boolean(templateDraft) &&
                 hasWorkoutCard &&
                 !templateError &&
@@ -2306,11 +2306,11 @@ export default function CoachView({
                       message?.content ||
                       ""
                   ));
-              const cardGymName =
+              const _cardGymName =
                 message?.meta?.contextSnapshot?.gymName ??
                 selectedGym?.name ??
                 "None";
-              const cardEquipmentCount =
+              const _cardEquipmentCount =
                 message?.meta?.contextSnapshot?.equipmentCount ??
                 gymEquipmentCount;
               const cleanedAssistantText = isAssistant
@@ -2322,7 +2322,7 @@ export default function CoachView({
                 content: message.content,
                 hasWorkoutCard,
               });
-              const isAdjustOpen = adjustMessageId === message.id;
+              const _isAdjustOpen = adjustMessageId === message.id;
               const trustContext = message?.meta?.contextContract ?? null;
               const trustFingerprint = message?.meta?.payloadFingerprint ?? null;
               const showTrustLine =
