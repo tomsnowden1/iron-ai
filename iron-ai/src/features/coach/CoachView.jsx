@@ -78,6 +78,10 @@ import BottomSheet from "../../components/ui/BottomSheet";
 
 const COACH_DEBUG_COMMIT_SHA =
   import.meta.env.VITE_COMMIT_SHA ?? import.meta.env.VITE_GIT_SHA ?? "unknown";
+const DEBUG_TRACE_REDACT_KEY_PATTERN = /(api[_-]?key|authorization|token|secret)/i;
+const DEBUG_TRACE_MAX_DEPTH = 6;
+const DEBUG_TRACE_MAX_ARRAY_ITEMS = 100;
+const DEBUG_TRACE_MAX_STRING_LENGTH = 4000;
 
 function createMessage(id, role, content, meta) {
   return {
@@ -251,6 +255,45 @@ function resolveFallbackDraftTitle(text) {
   return "Coach Workout";
 }
 
+function sanitizeDebugTraceValue(value, depth = 0, seen = new WeakSet()) {
+  if (value == null) return value;
+  if (typeof value === "string") {
+    if (value.length <= DEBUG_TRACE_MAX_STRING_LENGTH) return value;
+    const omitted = value.length - DEBUG_TRACE_MAX_STRING_LENGTH;
+    return `${value.slice(0, DEBUG_TRACE_MAX_STRING_LENGTH)}… [${omitted} chars truncated]`;
+  }
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return String(value);
+  if (depth >= DEBUG_TRACE_MAX_DEPTH) return "[TRUNCATED_DEPTH]";
+
+  if (Array.isArray(value)) {
+    const trimmed = value
+      .slice(0, DEBUG_TRACE_MAX_ARRAY_ITEMS)
+      .map((entry) => sanitizeDebugTraceValue(entry, depth + 1, seen));
+    const omitted = Math.max(0, value.length - DEBUG_TRACE_MAX_ARRAY_ITEMS);
+    if (omitted > 0) {
+      trimmed.push(`[TRUNCATED_ARRAY:${omitted}]`);
+    }
+    return trimmed;
+  }
+
+  if (typeof value === "object") {
+    if (seen.has(value)) return "[CIRCULAR]";
+    seen.add(value);
+    const output = {};
+    Object.entries(value).forEach(([key, entry]) => {
+      if (DEBUG_TRACE_REDACT_KEY_PATTERN.test(key)) {
+        output[key] = "[REDACTED]";
+        return;
+      }
+      output[key] = sanitizeDebugTraceValue(entry, depth + 1, seen);
+    });
+    return output;
+  }
+
+  return String(value);
+}
+
 function buildLibraryFallbackDraftPayload({ userMessage, exercises, activeGymId }) {
   const list = Array.isArray(exercises) ? exercises : [];
   if (!list.length) return null;
@@ -339,6 +382,7 @@ export default function CoachView({
   onOpenWorkout,
   onNavigateToGyms,
   activeWorkoutId,
+  diagnosticsEnabled,
 }) {
   const coachKeyMode = getCoachKeyMode();
   const { settings, apiKey, hasKey, keyStatus } = useSettings();
@@ -425,6 +469,7 @@ export default function CoachView({
   const [actionConfirmOpen, setActionConfirmOpen] = useState(false);
   const [pendingHighRiskDraft, setPendingHighRiskDraft] = useState(null);
   const [actionExercisesExpanded, setActionExercisesExpanded] = useState(false);
+  const [actionDebugTraceOpen, setActionDebugTraceOpen] = useState(false);
   const [contextScopes, setContextScopes] = useState({
     sessions: true,
     templates: true,
@@ -453,11 +498,14 @@ export default function CoachView({
   const activeGymId = settings?.active_space_id ?? null;
   const exerciseCount = useLiveQuery(() => db.table("exercises").count(), []);
   const coachDiagnosticsEnabled = useMemo(() => {
+    if (typeof diagnosticsEnabled === "boolean") return diagnosticsEnabled;
     if (typeof window === "undefined") return false;
     const params = new URLSearchParams(window.location.search);
-    // Debug panel gated by ?debug=1 to avoid accidental exposure in normal UX.
-    return params.get("debug") === "1";
-  }, []);
+    return (
+      params.get("debug") === "1" ||
+      window.localStorage.getItem("ironai.diagnosticsEnabled") === "true"
+    );
+  }, [diagnosticsEnabled]);
   const debugEnabled = coachDiagnosticsEnabled;
 
   useEffect(() => {
@@ -820,6 +868,25 @@ export default function CoachView({
       }),
     [state.debug?.stamp]
   );
+  const suggestedActionDebugTrace = useMemo(() => {
+    if (!actionDraft || !state.debug || typeof state.debug !== "object") return null;
+    return {
+      stamp: state.debug.stamp ?? null,
+      editResolution: state.debug.editResolution ?? null,
+      actionContractVersion: state.debug.actionContractVersion ?? null,
+      actionParseErrors: state.debug.actionParseErrors ?? null,
+      responseValidation: state.debug.responseValidation ?? null,
+      actionDraft: state.debug.actionDraft ?? null,
+    };
+  }, [actionDraft, state.debug]);
+  const suggestedActionDebugTraceJson = useMemo(() => {
+    if (!debugEnabled || !suggestedActionDebugTrace) return "";
+    try {
+      return JSON.stringify(sanitizeDebugTraceValue(suggestedActionDebugTrace), null, 2);
+    } catch {
+      return "";
+    }
+  }, [debugEnabled, suggestedActionDebugTrace]);
 
   useEffect(() => {
     if (!actionDraft) {
@@ -917,6 +984,7 @@ export default function CoachView({
     if (!actionDraft) {
       setActionEditMode(false);
       setActionExercisesExpanded(false);
+      setActionDebugTraceOpen(false);
       setActionEditDraft({ title: "", gymId: "", sets: 3 });
       setActionErrors([]);
       setActionWarnings([]);
@@ -932,6 +1000,7 @@ export default function CoachView({
       sets: resolveDraftSetCount(actionDraft?.payload?.exercises),
     });
     setActionExercisesExpanded(false);
+    setActionDebugTraceOpen(false);
     setActionErrors([]);
     setPendingHighRiskDraft(null);
   }, [actionDraft, actionDraftGymId, actionDraftTitle]);
@@ -1653,6 +1722,12 @@ export default function CoachView({
     },
     [copyTextToClipboard]
   );
+  const handleCopySuggestedActionDebugTrace = useCallback(async () => {
+    await copyTextToClipboard(suggestedActionDebugTraceJson, {
+      successMessage: "Debug trace copied to clipboard.",
+      failureMessage: "Unable to copy debug trace right now.",
+    });
+  }, [copyTextToClipboard, suggestedActionDebugTraceJson]);
 
   const handleDiscardActionDraft = useCallback(() => {
     clearPersistedSuggestedAction();
@@ -2640,6 +2715,34 @@ export default function CoachView({
                         ) : null}
                       </div>
                     </details>
+                  ) : null}
+                  {debugEnabled && suggestedActionDebugTraceJson ? (
+                    <div className="coach-action-details ui-stack">
+                      <div className="ui-row ui-row--between ui-row--wrap">
+                        <div className="template-meta">Debug trace</div>
+                        <div className="ui-row ui-row--wrap">
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setActionDebugTraceOpen((prev) => !prev)}
+                          >
+                            {actionDebugTraceOpen ? "Hide debug trace" : "Show debug trace"}
+                          </Button>
+                          {actionDebugTraceOpen ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={() => void handleCopySuggestedActionDebugTrace()}
+                            >
+                              Copy
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                      {actionDebugTraceOpen ? (
+                        <pre className="coach-debug__payload">{suggestedActionDebugTraceJson}</pre>
+                      ) : null}
+                    </div>
                   ) : null}
 
                   {actionWarnings.length ? (
