@@ -44,14 +44,14 @@ const CONTEXT_CLAIM_REGEX =
   /available equipment|using .*equipment|based on .*equipment|i can see .*equipment|with your equipment/i;
 const WORKOUT_REQUEST_REGEX = /\b(workout|routine|session|plan)\b/i;
 const WORKOUT_EDIT_REQUEST_REGEX =
-  /\b(add|remove|swap|replace|adjust|change|include|exclude|without|update)\b/i;
+  /\b(add|remove|swap(?:\s+out)?|replace|adjust|change|include|exclude|without|update|delete|drop|take\s+out|get\s+rid\s+of)\b/i;
 const EDIT_REFERENCE_REGEX =
   /\b(?:to\s+(?:it|that|this)|(?:it|that|this)\b|current\s+(?:workout|draft)|same\s+(?:workout|draft))\b/i;
 const EDIT_CLARIFICATION_REGEX = /\b(?:i\s+mean|i\s+meant|meant)\b/i;
 const EXPLICIT_NEW_WORKOUT_REGEX =
   /\b(?:make|create|build|start)\b[\w\s]{0,20}\b(?:a\s+)?(?:new|another|different)\b[\w\s]{0,20}\b(?:workout|routine|session|plan|draft)\b|\b(?:new|another|different)\s+(?:workout|routine|session|plan|draft)\b/i;
 const SWAP_EDIT_REGEX =
-  /\b(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+?)(?:[.!?]|$)/i;
+  /\b(?:swap(?:\s+out)?|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+?)(?:[.!?]|$)/i;
 const LEG_EDIT_KEYWORD_REGEX =
   /\b(leg|legs|quad|quads|hamstring|hamstrings|glute|glutes|calf|calves|adductor|abductor)\b/i;
 const EXERCISE_CLARIFICATION_TOPIC_REGEX =
