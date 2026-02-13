@@ -46,9 +46,10 @@ const DEBUG_COMMIT_SHA =
 const EXPLICIT_NEW_WORKOUT_REGEX =
   /\b(?:make|create|build|start)\b[\w\s]{0,20}\b(?:a\s+)?(?:new|another|different)\b[\w\s]{0,20}\b(?:workout|routine|session|plan|draft)\b|\b(?:new|another|different)\s+(?:workout|routine|session|plan|draft)\b/i;
 const SIMPLE_ADD_EDIT_REGEX = /^(?:now\s+)?add(?:\s+in)?(?:\s+(\d+))?\s+(.+)$/i;
-const SIMPLE_REMOVE_EDIT_REGEX = /^(?:now\s+)?remove\s+(.+)$/i;
+const SIMPLE_REMOVE_EDIT_REGEX =
+  /^(?:now\s+)?(?:remove|delete|drop|exclude|take\s+out|get\s+rid\s+of)\s+(.+)$/i;
 const SIMPLE_SWAP_EDIT_REGEX =
-  /^(?:now\s+)?(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+)$/i;
+  /^(?:now\s+)?(?:swap(?:\s+out)?|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+)$/i;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",

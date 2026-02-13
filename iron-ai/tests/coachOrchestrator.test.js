@@ -633,6 +633,174 @@ describe("coach orchestrator", () => {
     expect(result.assistant).toContain("Dumbbell Bench Press");
   });
 
+  it("routes take-out phrasing to edit mode and removes atlas stones from the active draft", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 61, name: "Atlas Stones", primaryMuscles: ["full body"] },
+      { exerciseId: 62, name: "Barbell Row", primaryMuscles: ["back"] },
+      { exerciseId: 63, name: "Front Squat", primaryMuscles: ["quads"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      {
+        id: 61,
+        name: "Atlas Stones",
+        primaryMuscles: ["full body"],
+        default_sets: 3,
+        default_reps: 5,
+      },
+      { id: 62, name: "Barbell Row", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+      { id: 63, name: "Front Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 6 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strongman Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strongman Workout",
+        exercises: [
+          { exerciseId: 61, name: "Atlas Stones", sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 62, name: "Barbell Row", sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "take out the atlas stones",
+      responseMode: "workout",
+      draftEditConfig: {
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises).toHaveLength(1);
+    expect(updatedExercises[0]?.exerciseId).toBe(62);
+    expect(result.debug?.stamp).toMatchObject({
+      requestType: "edit",
+      modeReason: "EDIT_INTENT_DETECTED",
+      hasOps: false,
+      opsCount: 0,
+      hasDraft: true,
+      draftCount: 1,
+      fallbackUsed: true,
+      fallbackReason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      fallbackOpsCount: 1,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+  });
+
+  it("asks for clarification and keeps the draft unchanged for ambiguous take-out names", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 71, name: "Barbell Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 72, name: "Dumbbell Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 73, name: "Back Squat", primaryMuscles: ["quads"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      {
+        id: 71,
+        name: "Barbell Bench Press",
+        primaryMuscles: ["chest"],
+        default_sets: 4,
+        default_reps: 8,
+      },
+      {
+        id: 72,
+        name: "Dumbbell Bench Press",
+        primaryMuscles: ["chest"],
+        default_sets: 3,
+        default_reps: 10,
+      },
+      { id: 73, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Push Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Push Workout",
+        exercises: [
+          {
+            exerciseId: 71,
+            name: "Barbell Bench Press",
+            sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }],
+          },
+          {
+            exerciseId: 72,
+            name: "Dumbbell Bench Press",
+            sets: [{ reps: 10 }, { reps: 10 }, { reps: 10 }],
+          },
+          { exerciseId: 73, name: "Back Squat", sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "take out bench",
+      responseMode: "workout",
+      draftEditConfig: {
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell,dumbbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(result.debug?.stamp).toMatchObject({
+      requestType: "edit",
+      modeReason: "EDIT_INTENT_DETECTED",
+      hasDraft: true,
+      fallbackUsed: true,
+      fallbackReason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      fallbackOpsCount: 1,
+      applied: false,
+      applyReason: "APPLY_SKIPPED",
+    });
+    expect(result.assistant).toContain("matches multiple options");
+    expect(result.assistant).toContain("Barbell Bench Press");
+    expect(result.assistant).toContain("Dumbbell Bench Press");
+  });
+
   it("applies add-named fallback for add-in phrasing with runtime-shaped response", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
