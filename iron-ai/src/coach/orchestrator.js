@@ -45,6 +45,10 @@ const DEBUG_COMMIT_SHA =
   import.meta.env?.VITE_COMMIT_SHA ?? import.meta.env?.VITE_GIT_SHA ?? "unknown";
 const EXPLICIT_NEW_WORKOUT_REGEX =
   /\b(?:make|create|build|start)\b[\w\s]{0,20}\b(?:a\s+)?(?:new|another|different)\b[\w\s]{0,20}\b(?:workout|routine|session|plan|draft)\b|\b(?:new|another|different)\s+(?:workout|routine|session|plan|draft)\b/i;
+const SIMPLE_ADD_EDIT_REGEX = /^(?:now\s+)?add(?:\s+in)?(?:\s+(\d+))?\s+(.+)$/i;
+const SIMPLE_REMOVE_EDIT_REGEX = /^(?:now\s+)?remove\s+(.+)$/i;
+const SIMPLE_SWAP_EDIT_REGEX =
+  /^(?:now\s+)?(?:swap|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+)$/i;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -625,6 +629,12 @@ function buildEditFailureAssistantMessage(error) {
   if (/how many exercises should i add/i.test(detail)) {
     return detail;
   }
+  if (/which exact exercise names? should i (?:add|remove) to this workout\?/i.test(detail)) {
+    return detail;
+  }
+  if (/which exact exercises should i swap in this workout\?/i.test(detail)) {
+    return detail;
+  }
   if (/matches multiple options|please specify the exact exercise name/i.test(detail)) {
     return `${baseMessage} ${detail}`;
   }
@@ -739,6 +749,123 @@ function inferRecentAddCountFromHistory(chatHistory) {
   return null;
 }
 
+function normalizeExerciseEditQuery(value) {
+  return String(value ?? "")
+    .replace(/[.!?]+$/g, " ")
+    .replace(/\b(?:exercise|exercises)\b/gi, " ")
+    .replace(/\b(?:to|from|in|on)\s+(?:it|that|this)\b/gi, " ")
+    .replace(/\b(?:it|that|this)\b/gi, " ")
+    .replace(/\b(?:the|a|an)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSimpleExerciseEditQuery(value) {
+  const normalized = normalizeText(value);
+  if (!normalized) return false;
+  return !/\b(?:and|then|also|plus)\b|,/.test(normalized);
+}
+
+function inferFallbackEditOpsFromUserMessage({ userMessage, chatHistory }) {
+  const text = String(userMessage ?? "").trim();
+  if (!text) {
+    return { attempted: false, ops: [], error: null, reason: "NONE" };
+  }
+
+  const addMatch = text.match(SIMPLE_ADD_EDIT_REGEX);
+  if (addMatch) {
+    const count = toPositiveInt(addMatch[1]) ?? 1;
+    const exerciseName = normalizeExerciseEditQuery(addMatch[2]);
+    if (!exerciseName || !isSimpleExerciseEditQuery(exerciseName)) {
+      return {
+        attempted: true,
+        ops: [],
+        error: "Which exact exercise name should I add to this workout?",
+        reason: "DETERMINISTIC_EDIT_FALLBACK_CLARIFY",
+      };
+    }
+    return {
+      attempted: true,
+      ops: [
+        {
+          op: "add_exercises",
+          count,
+          placement: "end",
+          exerciseName,
+        },
+      ],
+      error: null,
+      reason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+    };
+  }
+
+  const removeMatch = text.match(SIMPLE_REMOVE_EDIT_REGEX);
+  if (removeMatch) {
+    const exerciseName = normalizeExerciseEditQuery(removeMatch[1]);
+    if (!exerciseName || !isSimpleExerciseEditQuery(exerciseName)) {
+      return {
+        attempted: true,
+        ops: [],
+        error: "Which exact exercise name should I remove from this workout?",
+        reason: "DETERMINISTIC_EDIT_FALLBACK_CLARIFY",
+      };
+    }
+    return {
+      attempted: true,
+      ops: [{ op: "remove_exercise", exerciseName }],
+      error: null,
+      reason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+    };
+  }
+
+  const swapMatch = text.match(SIMPLE_SWAP_EDIT_REGEX);
+  if (swapMatch) {
+    const fromExerciseName = normalizeExerciseEditQuery(swapMatch[1]);
+    const toExerciseName = normalizeExerciseEditQuery(swapMatch[2]);
+    if (
+      !fromExerciseName ||
+      !toExerciseName ||
+      !isSimpleExerciseEditQuery(fromExerciseName) ||
+      !isSimpleExerciseEditQuery(toExerciseName)
+    ) {
+      return {
+        attempted: true,
+        ops: [],
+        error: "Which exact exercises should I swap in this workout?",
+        reason: "DETERMINISTIC_EDIT_FALLBACK_CLARIFY",
+      };
+    }
+    return {
+      attempted: true,
+      ops: [{ op: "swap_exercise", fromExerciseName, toExerciseName }],
+      error: null,
+      reason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+    };
+  }
+
+  const priorCount = inferRecentAddCountFromHistory(chatHistory);
+  if (priorCount != null) {
+    const trimmed = normalizeExerciseEditQuery(text);
+    if (trimmed && isSimpleExerciseEditQuery(trimmed) && /^i mean\b/i.test(text)) {
+      return {
+        attempted: true,
+        ops: [
+          {
+            op: "add_exercises",
+            count: priorCount,
+            placement: "end",
+            exerciseName: trimmed,
+          },
+        ],
+        error: null,
+        reason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      };
+    }
+  }
+
+  return { attempted: false, ops: [], error: null, reason: "NONE" };
+}
+
 function isExplicitNewWorkoutRequest(value) {
   return EXPLICIT_NEW_WORKOUT_REGEX.test(String(value ?? ""));
 }
@@ -822,8 +949,10 @@ function resolveNamedExerciseIds({
     if (!queryCompact) return false;
     return entry.compact.includes(queryCompact) || queryCompact.includes(entry.compact);
   });
-  if (count === 1 && strongMatches.length > 1) {
-    const optionNames = strongMatches.slice(0, 3).map((entry) => entry.name);
+  const topScore = ranked[0]?.score ?? 0;
+  const ambiguousStrongMatches = strongMatches.filter((entry) => topScore - entry.score <= 0.05);
+  if (count === 1 && ambiguousStrongMatches.length > 1) {
+    const optionNames = ambiguousStrongMatches.slice(0, 3).map((entry) => entry.name);
     return {
       valid: false,
       ids: [],
@@ -952,6 +1081,43 @@ function applyAddExercisesOperation({
   return { valid: true, error: null };
 }
 
+function applyRemoveExerciseOperation({ draft, operation, exerciseCatalogById }) {
+  const exercises = Array.isArray(draft?.payload?.exercises) ? draft.payload.exercises : [];
+  if (!exercises.length) {
+    return { valid: false, error: "Current workout draft has no exercises to remove." };
+  }
+
+  let targetExerciseId = toPositiveInt(operation?.exerciseId);
+  if (targetExerciseId == null) {
+    const exerciseName = String(operation?.exerciseName ?? operation?.name ?? "").trim();
+    const draftOptions = exercises
+      .map((entry) => ({
+        exerciseId: toPositiveInt(entry?.exerciseId),
+        name: toDraftExerciseName(entry, exerciseCatalogById),
+      }))
+      .filter((entry) => entry.exerciseId != null && entry.name);
+    const resolved = resolveExerciseIdByName({
+      query: exerciseName,
+      options: draftOptions,
+    });
+    if (!resolved.valid) return { valid: false, error: resolved.error };
+    targetExerciseId = resolved.exerciseId;
+  }
+
+  const removeIndex = exercises.findIndex(
+    (entry) => toPositiveInt(entry?.exerciseId) === targetExerciseId
+  );
+  if (removeIndex < 0) {
+    return { valid: false, error: "That exercise is not present in the current workout draft." };
+  }
+
+  draft.payload.exercises = [
+    ...exercises.slice(0, removeIndex),
+    ...exercises.slice(removeIndex + 1),
+  ];
+  return { valid: true, error: null };
+}
+
 function applySwapExerciseOperation({
   draft,
   operation,
@@ -1073,6 +1239,15 @@ function applyEditOperations({
       if (!result.valid) return result;
       continue;
     }
+    if (opName === "remove_exercise" || opName === "delete_exercise") {
+      const result = applyRemoveExerciseOperation({
+        draft: nextDraft,
+        operation,
+        exerciseCatalogById,
+      });
+      if (!result.valid) return result;
+      continue;
+    }
     return {
       valid: false,
       error: `Unsupported edit operation: ${opName || "unknown"}.`,
@@ -1153,6 +1328,7 @@ export async function runCoachTurn({
       candidateCount: 0,
       fallbackUsed: false,
       fallbackReason: "NONE",
+      fallbackOpsCount: 0,
       opsProduced: 0,
       validationErrors: null,
     },
@@ -1708,7 +1884,10 @@ export async function runCoachTurn({
     debug.stamp.applyReason = opFromModel.length ? "UNKNOWN_SHAPE" : "OPS_EMPTY";
     debug.stamp.opsProduced = 0;
     let fallbackOps = [];
+    let fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_OPS";
+    let fallbackAttempted = false;
     if (editIntent.kind === "add_legs_exercises") {
+      fallbackAttempted = true;
       fallbackOps = [
         {
           op: "add_exercises",
@@ -1721,24 +1900,27 @@ export async function runCoachTurn({
       editIntent.kind === "add_named_exercises" &&
       editIntent.toExerciseName
     ) {
+      fallbackAttempted = true;
       const addCount = toPositiveInt(editIntent.addCount) ?? inferRecentAddCountFromHistory(chatHistory);
       if (addCount == null) {
         editResolutionError = "How many exercises should I add to your current workout?";
+        fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_CLARIFY";
       } else {
-      fallbackOps = [
-        {
-          op: "add_exercises",
-          count: addCount,
-          placement: "end",
-          exerciseName: editIntent.toExerciseName,
-        },
-      ];
+        fallbackOps = [
+          {
+            op: "add_exercises",
+            count: addCount,
+            placement: "end",
+            exerciseName: editIntent.toExerciseName,
+          },
+        ];
       }
     } else if (
       editIntent.kind === "swap_exercise" &&
       editIntent.fromExerciseName &&
       editIntent.toExerciseName
     ) {
+      fallbackAttempted = true;
       fallbackOps = [
         {
           op: "swap_exercise",
@@ -1747,11 +1929,27 @@ export async function runCoachTurn({
         },
       ];
     }
+    if (!opFromModel.length && !fallbackOps.length && !editResolutionError) {
+      const inferredFallback = inferFallbackEditOpsFromUserMessage({
+        userMessage,
+        chatHistory,
+      });
+      if (inferredFallback.attempted) {
+        fallbackAttempted = true;
+        fallbackReason = inferredFallback.reason ?? "DETERMINISTIC_EDIT_FALLBACK_OPS";
+      }
+      if (inferredFallback.ops.length) {
+        fallbackOps = inferredFallback.ops;
+      } else if (inferredFallback.error) {
+        editResolutionError = inferredFallback.error;
+      }
+    }
     let opsToApply = opFromModel.length ? opFromModel : fallbackOps;
     debug.stamp.opsProduced = opsToApply.length;
-    if (fallbackOps.length && !opFromModel.length) {
+    if (!opFromModel.length && fallbackAttempted) {
       debug.stamp.fallbackUsed = true;
-      debug.stamp.fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_OPS";
+      debug.stamp.fallbackReason = fallbackReason;
+      debug.stamp.fallbackOpsCount = fallbackOps.length;
     }
     if (opsToApply.length) {
       let editResult = applyEditOperations({
@@ -1772,6 +1970,7 @@ export async function runCoachTurn({
         opsToApply = fallbackOps;
         debug.stamp.fallbackUsed = true;
         debug.stamp.fallbackReason = "EDIT_OP_VALIDATION_RETRY";
+        debug.stamp.fallbackOpsCount = fallbackOps.length;
         debug.stamp.opsProduced = opsToApply.length;
       }
       if (editResult.valid) {
