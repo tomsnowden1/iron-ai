@@ -102,6 +102,45 @@ describe("coach server api core", () => {
     ]);
   });
 
+  it("forwards response_format for createChatCompletion requests", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: "{}" } }],
+      }),
+    });
+
+    const responseFormat = {
+      type: "json_schema",
+      json_schema: {
+        name: "coach_edit_ops_v1",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            contractVersion: { type: "string" },
+          },
+        },
+      },
+    };
+
+    const result = await handleCoachRequest({
+      payload: {
+        action: "createChatCompletion",
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "Edit this workout." }],
+        responseFormat,
+      },
+      env: { OPENAI_API_KEY: "sk-test" },
+      fetchImpl,
+    });
+
+    expect(result.status).toBe(200);
+    const upstreamBody = JSON.parse(fetchImpl.mock.calls[0]?.[1]?.body ?? "{}");
+    expect(upstreamBody.response_format).toEqual(responseFormat);
+  });
+
   it("returns a clear upstream connectivity error when OpenAI is unreachable", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error("fetch failed"));
     const result = await handleCoachRequest({

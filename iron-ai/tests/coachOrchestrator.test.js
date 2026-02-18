@@ -1728,7 +1728,7 @@ describe("coach orchestrator", () => {
     expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
   });
 
-  it("returns clarification without regeneration for generic edit requests with no ops", async () => {
+  it("retries strict edit schema once and applies valid edit ops", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
       { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
@@ -1743,6 +1743,27 @@ describe("coach orchestrator", () => {
       content: "Updated your workout.",
       toolCalls: [],
     });
+    mocks.createChatCompletion
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Updated.","actionDraft":{"kind":"create_workout","confidence":0.8,"risk":"low","title":"Workout","summary":"Updated","payload":{"name":"Workout","exercises":[{"exerciseId":10,"sets":[{"reps":5}]}]}}}
+\`\`\``,
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: `{"contractVersion":"coach_action_v1","assistantText":"Removed pull up.","editDraft":{"mode":"EDIT","ops":[{"op":"remove_exercise","exerciseId":12}]}}`,
+            },
+          },
+        ],
+      });
 
     const currentDraft = {
       kind: "create_workout",
@@ -1780,19 +1801,22 @@ describe("coach orchestrator", () => {
       memorySummary: null,
     });
 
-    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
-    expect(result.actionDraft).toEqual(currentDraft);
-    expect(String(result.assistant ?? "")).toMatch(/pick one: 1\) swap one exercise/i);
-    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(mocks.createChatCompletion).toHaveBeenCalledTimes(2);
+    expect(result.debug?.editResolution?.status).toBe("applied");
+    expect(result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)).toEqual([
+      10,
+      11,
+    ]);
     expect(result.debug?.stamp).toMatchObject({
-      fallbackUsed: true,
-      fallbackReason: "GENERIC_EDIT_CLARIFICATION",
-      applyReason: "EDIT_CLARIFICATION_REQUIRED",
-      opsProduced: 0,
+      schemaUsed: "coach_edit_ops_v1",
+      retryCount: 1,
+      applyReason: "APPLIED",
     });
+    expect(String(result.debug?.stamp?.finalOutcomeReason ?? "")).toContain("SCHEMA_RETRY_APPLIED");
+    expect(result.debug?.stamp?.fallbackReason).not.toBe("REGENERATE_FULL_DRAFT");
   });
 
-  it("uses regenerate-full-draft fallback for underspecified edits when ops are missing", async () => {
+  it("returns clarification without regeneration when strict edit schema retry still fails", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
       { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
@@ -1805,6 +1829,94 @@ describe("coach orchestrator", () => {
     ]);
     mocks.streamChatCompletion.mockResolvedValue({
       content: "Updated your workout.",
+      toolCalls: [],
+    });
+    mocks.createChatCompletion
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: `{"contractVersion":"coach_action_v1","assistantText":"Updated.","actionDraft":{"kind":"create_workout"}}`,
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        choices: [
+          {
+            message: {
+              content: `{"assistantText":"Updated.","editDraft":{"mode":"AUTO","ops":[]}}`,
+            },
+          },
+        ],
+      });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 11, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change this workout",
+      responseMode: "workout",
+      draftEditConfig: { mode: "edit", currentDraft },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(mocks.createChatCompletion).toHaveBeenCalledTimes(2);
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(String(result.assistant ?? "")).toMatch(/couldn't parse a safe edit operation/i);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(result.debug?.stamp).toMatchObject({
+      fallbackUsed: true,
+      fallbackReason: "EDIT_SCHEMA_RETRY_FAILED",
+      applyReason: "EDIT_SCHEMA_CLARIFICATION_REQUIRED",
+      schemaUsed: "coach_edit_ops_v1",
+      retryCount: 1,
+      opsProduced: 0,
+    });
+    expect(result.debug?.stamp?.fallbackReason).not.toBe("REGENERATE_FULL_DRAFT");
+  });
+
+  it("uses regenerate-full-draft fallback when provided edit ops cannot be applied", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 12, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 12, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Updated your workout.","editDraft":{"mode":"EDIT","ops":[{"op":"unsupported_edit"}]}}
+\`\`\``,
       toolCalls: [],
     });
     mocks.createChatCompletion.mockResolvedValue({
@@ -1879,7 +1991,9 @@ describe("coach orchestrator", () => {
       { id: 12, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
     ]);
     mocks.streamChatCompletion.mockResolvedValue({
-      content: "Updated your workout.",
+      content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Updated your workout.","editDraft":{"mode":"EDIT","ops":[{"op":"unsupported_edit"}]}}
+\`\`\``,
       toolCalls: [],
     });
     mocks.createChatCompletion.mockResolvedValue({
@@ -1954,7 +2068,9 @@ describe("coach orchestrator", () => {
       { id: 11, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
     ]);
     mocks.streamChatCompletion.mockResolvedValue({
-      content: "Updated your workout.",
+      content: `\`\`\`json
+{"contractVersion":"coach_action_v1","assistantText":"Updated your workout.","editDraft":{"mode":"EDIT","ops":[{"op":"unsupported_edit"}]}}
+\`\`\``,
       toolCalls: [],
     });
     mocks.createChatCompletion.mockResolvedValue({
