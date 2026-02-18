@@ -324,6 +324,79 @@ describe("coach orchestrator", () => {
     expect(result.debug?.editResolution?.status).toBe("applied");
   });
 
+  it("prefers generic leg exercises over alphabetical oddball leg candidates", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 13, name: "Alternate Leg Diagonal Bound", primaryMuscles: ["quads"] },
+      { exerciseId: 29, name: "Atlas Stones", primaryMuscles: ["hamstrings"] },
+      { exerciseId: 31, name: "Goblet Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 32, name: "Walking Lunge", primaryMuscles: ["quads", "glutes"] },
+      { exerciseId: 33, name: "Leg Press", primaryMuscles: ["quads"] },
+      { exerciseId: 99, name: "Bench Press", primaryMuscles: ["chest"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 13, name: "Alternate Leg Diagonal Bound", primaryMuscles: ["quads"], default_sets: 3, default_reps: 10 },
+      { id: 29, name: "Atlas Stones", primaryMuscles: ["hamstrings"], default_sets: 3, default_reps: 8 },
+      { id: 31, name: "Goblet Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 10 },
+      { id: 32, name: "Walking Lunge", primaryMuscles: ["quads", "glutes"], default_sets: 3, default_reps: 10 },
+      { id: 33, name: "Leg Press", primaryMuscles: ["quads"], default_sets: 3, default_reps: 12 },
+      { id: 99, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Push Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Push Workout",
+        exercises: [
+          { exerciseId: 99, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "add in 2 leg exercises",
+      responseMode: "workout",
+      draftEditConfig: {
+        mode: "edit",
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: false,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: false,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: [],
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises.length).toBe(currentDraft.payload.exercises.length + 2);
+    expect(updatedExercises.slice(0, 1)).toEqual(currentDraft.payload.exercises);
+    expect(updatedExercises.slice(-2).map((entry) => entry.exerciseId)).toEqual([31, 32]);
+    expect(result.debug?.stamp).toMatchObject({
+      modeChosen: "edit",
+      intent: "add_legs_exercises",
+      fallbackUsed: true,
+      fallbackReason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      opsProduced: 1,
+    });
+    expect(result.debug?.editResolution?.status).toBe("applied");
+  });
+
   it("applies add-named edits via deterministic fallback when model ops are missing", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
