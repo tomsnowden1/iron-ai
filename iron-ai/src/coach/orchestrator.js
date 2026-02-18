@@ -28,6 +28,7 @@ import {
   validateAddLegEditResult,
   validateCoachResponse,
 } from "./responseValidation";
+import { inferExerciseEquipment } from "../equipment/inference";
 
 const MAX_TOOL_LOOPS = 2;
 const COACH_TEMPERATURE = 0.2;
@@ -50,6 +51,16 @@ const SIMPLE_REMOVE_EDIT_REGEX =
   /^(?:now\s+)?(?:remove|delete|drop|exclude|take\s+out|get\s+rid\s+of)\s+(.+)$/i;
 const SIMPLE_SWAP_EDIT_REGEX =
   /^(?:now\s+)?(?:swap(?:\s+out)?|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+)$/i;
+const EDIT_ONLY_DUMBBELL_REGEX =
+  /\b(?:only|just)\b[\w\s]{0,30}\bdumbbells?\b|\bdumbbells?\b[\w\s]{0,10}\bonly\b|\bonly do it with dumbbells?\b/i;
+const EDIT_NO_BARBELL_REGEX =
+  /\b(?:no|without|remove|exclude)\b[\w\s]{0,20}\bbarbells?\b|\bbarbell[-\s]?free\b/i;
+const EDIT_BODYWEIGHT_ONLY_REGEX =
+  /\bbodyweight[-\s]?only\b|\bonly\b[\w\s]{0,20}\bbodyweight\b|\bno equipment\b/i;
+const EDIT_CLARIFICATION_ERROR_REGEX =
+  /how many exercises should i add|which exact exercise|do you want .* exercises added|matches multiple options/i;
+const EDIT_STRUCTURE_CHANGE_REGEX =
+  /\b(add|remove|delete|drop|swap|replace|change|shorter|longer|increase|decrease|set|sets|rep|reps|duration|minute|minutes|exercise|exercises)\b/i;
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -542,6 +553,316 @@ function scoreNameMatch(queryText, candidateText) {
   });
   if (overlap === 0) return 0;
   return overlap / queryTokens.length;
+}
+
+function normalizeRequiredEquipmentIds(exercise) {
+  const existing = Array.isArray(exercise?.requiredEquipmentIds)
+    ? exercise.requiredEquipmentIds
+    : [];
+  if (existing.length > 0) {
+    return Array.from(new Set(existing.map((value) => String(value ?? "").trim()).filter(Boolean)));
+  }
+  const inferred = inferExerciseEquipment(exercise);
+  const required = Array.isArray(inferred?.requiredEquipmentIds) ? inferred.requiredEquipmentIds : [];
+  return Array.from(new Set(required.map((value) => String(value ?? "").trim()).filter(Boolean)));
+}
+
+function detectDeterministicConstraintIntent(userMessage) {
+  const text = String(userMessage ?? "");
+  if (!text.trim()) return null;
+  if (EDIT_BODYWEIGHT_ONLY_REGEX.test(text)) {
+    return {
+      type: "BODYWEIGHT_ONLY",
+      label: "bodyweight-only",
+      assistantLabel: "bodyweight exercises only",
+    };
+  }
+  if (EDIT_ONLY_DUMBBELL_REGEX.test(text)) {
+    return {
+      type: "ONLY_DUMBBELL",
+      label: "dumbbell-only",
+      assistantLabel: "dumbbell exercises only",
+    };
+  }
+  if (EDIT_NO_BARBELL_REGEX.test(text)) {
+    return {
+      type: "NO_BARBELL",
+      label: "no-barbell",
+      assistantLabel: "without barbell exercises",
+    };
+  }
+  return null;
+}
+
+function parseMuscleTokens(exercise) {
+  const values = [];
+  const append = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach((entry) => append(entry));
+      return;
+    }
+    const safe = String(value ?? "").trim();
+    if (safe) values.push(safe);
+  };
+  append(exercise?.primaryMuscles);
+  append(exercise?.secondaryMuscles);
+  append(exercise?.muscle_group);
+  append(exercise?.muscleGroup);
+  return splitNormalizedTokens(values.join(" "));
+}
+
+function computeExerciseSimilarityScore(sourceExercise, candidateExercise) {
+  let score = scoreNameMatch(sourceExercise?.name ?? "", candidateExercise?.name ?? "");
+  const sourcePattern = normalizeText(sourceExercise?.pattern ?? "");
+  const candidatePattern = normalizeText(candidateExercise?.pattern ?? "");
+  if (sourcePattern && candidatePattern && sourcePattern === candidatePattern) {
+    score += 2.5;
+  }
+  const sourceCategory = normalizeText(sourceExercise?.category ?? "");
+  const candidateCategory = normalizeText(candidateExercise?.category ?? "");
+  if (sourceCategory && candidateCategory && sourceCategory === candidateCategory) {
+    score += 1.2;
+  }
+  const sourceMuscleGroup = normalizeText(sourceExercise?.muscle_group ?? sourceExercise?.muscleGroup ?? "");
+  const candidateMuscleGroup = normalizeText(
+    candidateExercise?.muscle_group ?? candidateExercise?.muscleGroup ?? ""
+  );
+  if (sourceMuscleGroup && candidateMuscleGroup && sourceMuscleGroup === candidateMuscleGroup) {
+    score += 2;
+  }
+  const sourceMuscles = new Set(parseMuscleTokens(sourceExercise));
+  const candidateMuscles = new Set(parseMuscleTokens(candidateExercise));
+  let overlap = 0;
+  sourceMuscles.forEach((token) => {
+    if (candidateMuscles.has(token)) overlap += 1;
+  });
+  if (overlap > 0) {
+    score += Math.min(2, overlap * 0.6);
+  }
+  return score;
+}
+
+function doesExerciseMeetConstraint(exercise, constraintIntent) {
+  const required = normalizeRequiredEquipmentIds(exercise);
+  if (constraintIntent?.type === "BODYWEIGHT_ONLY") {
+    return required.length > 0 && required.every((id) => id === "bodyweight");
+  }
+  if (constraintIntent?.type === "NO_BARBELL") {
+    return !required.some((id) => id === "barbell" || id === "trap_bar" || id === "ez_bar");
+  }
+  if (constraintIntent?.type === "ONLY_DUMBBELL") {
+    if (!required.includes("dumbbell")) return false;
+    return !required.some(
+      (id) =>
+        id !== "dumbbell" &&
+        id !== "bodyweight" &&
+        id !== "bench"
+    );
+  }
+  return false;
+}
+
+function resolveConstraintReplacementExercise({
+  sourceExercise,
+  sourceExerciseId,
+  exerciseCatalogById,
+  constraintIntent,
+  draftExerciseIds,
+  usedReplacementIds,
+}) {
+  const candidates = [];
+  const list = Array.from(exerciseCatalogById.entries());
+  for (let i = 0; i < list.length; i += 1) {
+    const [candidateId, candidateExercise] = list[i];
+    const safeId = toPositiveInt(candidateId);
+    if (safeId == null || safeId === sourceExerciseId) continue;
+    if (!candidateExercise || typeof candidateExercise !== "object") continue;
+    if (!doesExerciseMeetConstraint(candidateExercise, constraintIntent)) continue;
+    const score = computeExerciseSimilarityScore(sourceExercise, candidateExercise);
+    const inDraft = draftExerciseIds.has(safeId);
+    const alreadyUsed = usedReplacementIds.has(safeId);
+    candidates.push({
+      exerciseId: safeId,
+      exercise: candidateExercise,
+      score,
+      inDraft,
+      alreadyUsed,
+    });
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => {
+    if (a.inDraft !== b.inDraft) return a.inDraft ? 1 : -1;
+    if (a.alreadyUsed !== b.alreadyUsed) return a.alreadyUsed ? 1 : -1;
+    if (b.score !== a.score) return b.score - a.score;
+    return String(a.exercise?.name ?? "").localeCompare(String(b.exercise?.name ?? ""));
+  });
+  return candidates[0];
+}
+
+function applyDeterministicConstraintEdit({
+  currentDraft,
+  constraintIntent,
+  exerciseCatalogById,
+}) {
+  if (!currentDraft || typeof currentDraft !== "object") {
+    return { valid: false, error: "Current draft is missing." };
+  }
+  const exercises = Array.isArray(currentDraft?.payload?.exercises)
+    ? currentDraft.payload.exercises
+    : [];
+  if (!exercises.length) {
+    return { valid: false, error: "Current draft has no exercises to edit." };
+  }
+  const nextDraft = JSON.parse(JSON.stringify(currentDraft));
+  const nextExercises = Array.isArray(nextDraft?.payload?.exercises)
+    ? nextDraft.payload.exercises
+    : [];
+  const draftExerciseIds = new Set(
+    nextExercises.map((entry) => toPositiveInt(entry?.exerciseId)).filter((value) => value != null)
+  );
+  const usedReplacementIds = new Set();
+  const unmappedNames = [];
+  let changedCount = 0;
+  for (let i = 0; i < nextExercises.length; i += 1) {
+    const entry = nextExercises[i];
+    const sourceExerciseId = toPositiveInt(entry?.exerciseId);
+    const sourceExercise = sourceExerciseId != null ? exerciseCatalogById.get(sourceExerciseId) : null;
+    const sourceName =
+      toDraftExerciseName(entry, exerciseCatalogById) || `exercise #${i + 1}`;
+    if (sourceExerciseId == null || !sourceExercise) {
+      unmappedNames.push(sourceName);
+      continue;
+    }
+    if (doesExerciseMeetConstraint(sourceExercise, constraintIntent)) {
+      continue;
+    }
+    const replacement = resolveConstraintReplacementExercise({
+      sourceExercise,
+      sourceExerciseId,
+      exerciseCatalogById,
+      constraintIntent,
+      draftExerciseIds,
+      usedReplacementIds,
+    });
+    if (!replacement?.exerciseId) {
+      unmappedNames.push(sourceName);
+      continue;
+    }
+    entry.exerciseId = replacement.exerciseId;
+    if (replacement.exercise?.name) {
+      if (Object.prototype.hasOwnProperty.call(entry, "name")) {
+        entry.name = replacement.exercise.name;
+      } else {
+        entry.name = replacement.exercise.name;
+      }
+      if (Object.prototype.hasOwnProperty.call(entry, "exerciseName")) {
+        entry.exerciseName = replacement.exercise.name;
+      }
+    }
+    usedReplacementIds.add(replacement.exerciseId);
+    changedCount += 1;
+  }
+  if (unmappedNames.length) {
+    return {
+      valid: false,
+      error: `Could not safely convert these exercises for ${constraintIntent?.label ?? "the requested constraint"}: ${unmappedNames.join(", ")}.`,
+    };
+  }
+  return {
+    valid: true,
+    draft: nextDraft,
+    changed: changedCount > 0,
+  };
+}
+
+function buildConstraintNoChangeAssistantMessage(constraintIntent) {
+  if (!constraintIntent) return "Your current draft already matches the requested constraint.";
+  return `Your current draft already uses ${constraintIntent.assistantLabel}.`;
+}
+
+function isEditClarificationError(errorText) {
+  return EDIT_CLARIFICATION_ERROR_REGEX.test(String(errorText ?? ""));
+}
+
+function isStructureChangeRequested(userMessage) {
+  return EDIT_STRUCTURE_CHANGE_REGEX.test(String(userMessage ?? ""));
+}
+
+function hasSameExercisePrescriptions(previousEntry, nextEntry) {
+  const previousSets = JSON.stringify(previousEntry?.sets ?? null);
+  const nextSets = JSON.stringify(nextEntry?.sets ?? null);
+  if (previousSets !== nextSets) return false;
+  const previousReps = JSON.stringify(previousEntry?.reps ?? null);
+  const nextReps = JSON.stringify(nextEntry?.reps ?? null);
+  if (previousReps !== nextReps) return false;
+  return true;
+}
+
+function validateRegeneratedEditDraft({
+  candidateDraft,
+  currentDraft,
+  currentDraftKind,
+  libraryIdSet,
+  userMessage,
+}) {
+  if (!candidateDraft || typeof candidateDraft !== "object") {
+    return { valid: false, error: "Regenerated edit did not return a valid action draft." };
+  }
+  if (candidateDraft.kind !== currentDraftKind) {
+    return {
+      valid: false,
+      error: `Regenerated edit returned kind "${candidateDraft.kind ?? "unknown"}" but expected "${currentDraftKind}".`,
+    };
+  }
+  const nextExercises = Array.isArray(candidateDraft?.payload?.exercises)
+    ? candidateDraft.payload.exercises
+    : [];
+  if (!nextExercises.length) {
+    return { valid: false, error: "Regenerated edit returned no exercises." };
+  }
+  for (let i = 0; i < nextExercises.length; i += 1) {
+    const exerciseId = toPositiveInt(nextExercises[i]?.exerciseId);
+    if (exerciseId == null || !libraryIdSet.has(exerciseId)) {
+      return {
+        valid: false,
+        error: `Regenerated edit returned unknown exercise ID: ${nextExercises[i]?.exerciseId ?? "unknown"}.`,
+      };
+    }
+  }
+  const previousExercises = Array.isArray(currentDraft?.payload?.exercises)
+    ? currentDraft.payload.exercises
+    : [];
+  if (!isStructureChangeRequested(userMessage)) {
+    if (previousExercises.length !== nextExercises.length) {
+      return {
+        valid: false,
+        error: "Regenerated edit changed exercise count without an explicit request.",
+      };
+    }
+    for (let i = 0; i < previousExercises.length; i += 1) {
+      if (!hasSameExercisePrescriptions(previousExercises[i], nextExercises[i])) {
+        return {
+          valid: false,
+          error: "Regenerated edit changed sets/reps without an explicit request.",
+        };
+      }
+    }
+  }
+  if (!didDraftExercisesChange(currentDraft, candidateDraft)) {
+    return { valid: false, error: "Regenerated edit did not apply any draft changes." };
+  }
+  return { valid: true, error: null };
+}
+
+function buildRegenerateEditPrompt({ userMessage, currentDraftKind }) {
+  return [
+    "Your previous response did not provide usable edit operations.",
+    `Regenerate this as a full updated actionDraft with kind "${currentDraftKind}".`,
+    "Return one fenced ```json``` block with contractVersion coach_action_v1, assistantText, and actionDraft.",
+    "Use only known exerciseId values from the provided exercise candidates list.",
+    "Preserve existing order and set/rep prescriptions unless the user explicitly asked to change them.",
+    `User request: ${String(userMessage ?? "").trim()}`,
+  ].join(" ");
 }
 
 function toDraftExerciseName(entry, exerciseCatalogById) {
@@ -1390,12 +1711,12 @@ export async function runCoachTurn({
   let allowedCandidateIds = new Set();
   let exerciseCatalogById = new Map();
   const currentDraft = draftEditConfig?.currentDraft ?? null;
-  const hasEditableWorkoutDraft =
-    currentDraft?.kind === "create_workout" &&
+  const hasEditableDraft =
+    (currentDraft?.kind === "create_workout" || currentDraft?.kind === "create_template") &&
     Array.isArray(currentDraft?.payload?.exercises) &&
     currentDraft.payload.exercises.length > 0;
   const requestedEditMode = draftEditConfig?.mode === "edit";
-  const editIntent = hasEditableWorkoutDraft
+  const editIntent = hasEditableDraft
     ? parseCoachEditIntent(userMessage)
     : {
         isEditRequest: false,
@@ -1406,7 +1727,7 @@ export async function runCoachTurn({
       };
   const explicitNewWorkoutRequest = isExplicitNewWorkoutRequest(userMessage);
   const editModeEnabled = Boolean(
-    hasEditableWorkoutDraft &&
+    hasEditableDraft &&
       !explicitNewWorkoutRequest &&
       (requestedEditMode || editIntent.isEditRequest)
   );
@@ -1414,9 +1735,9 @@ export async function runCoachTurn({
   debug.stamp.activeDraftId =
     draftEditConfig?.draftId ??
     draftEditConfig?.activeDraftId ??
-    (hasEditableWorkoutDraft ? "visible_suggested_draft" : null);
+    (hasEditableDraft ? "visible_suggested_draft" : null);
   debug.stamp.modeChosen = editModeEnabled ? "edit" : "draft";
-  if (!hasEditableWorkoutDraft) {
+  if (!hasEditableDraft) {
     debug.stamp.modeReason = "NO_EDITABLE_DRAFT";
   } else if (explicitNewWorkoutRequest) {
     debug.stamp.modeReason = "EXPLICIT_CREATE_REQUEST";
@@ -1877,117 +2198,146 @@ export async function runCoachTurn({
 
   if (editModeEnabled) {
     const editContract = normalizeEditContract(parsedEditDraft);
+    const constraintIntent = detectDeterministicConstraintIntent(userMessage);
     let resolvedDraft = null;
     let editResolutionError = null;
+    const currentDraftKind = String(currentDraft?.kind ?? "").trim();
     const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
+    let opsToApply = [];
     debug.stamp.hasOps = opFromModel.length > 0;
     debug.stamp.opsCount = opFromModel.length;
-    debug.stamp.applyReason = opFromModel.length ? "UNKNOWN_SHAPE" : "OPS_EMPTY";
+    debug.stamp.applyReason = opFromModel.length ? "MODEL_OPS_RECEIVED" : "OPS_EMPTY";
     debug.stamp.opsProduced = 0;
     let fallbackOps = [];
     let fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_OPS";
     let fallbackAttempted = false;
-    if (editIntent.kind === "add_legs_exercises") {
-      fallbackAttempted = true;
-      fallbackOps = [
-        {
-          op: "add_exercises",
-          count: editIntent.addCount,
-          muscleGroup: "legs",
-          placement: "end",
-        },
-      ];
-    } else if (
-      editIntent.kind === "add_named_exercises" &&
-      editIntent.toExerciseName
-    ) {
-      fallbackAttempted = true;
-      const addCount = toPositiveInt(editIntent.addCount) ?? inferRecentAddCountFromHistory(chatHistory);
-      if (addCount == null) {
-        editResolutionError = "How many exercises should I add to your current workout?";
-        fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_CLARIFY";
+    if (constraintIntent) {
+      debug.stamp.fallbackUsed = true;
+      debug.stamp.fallbackReason = "DETERMINISTIC_CONSTRAINT_CONVERSION";
+      debug.stamp.fallbackOpsCount = 0;
+      const deterministicConstraintResult = applyDeterministicConstraintEdit({
+        currentDraft,
+        constraintIntent,
+        exerciseCatalogById,
+      });
+      if (deterministicConstraintResult.valid) {
+        resolvedDraft = deterministicConstraintResult.draft;
+        if (deterministicConstraintResult.changed) {
+          debug.stamp.applied = true;
+          debug.stamp.applyReason = "CONSTRAINT_APPLIED";
+        } else {
+          debug.stamp.applied = false;
+          debug.stamp.applyReason = "ALREADY_SATISFIES_CONSTRAINT";
+          assistantText = buildConstraintNoChangeAssistantMessage(constraintIntent);
+        }
       } else {
+        editResolutionError = deterministicConstraintResult.error;
+        debug.stamp.applied = false;
+        debug.stamp.applyReason = "CONSTRAINT_ATOMIC_FAIL";
+      }
+    } else {
+      if (editIntent.kind === "add_legs_exercises") {
+        fallbackAttempted = true;
         fallbackOps = [
           {
             op: "add_exercises",
-            count: addCount,
+            count: editIntent.addCount,
+            muscleGroup: "legs",
             placement: "end",
-            exerciseName: editIntent.toExerciseName,
+          },
+        ];
+      } else if (
+        editIntent.kind === "add_named_exercises" &&
+        editIntent.toExerciseName
+      ) {
+        fallbackAttempted = true;
+        const addCount =
+          toPositiveInt(editIntent.addCount) ?? inferRecentAddCountFromHistory(chatHistory);
+        if (addCount == null) {
+          editResolutionError = "How many exercises should I add to your current workout?";
+          fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_CLARIFY";
+        } else {
+          fallbackOps = [
+            {
+              op: "add_exercises",
+              count: addCount,
+              placement: "end",
+              exerciseName: editIntent.toExerciseName,
+            },
+          ];
+        }
+      } else if (
+        editIntent.kind === "swap_exercise" &&
+        editIntent.fromExerciseName &&
+        editIntent.toExerciseName
+      ) {
+        fallbackAttempted = true;
+        fallbackOps = [
+          {
+            op: "swap_exercise",
+            fromExerciseName: editIntent.fromExerciseName,
+            toExerciseName: editIntent.toExerciseName,
           },
         ];
       }
-    } else if (
-      editIntent.kind === "swap_exercise" &&
-      editIntent.fromExerciseName &&
-      editIntent.toExerciseName
-    ) {
-      fallbackAttempted = true;
-      fallbackOps = [
-        {
-          op: "swap_exercise",
-          fromExerciseName: editIntent.fromExerciseName,
-          toExerciseName: editIntent.toExerciseName,
-        },
-      ];
-    }
-    if (!opFromModel.length && !fallbackOps.length && !editResolutionError) {
-      const inferredFallback = inferFallbackEditOpsFromUserMessage({
-        userMessage,
-        chatHistory,
-      });
-      if (inferredFallback.attempted) {
-        fallbackAttempted = true;
-        fallbackReason = inferredFallback.reason ?? "DETERMINISTIC_EDIT_FALLBACK_OPS";
+      if (!opFromModel.length && !fallbackOps.length && !editResolutionError) {
+        const inferredFallback = inferFallbackEditOpsFromUserMessage({
+          userMessage,
+          chatHistory,
+        });
+        if (inferredFallback.attempted) {
+          fallbackAttempted = true;
+          fallbackReason = inferredFallback.reason ?? "DETERMINISTIC_EDIT_FALLBACK_OPS";
+        }
+        if (inferredFallback.ops.length) {
+          fallbackOps = inferredFallback.ops;
+        } else if (inferredFallback.error) {
+          editResolutionError = inferredFallback.error;
+        }
       }
-      if (inferredFallback.ops.length) {
-        fallbackOps = inferredFallback.ops;
-      } else if (inferredFallback.error) {
-        editResolutionError = inferredFallback.error;
+      opsToApply = opFromModel.length ? opFromModel : fallbackOps;
+      debug.stamp.opsProduced = opsToApply.length;
+      if (!opFromModel.length && fallbackAttempted) {
+        debug.stamp.fallbackUsed = true;
+        debug.stamp.fallbackReason = fallbackReason;
+        debug.stamp.fallbackOpsCount = fallbackOps.length;
       }
-    }
-    let opsToApply = opFromModel.length ? opFromModel : fallbackOps;
-    debug.stamp.opsProduced = opsToApply.length;
-    if (!opFromModel.length && fallbackAttempted) {
-      debug.stamp.fallbackUsed = true;
-      debug.stamp.fallbackReason = fallbackReason;
-      debug.stamp.fallbackOpsCount = fallbackOps.length;
-    }
-    if (opsToApply.length) {
-      let editResult = applyEditOperations({
-        currentDraft,
-        editOps: opsToApply,
-        legCandidates: legEditCandidates,
-        exerciseCatalogById,
-        exerciseCandidates,
-      });
-      if (!editResult.valid && fallbackOps.length && opFromModel.length) {
-        editResult = applyEditOperations({
+      if (opsToApply.length) {
+        let editResult = applyEditOperations({
           currentDraft,
-          editOps: fallbackOps,
+          editOps: opsToApply,
           legCandidates: legEditCandidates,
           exerciseCatalogById,
           exerciseCandidates,
         });
-        opsToApply = fallbackOps;
-        debug.stamp.fallbackUsed = true;
-        debug.stamp.fallbackReason = "EDIT_OP_VALIDATION_RETRY";
-        debug.stamp.fallbackOpsCount = fallbackOps.length;
-        debug.stamp.opsProduced = opsToApply.length;
-      }
-      if (editResult.valid) {
-        resolvedDraft = editResult.draft;
-        debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
-        debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
+        if (!editResult.valid && fallbackOps.length && opFromModel.length) {
+          editResult = applyEditOperations({
+            currentDraft,
+            editOps: fallbackOps,
+            legCandidates: legEditCandidates,
+            exerciseCatalogById,
+            exerciseCandidates,
+          });
+          opsToApply = fallbackOps;
+          debug.stamp.fallbackUsed = true;
+          debug.stamp.fallbackReason = "EDIT_OP_VALIDATION_RETRY";
+          debug.stamp.fallbackOpsCount = fallbackOps.length;
+          debug.stamp.opsProduced = opsToApply.length;
+        }
+        if (editResult.valid) {
+          resolvedDraft = editResult.draft;
+          debug.stamp.applied = didDraftExercisesChange(currentDraft, resolvedDraft);
+          debug.stamp.applyReason = debug.stamp.applied ? "APPLIED" : "STATE_NOT_UPDATED";
+        } else {
+          editResolutionError = editResult.error;
+          debug.stamp.applied = false;
+          debug.stamp.applyReason = "APPLY_SKIPPED";
+        }
       } else {
-        editResolutionError = editResult.error;
+        editResolutionError = editResolutionError ?? "No editable workout draft update was returned.";
         debug.stamp.applied = false;
         debug.stamp.applyReason = "APPLY_SKIPPED";
       }
-    } else {
-      editResolutionError =
-        editResolutionError ?? "No editable workout draft update was returned.";
-      debug.stamp.applied = false;
-      debug.stamp.applyReason = "APPLY_SKIPPED";
     }
 
     if (resolvedDraft && editIntent.kind === "add_legs_exercises") {
@@ -2003,18 +2353,78 @@ export async function runCoachTurn({
       }
     }
 
+    const shouldAttemptRegeneratedEdit =
+      !resolvedDraft &&
+      !constraintIntent &&
+      currentDraftKind &&
+      !isEditClarificationError(editResolutionError) &&
+      (!opFromModel.length || debug.stamp.applyReason === "APPLY_SKIPPED");
+    if (shouldAttemptRegeneratedEdit) {
+      debug.stamp.fallbackUsed = true;
+      debug.stamp.fallbackReason = "REGENERATE_FULL_DRAFT";
+      debug.stamp.fallbackOpsCount = 0;
+      try {
+        const regenerationPrompt = buildRegenerateEditPrompt({
+          userMessage,
+          currentDraftKind,
+        });
+        const regenerationCompletion = await createChatCompletion({
+          apiKey,
+          useServerKey,
+          model: DEFAULT_COACH_MODEL,
+          messages: [...conversation, { role: "user", content: regenerationPrompt }],
+          temperature: COACH_TEMPERATURE,
+        });
+        const regenerationText = extractCompletionContent(regenerationCompletion);
+        const regeneratedParsed = parseCoachActionDraftMessage(regenerationText);
+        const regeneratedDraft = regeneratedParsed.actionDraft ?? null;
+        const regeneratedValidation = validateRegeneratedEditDraft({
+          candidateDraft: regeneratedDraft,
+          currentDraft,
+          currentDraftKind,
+          libraryIdSet,
+          userMessage,
+        });
+        if (regeneratedValidation.valid) {
+          resolvedDraft = regeneratedDraft;
+          assistantText = regeneratedParsed.assistantText || regenerationText || assistantText;
+          debug.stamp.applied = true;
+          debug.stamp.applyReason = "REGENERATE_FULL_DRAFT_APPLIED";
+        } else {
+          editResolutionError = regeneratedValidation.error;
+          debug.stamp.applied = false;
+          debug.stamp.applyReason = "REGENERATE_FULL_DRAFT_FAILED";
+        }
+      } catch (error) {
+        editResolutionError = String(error?.message ?? "").trim() || "Regenerated edit failed.";
+        debug.stamp.applied = false;
+        debug.stamp.applyReason = "REGENERATE_FULL_DRAFT_FAILED";
+      }
+    }
+
     if (resolvedDraft) {
       actionDraft = resolvedDraft;
       debug.editResolution = {
         status: "applied",
-        mode: opsToApply.length ? "EDIT" : editContract.mode || "AUTO",
+        mode: constraintIntent
+          ? "CONSTRAINT"
+          : debug.stamp.applyReason === "REGENERATE_FULL_DRAFT_APPLIED"
+            ? "REGENERATE"
+            : opsToApply.length
+              ? "EDIT"
+              : editContract.mode || "AUTO",
       };
     } else {
       actionDraft = currentDraft ?? null;
       assistantText = buildEditFailureAssistantMessage(editResolutionError);
       debug.editResolution = {
         status: "failed",
-        mode: editContract.mode || "AUTO",
+        mode:
+          constraintIntent
+            ? "CONSTRAINT"
+            : debug.stamp.applyReason === "REGENERATE_FULL_DRAFT_FAILED"
+              ? "REGENERATE"
+              : editContract.mode || "AUTO",
         error: editResolutionError ?? "Unable to apply edit.",
       };
       if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
