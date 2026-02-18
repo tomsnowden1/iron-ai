@@ -1079,13 +1079,14 @@ export default function CoachView({
       let streamedId = null;
       let expectsDraftForRequest = false;
       try {
-        const hasEditableWorkoutDraft =
-          actionDraft?.kind === ActionDraftKinds.create_workout &&
+        const hasEditableActionDraft =
+          (actionDraft?.kind === ActionDraftKinds.create_workout ||
+            actionDraft?.kind === ActionDraftKinds.create_template) &&
           Array.isArray(actionDraft?.payload?.exercises) &&
           actionDraft.payload.exercises.length > 0;
         const shouldEditExistingDraft = shouldForceWorkoutResponseMode({
           userMessage: trimmed,
-          hasVisibleWorkoutDraft: hasEditableWorkoutDraft,
+          hasVisibleWorkoutDraft: hasEditableActionDraft,
         });
         const resolvedResponseMode =
           responseMode === "general" && shouldEditExistingDraft
@@ -1098,9 +1099,14 @@ export default function CoachView({
           hasWorkoutIntent(trimmed);
         const expectsDraft = expectsTemplateDraft || expectsWorkoutDraft;
         expectsDraftForRequest = expectsDraft;
-        const fallbackActionKind = expectsTemplateDraft
-          ? ActionDraftKinds.create_template
-          : ActionDraftKinds.create_workout;
+        const fallbackActionKind =
+          shouldEditExistingDraft &&
+          (actionDraft?.kind === ActionDraftKinds.create_workout ||
+            actionDraft?.kind === ActionDraftKinds.create_template)
+            ? actionDraft.kind
+            : expectsTemplateDraft
+              ? ActionDraftKinds.create_template
+              : ActionDraftKinds.create_workout;
         if (expectsDraft) {
           actionDispatch({ type: "BUILD_START", payload: { clearDraft: true } });
           setActionErrors([]);
@@ -1296,7 +1302,10 @@ export default function CoachView({
           type: "SET_DEBUG",
           payload: {
             ...(result.debug ?? {}),
-            stamp: updatedDebugStamp,
+            stamp: {
+              ...(result.debug?.stamp ?? {}),
+              ...updatedDebugStamp,
+            },
           },
         });
         if (import.meta.env.DEV) {
@@ -1331,9 +1340,26 @@ export default function CoachView({
         const draftSummaryText = resolvedActionDraft
           ? buildCoachWorkoutSummaryFromDraft(resolvedActionDraft, exerciseNameById)
           : "";
+        const explicitNoChange =
+          applyReason === "ALREADY_SATISFIES_CONSTRAINT" ||
+          /no change needed|already matches|already uses/i.test(String(result.assistant ?? ""));
+        const shouldPreferAssistantText =
+          shouldEditExistingDraft &&
+          (result.debug?.editResolution?.status === "failed" ||
+            (!appliedUpdate && !explicitNoChange));
+        if (shouldEditExistingDraft && result.debug?.editResolution?.status === "failed") {
+          const warningText = String(
+            result.debug?.editResolution?.error ?? result.assistant ?? ""
+          ).trim();
+          if (warningText) {
+            onNotify?.(warningText, { tone: "warning" });
+          }
+        }
         assistantMeta.actionDraft = resolvedActionDraft;
         assistantMeta.displayText =
-          draftSummaryText || sanitizeCoachAssistantText(result.assistant);
+          shouldPreferAssistantText
+            ? sanitizeCoachAssistantText(result.assistant)
+            : draftSummaryText || sanitizeCoachAssistantText(result.assistant);
         assistantMeta.workoutDraftPayload =
           resolvedActionDraft?.payload ?? draftState.payload;
         assistantMeta.workoutDraftSource = draftState.source;
