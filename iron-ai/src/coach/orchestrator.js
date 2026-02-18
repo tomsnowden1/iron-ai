@@ -61,6 +61,22 @@ const EDIT_CLARIFICATION_ERROR_REGEX =
   /how many exercises should i add|which exact exercise|do you want .* exercises added|matches multiple options/i;
 const EDIT_STRUCTURE_CHANGE_REGEX =
   /\b(add|remove|delete|drop|swap|replace|change|shorter|longer|increase|decrease|set|sets|rep|reps|duration|minute|minutes|exercise|exercises)\b/i;
+const LEG_FALLBACK_GENERIC_BONUS_RULES = [
+  { pattern: /\bsquat\b/, score: 8 },
+  { pattern: /\bgoblet\b/, score: 3 },
+  { pattern: /\blunge\b/, score: 7 },
+  { pattern: /\bleg\s+press\b/, score: 6 },
+  { pattern: /\bsplit\s+squat\b|\bbulgarian\b/, score: 6 },
+  { pattern: /\bdeadlift\b|\bromanian\b|\brdl\b/, score: 5 },
+  { pattern: /\bstep\s*up\b/, score: 5 },
+  { pattern: /\bhip\s+thrust\b|\bglute\s+bridge\b/, score: 5 },
+  { pattern: /\bleg\s+curl\b|\bleg\s+extension\b|\bcalf\s+raise\b/, score: 4 },
+];
+const LEG_FALLBACK_GENERIC_PENALTY_RULES = [
+  { pattern: /\batlas\b|\bstone\b|\bkeg\b|\bsandbag\b/, score: -10 },
+  { pattern: /\bbound\b|\bpogo\b|\bdrag\b/, score: -8 },
+  { pattern: /\bclean\b|\bsnatch\b|\bjerk\b/, score: -3 },
+];
 
 export const SYSTEM_PROMPT = [
   "You are a supportive AI fitness coach.",
@@ -503,9 +519,58 @@ function buildLegEditCandidates({
         ? canonical.secondaryMuscles
         : [],
     });
-    if (resolved.length >= max) break;
   }
-  return resolved;
+  return resolved
+    .map((entry, index) => ({
+      entry,
+      score: scoreLegCandidateForFallback(entry),
+      index,
+    }))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.index - b.index;
+    })
+    .slice(0, max)
+    .map(({ entry }) => entry);
+}
+
+function scoreLegCandidateForFallback(entry) {
+  const name = normalizeText(entry?.name ?? "");
+  if (!name) return Number.NEGATIVE_INFINITY;
+  let score = 0;
+  LEG_FALLBACK_GENERIC_BONUS_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  LEG_FALLBACK_GENERIC_PENALTY_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  const metadata = [
+    ...(Array.isArray(entry?.primaryMuscles) ? entry.primaryMuscles : []),
+    ...(Array.isArray(entry?.secondaryMuscles) ? entry.secondaryMuscles : []),
+  ];
+  const metadataTokens = new Set(
+    metadata
+      .flatMap((value) => normalizeText(value).split(/\s+/))
+      .filter(Boolean)
+  );
+  if (
+    metadataTokens.has("quad") ||
+    metadataTokens.has("quads") ||
+    metadataTokens.has("quadricep") ||
+    metadataTokens.has("quadriceps")
+  ) {
+    score += 2;
+  }
+  if (metadataTokens.has("hamstring") || metadataTokens.has("hamstrings")) {
+    score += 2;
+  }
+  if (metadataTokens.has("glute") || metadataTokens.has("glutes")) {
+    score += 2;
+  }
+  if (metadataTokens.has("calf") || metadataTokens.has("calves")) {
+    score += 1;
+  }
+  return score;
 }
 
 function buildDefaultExerciseSets(exerciseMeta) {
