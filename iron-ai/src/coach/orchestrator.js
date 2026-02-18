@@ -40,6 +40,98 @@ const DEFAULT_APPENDED_SET_COUNT = 3;
 const DEFAULT_APPENDED_REPS = 10;
 const SAFE_EDIT_FAILURE_MESSAGE =
   "I couldn't safely apply that edit while keeping your current workout intact. Please try again with a more specific change request.";
+const GENERIC_EDIT_CLARIFICATION_MESSAGE = [
+  "I can update this draft, but I need one specific change.",
+  'Pick one: 1) swap one exercise (for example, "swap box squat for lunge"), 2) change sets/reps for one exercise, 3) change focus (for example, "add 2 chest exercises"), 4) start a new workout (for example, "create a new chest workout").',
+].join(" ");
+const EDIT_OPS_SCHEMA_NAME = "coach_edit_ops_v1";
+const EDIT_OPS_MODEL =
+  String(import.meta.env?.VITE_COACH_EDIT_MODEL ?? "").trim() || DEFAULT_COACH_MODEL;
+const EDIT_OPS_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: EDIT_OPS_SCHEMA_NAME,
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["contractVersion", "assistantText", "editDraft"],
+      properties: {
+        contractVersion: {
+          type: "string",
+          enum: ["coach_action_v1"],
+        },
+        assistantText: {
+          type: "string",
+          minLength: 1,
+        },
+        editDraft: {
+          type: "object",
+          additionalProperties: false,
+          required: ["mode", "ops"],
+          properties: {
+            mode: {
+              type: "string",
+              enum: ["EDIT"],
+            },
+            ops: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: [
+                  "op",
+                  "count",
+                  "muscleGroup",
+                  "placement",
+                  "exerciseIds",
+                  "exerciseName",
+                  "fromExerciseName",
+                  "toExerciseName",
+                  "fromExerciseId",
+                  "toExerciseId",
+                  "exerciseId",
+                  "name",
+                ],
+                properties: {
+                  op: {
+                    type: "string",
+                    enum: [
+                      "add_exercises",
+                      "swap_exercise",
+                      "replace_exercise",
+                      "remove_exercise",
+                      "delete_exercise",
+                    ],
+                  },
+                  count: { type: ["integer", "null"], minimum: 1 },
+                  muscleGroup: { type: ["string", "null"] },
+                  placement: { type: ["string", "null"] },
+                  exerciseIds: {
+                    type: ["array", "null"],
+                    items: { type: "integer", minimum: 1 },
+                  },
+                  exerciseName: { type: ["string", "null"] },
+                  fromExerciseName: { type: ["string", "null"] },
+                  toExerciseName: { type: ["string", "null"] },
+                  fromExerciseId: { type: ["integer", "null"], minimum: 1 },
+                  toExerciseId: { type: ["integer", "null"], minimum: 1 },
+                  exerciseId: { type: ["integer", "null"], minimum: 1 },
+                  name: { type: ["string", "null"] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+const EDIT_SCHEMA_CLARIFICATION_MESSAGE = [
+  "I couldn't parse a safe edit operation for that request.",
+  'Pick one: 1) swap one exercise (for example, "swap box squat for lunge"), 2) change sets/reps for one exercise, 3) change focus (for example, "add 2 chest exercises"), 4) start a new workout (for example, "create a new chest workout").',
+].join(" ");
 const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
   "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
 const DEBUG_COMMIT_SHA =
@@ -269,6 +361,109 @@ function safeParseJSON(value) {
   } catch {
     return null;
   }
+}
+
+function extractJsonObjectsFromText(text) {
+  const value = String(text ?? "");
+  const results = [];
+  const fenceRegex = /```json\s*([\s\S]*?)```/gi;
+  let match = null;
+  while ((match = fenceRegex.exec(value)) !== null) {
+    const parsed = safeParseJSON(match[1] ?? "");
+    if (parsed && typeof parsed === "object") results.push(parsed);
+  }
+  const trimmed = value.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    const parsed = safeParseJSON(trimmed);
+    if (parsed && typeof parsed === "object") {
+      results.push(parsed);
+    }
+  }
+  return results;
+}
+
+function isPlainDraftPayload(value) {
+  if (!value || typeof value !== "object") return false;
+  const title = String(value?.title ?? value?.name ?? "").trim();
+  const exercises = Array.isArray(value?.exercises) ? value.exercises : [];
+  return Boolean(title && exercises.length);
+}
+
+function normalizeRiskValue(value) {
+  const risk = String(value ?? "").trim().toLowerCase();
+  if (risk === "low" || risk === "medium" || risk === "high") return risk;
+  return "low";
+}
+
+function normalizeConfidenceValue(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0.5;
+  return Math.max(0, Math.min(1, parsed));
+}
+
+function normalizeRegeneratedEditToActionDraft({
+  regenerationText,
+  parsedActionDraft,
+  currentDraft,
+  currentDraftKind,
+}) {
+  if (parsedActionDraft?.actionDraft && typeof parsedActionDraft.actionDraft === "object") {
+    return {
+      actionDraft: parsedActionDraft.actionDraft,
+      assistantText: parsedActionDraft.assistantText || String(regenerationText ?? "").trim(),
+      wrappedPlainDraft: false,
+    };
+  }
+  const candidates = extractJsonObjectsFromText(regenerationText);
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    if (!candidate || typeof candidate !== "object") continue;
+    const candidateActionDraft =
+      candidate.actionDraft && typeof candidate.actionDraft === "object"
+        ? candidate.actionDraft
+        : null;
+    if (candidateActionDraft) {
+      const candidateAssistant = String(candidate.assistantText ?? "").trim();
+      return {
+        actionDraft: candidateActionDraft,
+        assistantText:
+          candidateAssistant ||
+          parsedActionDraft?.assistantText ||
+          String(regenerationText ?? "").trim(),
+        wrappedPlainDraft: false,
+      };
+    }
+    if (!isPlainDraftPayload(candidate)) continue;
+    const resolvedName = String(
+      candidate.name ?? candidate.title ?? currentDraft?.payload?.name ?? currentDraft?.title ?? "Updated Draft"
+    ).trim();
+    const resolvedTitle = String(
+      (candidate.title ?? candidate.name ?? currentDraft?.title ?? resolvedName) || "Updated Draft"
+    ).trim();
+    const wrappedDraft = {
+      kind: currentDraftKind,
+      confidence: normalizeConfidenceValue(currentDraft?.confidence),
+      risk: normalizeRiskValue(currentDraft?.risk),
+      title: resolvedTitle || "Updated Draft",
+      summary: "Updated draft from regenerated response.",
+      payload: {
+        ...candidate,
+        name: resolvedName || "Updated Draft",
+      },
+    };
+    return {
+      actionDraft: wrappedDraft,
+      assistantText:
+        parsedActionDraft?.assistantText ||
+        "I updated your draft based on your latest request.",
+      wrappedPlainDraft: true,
+    };
+  }
+  return {
+    actionDraft: null,
+    assistantText: parsedActionDraft?.assistantText || String(regenerationText ?? "").trim(),
+    wrappedPlainDraft: false,
+  };
 }
 
 function extractEditDraftPayloadFromAssistant(text) {
@@ -587,6 +782,143 @@ function normalizeEditContract(editDraft) {
   const mode = String(editDraft.mode ?? "").trim().toUpperCase();
   const ops = Array.isArray(editDraft.ops) ? editDraft.ops : [];
   return { mode, ops };
+}
+
+function buildStrictEditOpsPrompt({
+  userMessage,
+  currentDraftKind,
+  previousFailure = null,
+}) {
+  const failure = String(previousFailure ?? "").trim();
+  return [
+    "Return ONLY JSON that matches the required schema.",
+    "Use contractVersion coach_action_v1.",
+    `editDraft.mode must be "EDIT" and editDraft.ops must contain at least one supported operation.`,
+    "Supported ops: add_exercises, swap_exercise, replace_exercise, remove_exercise, delete_exercise.",
+    "Do not return actionDraft in this response.",
+    `Current draft kind: ${currentDraftKind || "create_workout"}.`,
+    `User request: ${String(userMessage ?? "").trim()}`,
+    failure ? `Previous schema issue: ${failure}` : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function validateStrictEditOpsEnvelope(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return { valid: false, error: "Strict edit ops output was not a JSON object." };
+  }
+  if (String(candidate.contractVersion ?? "").trim() !== "coach_action_v1") {
+    return { valid: false, error: 'Strict edit ops output must include contractVersion "coach_action_v1".' };
+  }
+  const assistantText = String(candidate.assistantText ?? "").trim();
+  if (!assistantText) {
+    return { valid: false, error: "Strict edit ops output is missing assistantText." };
+  }
+  const editContract = normalizeEditContract(candidate.editDraft ?? candidate.draftEdit ?? null);
+  if (editContract.mode !== "EDIT") {
+    return { valid: false, error: 'Strict edit ops output requires editDraft.mode "EDIT".' };
+  }
+  if (!editContract.ops.length) {
+    return { valid: false, error: "Strict edit ops output requires at least one edit operation." };
+  }
+  const hasUnsupportedShape = editContract.ops.some(
+    (entry) => !entry || typeof entry !== "object" || !String(entry.op ?? "").trim()
+  );
+  if (hasUnsupportedShape) {
+    return { valid: false, error: "Strict edit ops output includes an invalid operation shape." };
+  }
+  return {
+    valid: true,
+    error: null,
+    assistantText,
+    editDraft: {
+      mode: "EDIT",
+      ops: editContract.ops,
+    },
+  };
+}
+
+function parseStrictEditOpsCompletion(text) {
+  const value = String(text ?? "").trim();
+  const candidates = extractJsonObjectsFromText(value);
+  if (!candidates.length) {
+    return {
+      valid: false,
+      error: "Strict edit ops output did not contain a valid JSON object.",
+      assistantText: value,
+      editDraft: null,
+    };
+  }
+  let lastError = "Strict edit ops output failed validation.";
+  for (let i = 0; i < candidates.length; i += 1) {
+    const validation = validateStrictEditOpsEnvelope(candidates[i]);
+    if (validation.valid) {
+      return {
+        valid: true,
+        error: null,
+        assistantText: validation.assistantText,
+        editDraft: validation.editDraft,
+      };
+    }
+    lastError = validation.error ?? lastError;
+  }
+  return {
+    valid: false,
+    error: lastError,
+    assistantText: value,
+    editDraft: null,
+  };
+}
+
+async function requestStrictEditOpsWithRetry({
+  apiKey,
+  useServerKey,
+  messages,
+  userMessage,
+  currentDraftKind,
+}) {
+  let lastError = null;
+  let fallbackAssistantText = "";
+  let retryCount = 0;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const strictPrompt = buildStrictEditOpsPrompt({
+      userMessage,
+      currentDraftKind,
+      previousFailure: lastError,
+    });
+    const completion = await createChatCompletion({
+      apiKey,
+      useServerKey,
+      model: EDIT_OPS_MODEL,
+      messages: [...messages, { role: "user", content: strictPrompt }],
+      responseFormat: EDIT_OPS_RESPONSE_FORMAT,
+      temperature: COACH_TEMPERATURE,
+    });
+    const completionText = extractCompletionContent(completion);
+    const parsed = parseStrictEditOpsCompletion(completionText);
+    if (parsed.valid) {
+      return {
+        valid: true,
+        retryCount,
+        assistantText: parsed.assistantText,
+        editDraft: parsed.editDraft,
+        error: null,
+      };
+    }
+    lastError = parsed.error ?? "Strict edit ops parsing failed.";
+    fallbackAssistantText = parsed.assistantText || fallbackAssistantText;
+    if (attempt === 0) {
+      retryCount = 1;
+    }
+  }
+  return {
+    valid: false,
+    retryCount,
+    assistantText: fallbackAssistantText,
+    editDraft: null,
+    error: lastError ?? "Strict edit ops parsing failed.",
+  };
 }
 
 function splitNormalizedTokens(value) {
@@ -1010,6 +1342,9 @@ function buildEditFailureAssistantMessage(error) {
   const baseMessage = SAFE_EDIT_FAILURE_MESSAGE;
   const detail = String(error ?? "").trim();
   if (!detail) return baseMessage;
+  if (/pick one: 1\) swap one exercise/i.test(detail)) {
+    return detail;
+  }
   if (/do you want .* exercises added to this workout\?/i.test(detail)) {
     return detail;
   }
@@ -1717,6 +2052,9 @@ export async function runCoachTurn({
       fallbackReason: "NONE",
       fallbackOpsCount: 0,
       opsProduced: 0,
+      schemaUsed: null,
+      retryCount: 0,
+      finalOutcomeReason: "UNKNOWN_SHAPE",
       validationErrors: null,
     },
     toolCalls: [],
@@ -2231,7 +2569,7 @@ export async function runCoachTurn({
   const parsedActionDraft = parseCoachActionDraftMessage(finalAssistant);
   let assistantText = parsedActionDraft.assistantText || finalAssistant;
   let actionDraft = parsedActionDraft.actionDraft ?? null;
-  const parsedEditDraft = extractEditDraftPayloadFromAssistant(finalAssistant);
+  let parsedEditDraft = extractEditDraftPayloadFromAssistant(finalAssistant);
   const actionContractVersion = parsedActionDraft.contractVersion ?? null;
   const actionParseErrors = parsedActionDraft.parseErrors ?? null;
 
@@ -2267,7 +2605,7 @@ export async function runCoachTurn({
     let resolvedDraft = null;
     let editResolutionError = null;
     const currentDraftKind = String(currentDraft?.kind ?? "").trim();
-    const opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
+    let opFromModel = editContract.mode === "EDIT" ? editContract.ops : [];
     let opsToApply = [];
     debug.stamp.hasOps = opFromModel.length > 0;
     debug.stamp.opsCount = opFromModel.length;
@@ -2276,6 +2614,10 @@ export async function runCoachTurn({
     let fallbackOps = [];
     let fallbackReason = "DETERMINISTIC_EDIT_FALLBACK_OPS";
     let fallbackAttempted = false;
+    let schemaRetryCount = 0;
+    let schemaOutcomeReason = "NOT_ATTEMPTED";
+    debug.stamp.schemaUsed = null;
+    debug.stamp.retryCount = 0;
     if (constraintIntent) {
       debug.stamp.fallbackUsed = true;
       debug.stamp.fallbackReason = "DETERMINISTIC_CONSTRAINT_CONVERSION";
@@ -2360,6 +2702,58 @@ export async function runCoachTurn({
           editResolutionError = inferredFallback.error;
         }
       }
+
+      const shouldAttemptStrictEditOps =
+        !opFromModel.length &&
+        !fallbackOps.length &&
+        !editResolutionError &&
+        Boolean(currentDraftKind);
+      if (shouldAttemptStrictEditOps) {
+        debug.stamp.schemaUsed = EDIT_OPS_SCHEMA_NAME;
+        try {
+          const strictEditResult = await requestStrictEditOpsWithRetry({
+            apiKey,
+            useServerKey,
+            messages: conversation,
+            userMessage,
+            currentDraftKind,
+          });
+          schemaRetryCount = strictEditResult.retryCount ?? 0;
+          debug.stamp.retryCount = schemaRetryCount;
+          if (strictEditResult.valid) {
+            parsedEditDraft = strictEditResult.editDraft;
+            const strictEditContract = normalizeEditContract(parsedEditDraft);
+            opFromModel =
+              strictEditContract.mode === "EDIT" ? strictEditContract.ops : [];
+            if (strictEditResult.assistantText) {
+              assistantText = strictEditResult.assistantText;
+            }
+            schemaOutcomeReason = schemaRetryCount > 0 ? "SCHEMA_RETRY_APPLIED" : "SCHEMA_APPLIED";
+          } else {
+            editResolutionError = EDIT_SCHEMA_CLARIFICATION_MESSAGE;
+            debug.stamp.applied = false;
+            debug.stamp.applyReason = "EDIT_SCHEMA_CLARIFICATION_REQUIRED";
+            debug.stamp.fallbackUsed = true;
+            debug.stamp.fallbackReason = "EDIT_SCHEMA_RETRY_FAILED";
+            debug.stamp.fallbackOpsCount = 0;
+            schemaOutcomeReason = "SCHEMA_RETRY_FAILED";
+          }
+        } catch (error) {
+          editResolutionError = EDIT_SCHEMA_CLARIFICATION_MESSAGE;
+          debug.stamp.retryCount = 1;
+          debug.stamp.applied = false;
+          debug.stamp.applyReason = "EDIT_SCHEMA_CLARIFICATION_REQUIRED";
+          debug.stamp.fallbackUsed = true;
+          debug.stamp.fallbackReason = "EDIT_SCHEMA_REQUEST_FAILED";
+          debug.stamp.fallbackOpsCount = 0;
+          schemaOutcomeReason = String(error?.message ?? "").trim()
+            ? "SCHEMA_REQUEST_FAILED"
+            : "SCHEMA_RETRY_FAILED";
+        }
+      }
+
+      debug.stamp.hasOps = opFromModel.length > 0;
+      debug.stamp.opsCount = opFromModel.length;
       opsToApply = opFromModel.length ? opFromModel : fallbackOps;
       debug.stamp.opsProduced = opsToApply.length;
       if (!opFromModel.length && fallbackAttempted) {
@@ -2399,9 +2793,28 @@ export async function runCoachTurn({
           debug.stamp.applyReason = "APPLY_SKIPPED";
         }
       } else {
-        editResolutionError = editResolutionError ?? "No editable workout draft update was returned.";
+        if (debug.stamp.applyReason !== "EDIT_SCHEMA_CLARIFICATION_REQUIRED") {
+          editResolutionError =
+            editResolutionError ?? "No editable workout draft update was returned.";
+          debug.stamp.applied = false;
+          debug.stamp.applyReason = "APPLY_SKIPPED";
+        }
+      }
+
+      const shouldClarifyGenericEditNoOps =
+        !resolvedDraft &&
+        editIntent.kind === "generic_edit" &&
+        !opFromModel.length &&
+        !fallbackOps.length &&
+        (!editResolutionError ||
+          editResolutionError === "No editable workout draft update was returned.");
+      if (shouldClarifyGenericEditNoOps) {
+        editResolutionError = GENERIC_EDIT_CLARIFICATION_MESSAGE;
         debug.stamp.applied = false;
-        debug.stamp.applyReason = "APPLY_SKIPPED";
+        debug.stamp.applyReason = "EDIT_CLARIFICATION_REQUIRED";
+        debug.stamp.fallbackUsed = true;
+        debug.stamp.fallbackReason = "GENERIC_EDIT_CLARIFICATION";
+        debug.stamp.fallbackOpsCount = 0;
       }
     }
 
@@ -2422,6 +2835,8 @@ export async function runCoachTurn({
       !resolvedDraft &&
       !constraintIntent &&
       currentDraftKind &&
+      debug.stamp.applyReason !== "EDIT_CLARIFICATION_REQUIRED" &&
+      debug.stamp.applyReason !== "EDIT_SCHEMA_CLARIFICATION_REQUIRED" &&
       !isEditClarificationError(editResolutionError) &&
       (!opFromModel.length || debug.stamp.applyReason === "APPLY_SKIPPED");
     if (shouldAttemptRegeneratedEdit) {
@@ -2442,7 +2857,13 @@ export async function runCoachTurn({
         });
         const regenerationText = extractCompletionContent(regenerationCompletion);
         const regeneratedParsed = parseCoachActionDraftMessage(regenerationText);
-        const regeneratedDraft = regeneratedParsed.actionDraft ?? null;
+        const normalizedRegenerated = normalizeRegeneratedEditToActionDraft({
+          regenerationText,
+          parsedActionDraft: regeneratedParsed,
+          currentDraft,
+          currentDraftKind,
+        });
+        const regeneratedDraft = normalizedRegenerated.actionDraft ?? null;
         const regeneratedValidation = validateRegeneratedEditDraft({
           candidateDraft: regeneratedDraft,
           currentDraft,
@@ -2452,8 +2873,11 @@ export async function runCoachTurn({
         });
         if (regeneratedValidation.valid) {
           resolvedDraft = regeneratedDraft;
-          assistantText = regeneratedParsed.assistantText || regenerationText || assistantText;
+          assistantText = normalizedRegenerated.assistantText || regenerationText || assistantText;
           debug.stamp.applied = true;
+          if (normalizedRegenerated.wrappedPlainDraft) {
+            debug.stamp.fallbackReason = "REGENERATE_FULL_DRAFT_WRAPPED_PLAIN_DRAFT";
+          }
           debug.stamp.applyReason = "REGENERATE_FULL_DRAFT_APPLIED";
         } else {
           editResolutionError = regeneratedValidation.error;
@@ -2496,6 +2920,10 @@ export async function runCoachTurn({
         debug.stamp.applyReason = "APPLY_SKIPPED";
       }
     }
+    debug.stamp.finalOutcomeReason =
+      schemaOutcomeReason === "NOT_ATTEMPTED"
+        ? debug.stamp.applyReason
+        : `${debug.stamp.applyReason}|${schemaOutcomeReason}`;
   }
 
   if (history.length && history[history.length - 1]?.role === "assistant") {
@@ -2520,6 +2948,9 @@ export async function runCoachTurn({
     } else if (debug.stamp.applyReason === "UNKNOWN_SHAPE") {
       debug.stamp.applyReason = "APPLIED";
     }
+    debug.stamp.finalOutcomeReason = debug.stamp.applyReason;
+  } else if (!String(debug.stamp.finalOutcomeReason ?? "").trim()) {
+    debug.stamp.finalOutcomeReason = debug.stamp.applyReason;
   }
   const validationErrors = [
     responseValidation?.error ?? null,
