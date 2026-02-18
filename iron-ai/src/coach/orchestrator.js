@@ -40,6 +40,10 @@ const DEFAULT_APPENDED_SET_COUNT = 3;
 const DEFAULT_APPENDED_REPS = 10;
 const SAFE_EDIT_FAILURE_MESSAGE =
   "I couldn't safely apply that edit while keeping your current workout intact. Please try again with a more specific change request.";
+const GENERIC_EDIT_CLARIFICATION_MESSAGE = [
+  "I can update this draft, but I need one specific change.",
+  'Pick one: 1) swap one exercise (for example, "swap box squat for lunge"), 2) change sets/reps for one exercise, 3) change focus (for example, "add 2 chest exercises"), 4) start a new workout (for example, "create a new chest workout").',
+].join(" ");
 const FALLBACK_WORKOUT_ASSISTANT_MESSAGE =
   "I hit a formatting issue, so I built a workout directly from your exercise library candidates.";
 const DEBUG_COMMIT_SHA =
@@ -269,6 +273,109 @@ function safeParseJSON(value) {
   } catch {
     return null;
   }
+}
+
+function extractJsonObjectsFromText(text) {
+  const value = String(text ?? "");
+  const results = [];
+  const fenceRegex = /```json\s*([\s\S]*?)```/gi;
+  let match = null;
+  while ((match = fenceRegex.exec(value)) !== null) {
+    const parsed = safeParseJSON(match[1] ?? "");
+    if (parsed && typeof parsed === "object") results.push(parsed);
+  }
+  const trimmed = value.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    const parsed = safeParseJSON(trimmed);
+    if (parsed && typeof parsed === "object") {
+      results.push(parsed);
+    }
+  }
+  return results;
+}
+
+function isPlainDraftPayload(value) {
+  if (!value || typeof value !== "object") return false;
+  const title = String(value?.title ?? value?.name ?? "").trim();
+  const exercises = Array.isArray(value?.exercises) ? value.exercises : [];
+  return Boolean(title && exercises.length);
+}
+
+function normalizeRiskValue(value) {
+  const risk = String(value ?? "").trim().toLowerCase();
+  if (risk === "low" || risk === "medium" || risk === "high") return risk;
+  return "low";
+}
+
+function normalizeConfidenceValue(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0.5;
+  return Math.max(0, Math.min(1, parsed));
+}
+
+function normalizeRegeneratedEditToActionDraft({
+  regenerationText,
+  parsedActionDraft,
+  currentDraft,
+  currentDraftKind,
+}) {
+  if (parsedActionDraft?.actionDraft && typeof parsedActionDraft.actionDraft === "object") {
+    return {
+      actionDraft: parsedActionDraft.actionDraft,
+      assistantText: parsedActionDraft.assistantText || String(regenerationText ?? "").trim(),
+      wrappedPlainDraft: false,
+    };
+  }
+  const candidates = extractJsonObjectsFromText(regenerationText);
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    if (!candidate || typeof candidate !== "object") continue;
+    const candidateActionDraft =
+      candidate.actionDraft && typeof candidate.actionDraft === "object"
+        ? candidate.actionDraft
+        : null;
+    if (candidateActionDraft) {
+      const candidateAssistant = String(candidate.assistantText ?? "").trim();
+      return {
+        actionDraft: candidateActionDraft,
+        assistantText:
+          candidateAssistant ||
+          parsedActionDraft?.assistantText ||
+          String(regenerationText ?? "").trim(),
+        wrappedPlainDraft: false,
+      };
+    }
+    if (!isPlainDraftPayload(candidate)) continue;
+    const resolvedName = String(
+      candidate.name ?? candidate.title ?? currentDraft?.payload?.name ?? currentDraft?.title ?? "Updated Draft"
+    ).trim();
+    const resolvedTitle = String(
+      (candidate.title ?? candidate.name ?? currentDraft?.title ?? resolvedName) || "Updated Draft"
+    ).trim();
+    const wrappedDraft = {
+      kind: currentDraftKind,
+      confidence: normalizeConfidenceValue(currentDraft?.confidence),
+      risk: normalizeRiskValue(currentDraft?.risk),
+      title: resolvedTitle || "Updated Draft",
+      summary: "Updated draft from regenerated response.",
+      payload: {
+        ...candidate,
+        name: resolvedName || "Updated Draft",
+      },
+    };
+    return {
+      actionDraft: wrappedDraft,
+      assistantText:
+        parsedActionDraft?.assistantText ||
+        "I updated your draft based on your latest request.",
+      wrappedPlainDraft: true,
+    };
+  }
+  return {
+    actionDraft: null,
+    assistantText: parsedActionDraft?.assistantText || String(regenerationText ?? "").trim(),
+    wrappedPlainDraft: false,
+  };
 }
 
 function extractEditDraftPayloadFromAssistant(text) {
@@ -1010,6 +1117,9 @@ function buildEditFailureAssistantMessage(error) {
   const baseMessage = SAFE_EDIT_FAILURE_MESSAGE;
   const detail = String(error ?? "").trim();
   if (!detail) return baseMessage;
+  if (/pick one: 1\) swap one exercise/i.test(detail)) {
+    return detail;
+  }
   if (/do you want .* exercises added to this workout\?/i.test(detail)) {
     return detail;
   }
@@ -2403,6 +2513,22 @@ export async function runCoachTurn({
         debug.stamp.applied = false;
         debug.stamp.applyReason = "APPLY_SKIPPED";
       }
+
+      const shouldClarifyGenericEditNoOps =
+        !resolvedDraft &&
+        editIntent.kind === "generic_edit" &&
+        !opFromModel.length &&
+        !fallbackOps.length &&
+        (!editResolutionError ||
+          editResolutionError === "No editable workout draft update was returned.");
+      if (shouldClarifyGenericEditNoOps) {
+        editResolutionError = GENERIC_EDIT_CLARIFICATION_MESSAGE;
+        debug.stamp.applied = false;
+        debug.stamp.applyReason = "EDIT_CLARIFICATION_REQUIRED";
+        debug.stamp.fallbackUsed = true;
+        debug.stamp.fallbackReason = "GENERIC_EDIT_CLARIFICATION";
+        debug.stamp.fallbackOpsCount = 0;
+      }
     }
 
     if (resolvedDraft && editIntent.kind === "add_legs_exercises") {
@@ -2422,6 +2548,7 @@ export async function runCoachTurn({
       !resolvedDraft &&
       !constraintIntent &&
       currentDraftKind &&
+      debug.stamp.applyReason !== "EDIT_CLARIFICATION_REQUIRED" &&
       !isEditClarificationError(editResolutionError) &&
       (!opFromModel.length || debug.stamp.applyReason === "APPLY_SKIPPED");
     if (shouldAttemptRegeneratedEdit) {
@@ -2442,7 +2569,13 @@ export async function runCoachTurn({
         });
         const regenerationText = extractCompletionContent(regenerationCompletion);
         const regeneratedParsed = parseCoachActionDraftMessage(regenerationText);
-        const regeneratedDraft = regeneratedParsed.actionDraft ?? null;
+        const normalizedRegenerated = normalizeRegeneratedEditToActionDraft({
+          regenerationText,
+          parsedActionDraft: regeneratedParsed,
+          currentDraft,
+          currentDraftKind,
+        });
+        const regeneratedDraft = normalizedRegenerated.actionDraft ?? null;
         const regeneratedValidation = validateRegeneratedEditDraft({
           candidateDraft: regeneratedDraft,
           currentDraft,
@@ -2452,8 +2585,11 @@ export async function runCoachTurn({
         });
         if (regeneratedValidation.valid) {
           resolvedDraft = regeneratedDraft;
-          assistantText = regeneratedParsed.assistantText || regenerationText || assistantText;
+          assistantText = normalizedRegenerated.assistantText || regenerationText || assistantText;
           debug.stamp.applied = true;
+          if (normalizedRegenerated.wrappedPlainDraft) {
+            debug.stamp.fallbackReason = "REGENERATE_FULL_DRAFT_WRAPPED_PLAIN_DRAFT";
+          }
           debug.stamp.applyReason = "REGENERATE_FULL_DRAFT_APPLIED";
         } else {
           editResolutionError = regeneratedValidation.error;

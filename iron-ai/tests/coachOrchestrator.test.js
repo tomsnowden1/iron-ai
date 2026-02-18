@@ -1728,7 +1728,71 @@ describe("coach orchestrator", () => {
     expect(String(result.assistant ?? "").toLowerCase()).toMatch(/couldn'?t safely apply/);
   });
 
-  it("uses regenerate-full-draft fallback when ops are missing for generic edits", async () => {
+  it("returns clarification without regeneration for generic edit requests with no ops", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 12, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 12, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 11, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "change this workout",
+      responseMode: "workout",
+      draftEditConfig: { mode: "edit", currentDraft },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(mocks.createChatCompletion).not.toHaveBeenCalled();
+    expect(result.actionDraft).toEqual(currentDraft);
+    expect(String(result.assistant ?? "")).toMatch(/pick one: 1\) swap one exercise/i);
+    expect(result.debug?.editResolution?.status).toBe("failed");
+    expect(result.debug?.stamp).toMatchObject({
+      fallbackUsed: true,
+      fallbackReason: "GENERIC_EDIT_CLARIFICATION",
+      applyReason: "EDIT_CLARIFICATION_REQUIRED",
+      opsProduced: 0,
+    });
+  });
+
+  it("uses regenerate-full-draft fallback for underspecified edits when ops are missing", async () => {
     mocks.getCoachExerciseCandidates.mockResolvedValue([
       { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
       { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
@@ -1774,7 +1838,7 @@ describe("coach orchestrator", () => {
     const result = await runCoachTurn({
       apiKey: "test-key",
       chatHistory: [],
-      userMessage: "make it shorter",
+      userMessage: "shorter please",
       responseMode: "workout",
       draftEditConfig: { mode: "edit", currentDraft },
       contextConfig: {
@@ -1801,6 +1865,83 @@ describe("coach orchestrator", () => {
       fallbackReason: "REGENERATE_FULL_DRAFT",
       applyReason: "REGENERATE_FULL_DRAFT_APPLIED",
     });
+  });
+
+  it("wraps plain regenerated draft JSON into an action draft and applies it", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 10, name: "Back Squat", primaryMuscles: ["quads"] },
+      { exerciseId: 11, name: "Bench Press", primaryMuscles: ["chest"] },
+      { exerciseId: 12, name: "Pull Up", primaryMuscles: ["back"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      { id: 10, name: "Back Squat", primaryMuscles: ["quads"], default_sets: 3, default_reps: 5 },
+      { id: 11, name: "Bench Press", primaryMuscles: ["chest"], default_sets: 3, default_reps: 8 },
+      { id: 12, name: "Pull Up", primaryMuscles: ["back"], default_sets: 3, default_reps: 8 },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+    mocks.createChatCompletion.mockResolvedValue({
+      choices: [
+        {
+          message: {
+            content: `\`\`\`json
+{"name":"Short Draft","gymId":1,"exercises":[{"exerciseId":10,"sets":[{"reps":5},{"reps":5},{"reps":5}]},{"exerciseId":11,"sets":[{"reps":8},{"reps":8},{"reps":8}]}]}
+\`\`\``,
+          },
+        },
+      ],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Strength Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Strength Workout",
+        exercises: [
+          { exerciseId: 10, sets: [{ reps: 5 }, { reps: 5 }, { reps: 5 }] },
+          { exerciseId: 11, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+          { exerciseId: 12, sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }] },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "shorter please",
+      responseMode: "workout",
+      draftEditConfig: { mode: "edit", currentDraft },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    expect(mocks.createChatCompletion).toHaveBeenCalledTimes(1);
+    expect(result.actionDraft?.payload?.name).toBe("Short Draft");
+    expect(result.actionDraft?.payload?.exercises?.map((entry) => entry.exerciseId)).toEqual([
+      10,
+      11,
+    ]);
+    expect(result.debug?.stamp).toMatchObject({
+      fallbackUsed: true,
+      fallbackReason: "REGENERATE_FULL_DRAFT_WRAPPED_PLAIN_DRAFT",
+      applyReason: "REGENERATE_FULL_DRAFT_APPLIED",
+    });
+    expect(result.debug?.stamp?.validationErrors).toBeNull();
   });
 
   it("keeps the original draft when regenerated fallback returns invalid exercise ids", async () => {
@@ -1846,7 +1987,7 @@ describe("coach orchestrator", () => {
     const result = await runCoachTurn({
       apiKey: "test-key",
       chatHistory: [],
-      userMessage: "make it shorter",
+      userMessage: "shorter please",
       responseMode: "workout",
       draftEditConfig: { mode: "edit", currentDraft },
       contextConfig: {
