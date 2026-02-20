@@ -130,6 +130,18 @@ Use this template payload.`);
         hasVisibleWorkoutDraft: true,
       })
     ).toBe(false);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "create a legs workout",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
+    expect(
+      shouldForceWorkoutResponseMode({
+        userMessage: "make a new pull workout",
+        hasVisibleWorkoutDraft: true,
+      })
+    ).toBe(false);
   });
 
   it("shows exercise preview list by default and enables show-all only for larger drafts", () => {

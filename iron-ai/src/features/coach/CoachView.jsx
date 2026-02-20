@@ -61,6 +61,7 @@ import {
 } from "./suggestedActionStorage";
 import {
   getCoachChatState,
+  setCoachContextEnabled,
   setCoachChatState,
   setOpenAIKeyStatus,
   useCoachMemoryEnabled,
@@ -385,7 +386,7 @@ export default function CoachView({
   diagnosticsEnabled,
 }) {
   const coachKeyMode = getCoachKeyMode();
-  const { settings, apiKey, hasKey, keyStatus } = useSettings();
+  const { settings, apiKey, hasKey, keyStatus, coachContextEnabled } = useSettings();
   const { coachMemoryEnabled } = useCoachMemoryEnabled();
   const memoryEnabled = coachMemoryEnabled ?? false;
   const memory = useMemo(
@@ -436,7 +437,9 @@ export default function CoachView({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [retryMessage, setRetryMessage] = useState("");
-  const [contextEnabled, setContextEnabled] = useState(false);
+  const [contextEnabled, setContextEnabled] = useState(() =>
+    typeof coachContextEnabled === "boolean" ? coachContextEnabled : true
+  );
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
   const [contextPreviewOpen, setContextPreviewOpen] = useState(false);
   const [contextPreview, setContextPreview] = useState(null);
@@ -508,12 +511,28 @@ export default function CoachView({
   }, [diagnosticsEnabled]);
   const debugEnabled = coachDiagnosticsEnabled;
 
+  const updateContextEnabled = useCallback((nextValueOrUpdater) => {
+    setContextEnabled((previousValue) => {
+      const nextValue =
+        typeof nextValueOrUpdater === "function"
+          ? Boolean(nextValueOrUpdater(previousValue))
+          : Boolean(nextValueOrUpdater);
+      void setCoachContextEnabled(nextValue);
+      return nextValue;
+    });
+  }, []);
+
   useEffect(() => {
     if (!launchContext) return;
     setPendingLaunchContext(launchContext);
-    setContextEnabled(true);
+    updateContextEnabled(true);
     setContextScopes((prev) => ({ ...prev, spaces: true }));
-  }, [launchContext]);
+  }, [launchContext, updateContextEnabled]);
+
+  useEffect(() => {
+    if (typeof coachContextEnabled !== "boolean") return;
+    setContextEnabled(coachContextEnabled);
+  }, [coachContextEnabled]);
 
   useEffect(() => {
     chatHistoryRef.current = chatHistory;
@@ -1244,11 +1263,9 @@ export default function CoachView({
               activeGymId,
             })
           : null;
-        const fallbackPayloadCandidates = [
-          draftState.payload,
-          heuristicDraftPayload,
-          libraryFallbackPayload,
-        ].filter(Boolean);
+        const fallbackPayloadCandidates = shouldEditExistingDraft
+          ? []
+          : [draftState.payload, heuristicDraftPayload, libraryFallbackPayload].filter(Boolean);
         let fallbackActionDraft = null;
         if (expectsDraft) {
           for (let i = 0; i < fallbackPayloadCandidates.length; i += 1) {
@@ -1266,7 +1283,9 @@ export default function CoachView({
             }
           }
         }
-        const resolvedActionDraft = result.actionDraft ?? fallbackActionDraft ?? null;
+        const resolvedActionDraft =
+          result.actionDraft ??
+          (shouldEditExistingDraft ? actionDraft ?? null : fallbackActionDraft ?? null);
         const previousExerciseSnapshot = shouldEditExistingDraft
           ? JSON.stringify(actionDraft?.payload?.exercises ?? [])
           : "";
@@ -1805,6 +1824,13 @@ export default function CoachView({
   const handleApplyActionDraft = useCallback(
     async (options = {}) => {
       if (!actionDraft || actionApplying) return;
+      if (
+        actionDraft.kind === ActionDraftKinds.create_workout &&
+        activeWorkoutId != null
+      ) {
+        onOpenWorkout?.(activeWorkoutId);
+        return;
+      }
       const { skipConfirm = false } = options;
       setActionApplying(true);
       setActionErrors([]);
@@ -1843,14 +1869,20 @@ export default function CoachView({
           (result.kind === ActionDraftKinds.create_template && onOpenTemplate) ||
           (result.kind === ActionDraftKinds.create_gym && onNavigateToGyms);
 
-        clearPersistedSuggestedAction();
         onNotify?.(label, {
           tone: "success",
           ...(canOpen ? { actionLabel: "Open", onAction: openAction } : {}),
         });
         if (result.kind === ActionDraftKinds.create_workout && result.id != null) {
           onOpenWorkout?.(result.id);
+          // Keep workout draft visible after opening so follow-up edits remain available.
+          actionDispatch({
+            type: "UPDATE_DRAFT",
+            payload: { draft: validation.normalizedDraft },
+          });
+          return;
         }
+        clearPersistedSuggestedAction();
         actionDispatch({ type: "DISCARD" });
       } catch (err) {
         setActionErrors([err?.message ?? "Unable to apply draft."]);
@@ -1860,6 +1892,7 @@ export default function CoachView({
     },
     [
       actionApplying,
+      activeWorkoutId,
       actionDispatch,
       actionDraft,
       activeGymId,
@@ -2147,7 +2180,7 @@ export default function CoachView({
               variant="secondary"
               size="sm"
               onClick={() => {
-                setContextEnabled(true);
+                updateContextEnabled(true);
                 setContextScopes((prev) => ({ ...prev, spaces: true }));
               }}
               disabled={sending}
@@ -2253,7 +2286,7 @@ export default function CoachView({
               <Button
                 variant={contextEnabled ? "primary" : "secondary"}
                 size="sm"
-                onClick={() => setContextEnabled((prev) => !prev)}
+                onClick={() => updateContextEnabled((prev) => !prev)}
               >
                 {contextEnabled ? "On" : "Off"}
               </Button>

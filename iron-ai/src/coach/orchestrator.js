@@ -143,6 +143,8 @@ const SIMPLE_REMOVE_EDIT_REGEX =
   /^(?:now\s+)?(?:remove|delete|drop|exclude|take\s+out|get\s+rid\s+of)\s+(.+)$/i;
 const SIMPLE_SWAP_EDIT_REGEX =
   /^(?:now\s+)?(?:swap(?:\s+out)?|replace|change)\s+(.+?)\s+(?:to|with|for)\s+(.+)$/i;
+const SIMPLE_REMOVE_AND_REPLACE_REGEX =
+  /^(?:now\s+)?(?:remove|delete|drop|exclude|take\s+out|get\s+rid\s+of)\s+(.+?)\s+(?:and|then|,)\s+(?:add|replace(?:\s+it)?\s+with)\s+(?:something\s+else|another(?:\s+exercise)?|a\s+different(?:\s+exercise)?|something\s+different)(?:[.!?]|$)/i;
 const EDIT_ONLY_DUMBBELL_REGEX =
   /\b(?:only|just)\b[\w\s]{0,30}\bdumbbells?\b|\bdumbbells?\b[\w\s]{0,10}\bonly\b|\bonly do it with dumbbells?\b/i;
 const EDIT_NO_BARBELL_REGEX =
@@ -168,6 +170,15 @@ const LEG_FALLBACK_GENERIC_PENALTY_RULES = [
   { pattern: /\batlas\b|\bstone\b|\bkeg\b|\bsandbag\b/, score: -10 },
   { pattern: /\bbound\b|\bpogo\b|\bdrag\b/, score: -8 },
   { pattern: /\bclean\b|\bsnatch\b|\bjerk\b/, score: -3 },
+];
+const GENERIC_REPLACEMENT_BONUS_RULES = [
+  { pattern: /\bsquat\b|\blunge\b|\bleg\s+press\b|\bdeadlift\b|\bthrust\b/, score: 0.7 },
+  { pattern: /\bbench\b|\bpress\b|\brow\b|\bpull[\s-]?up\b|\bpush[\s-]?up\b|\bpulldown\b/, score: 0.7 },
+  { pattern: /\bextension\b|\bcurl\b|\bfly\b|\braise\b/, score: 0.4 },
+];
+const GENERIC_REPLACEMENT_PENALTY_RULES = [
+  { pattern: /\batlas\b|\bstone\b|\byoke\b|\bkeg\b|\bsandbag\b/, score: -1.3 },
+  { pattern: /\bbound\b|\bpogo\b|\bwindmill\b|\bclean\b|\bsnatch\b|\bjerk\b/, score: -1.0 },
 ];
 
 export const SYSTEM_PROMPT = [
@@ -254,6 +265,44 @@ function normalizeContextStatePayload(contextConfig, requestContext) {
   };
 }
 
+function normalizeGoalText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function buildGoalPolicyMessage(memorySummary) {
+  const goals = Array.isArray(memorySummary?.goals) ? memorySummary.goals : [];
+  if (!goals.length) return null;
+
+  const goalCorpus = goals
+    .map((goal) =>
+      [goal?.type, goal?.value, goal?.notes].map((entry) => normalizeGoalText(entry)).join(" ")
+    )
+    .join(" ");
+  if (!goalCorpus.trim()) return null;
+
+  const progressiveOverloadRequested =
+    /\bprogressive overload\b|\bstrength\b|\bincrease weight\b|\badd weight\b/.test(goalCorpus);
+  const fatLossRequested =
+    /\bfat loss\b|\blose weight\b|\bweight loss\b|\bcut\b|\bconditioning\b/.test(goalCorpus);
+
+  const lines = [];
+  if (progressiveOverloadRequested) {
+    lines.push(
+      "Goal policy: progressive overload. Keep core movement patterns stable and, when history supports it, suggest a conservative progression (about +2-5% load or +1-2 reps) instead of random exercise churn."
+    );
+  }
+  if (fatLossRequested) {
+    lines.push(
+      "Goal policy: fat loss. Prefer compound movements and higher session density (for example shorter rests or supersets) while keeping exercise safety and available equipment constraints."
+    );
+  }
+  if (!lines.length) return null;
+  return lines.join(" ");
+}
+
 export function buildSystemMessages({
   contextSnapshot,
   memorySummary,
@@ -276,6 +325,13 @@ export function buildSystemMessages({
       role: "system",
       content: `Coach memory summary (JSON):\n${JSON.stringify(memorySummary)}`,
     });
+    const goalPolicyMessage = buildGoalPolicyMessage(memorySummary);
+    if (goalPolicyMessage) {
+      messages.push({
+        role: "system",
+        content: goalPolicyMessage,
+      });
+    }
   }
   if (requestContext) {
     messages.push({
@@ -1357,6 +1413,9 @@ function buildEditFailureAssistantMessage(error) {
   if (/which exact exercises should i swap in this workout\?/i.test(detail)) {
     return detail;
   }
+  if (/which exact exercise should replace .* in this workout\?/i.test(detail)) {
+    return detail;
+  }
   if (/matches multiple options|please specify the exact exercise name/i.test(detail)) {
     return `${baseMessage} ${detail}`;
   }
@@ -1488,10 +1547,149 @@ function isSimpleExerciseEditQuery(value) {
   return !/\b(?:and|then|also|plus)\b|,/.test(normalized);
 }
 
-function inferFallbackEditOpsFromUserMessage({ userMessage, chatHistory }) {
+function scoreGenericReplacementCandidate(sourceExercise, candidateExercise) {
+  let score = computeExerciseSimilarityScore(sourceExercise, candidateExercise);
+  const name = normalizeText(candidateExercise?.name ?? "");
+  GENERIC_REPLACEMENT_BONUS_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  GENERIC_REPLACEMENT_PENALTY_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  return score;
+}
+
+function resolveImplicitSwapReplacement({
+  fromExerciseName,
+  currentDraft,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
+  const exercises = Array.isArray(currentDraft?.payload?.exercises)
+    ? currentDraft.payload.exercises
+    : [];
+  if (!exercises.length) {
+    return { valid: false, fromExerciseId: null, toExerciseId: null, error: "Current workout draft has no exercises to edit." };
+  }
+
+  const draftOptions = exercises
+    .map((entry) => ({
+      exerciseId: toPositiveInt(entry?.exerciseId),
+      name: toDraftExerciseName(entry, exerciseCatalogById),
+    }))
+    .filter((entry) => entry.exerciseId != null && entry.name);
+  const resolvedFrom = resolveExerciseIdByName({
+    query: fromExerciseName,
+    options: draftOptions,
+  });
+  if (!resolvedFrom.valid) {
+    return {
+      valid: false,
+      fromExerciseId: null,
+      toExerciseId: null,
+      error: resolvedFrom.error,
+    };
+  }
+  const fromExerciseId = resolvedFrom.exerciseId;
+  const sourceExercise = exerciseCatalogById.get(fromExerciseId);
+  if (!sourceExercise) {
+    return {
+      valid: false,
+      fromExerciseId,
+      toExerciseId: null,
+      error: `Could not find a replacement pool for "${fromExerciseName}".`,
+    };
+  }
+
+  const existingDraftIds = new Set(
+    exercises.map((entry) => toPositiveInt(entry?.exerciseId)).filter((id) => id != null)
+  );
+  const optionPool = buildExerciseOptionPool({ exerciseCandidates, exerciseCatalogById });
+  const ranked = optionPool
+    .map((entry) => {
+      const candidateId = toPositiveInt(entry?.exerciseId);
+      if (candidateId == null || candidateId === fromExerciseId) return null;
+      if (existingDraftIds.has(candidateId)) return null;
+      const candidateExercise = exerciseCatalogById.get(candidateId) ?? entry;
+      return {
+        exerciseId: candidateId,
+        score: scoreGenericReplacementCandidate(sourceExercise, candidateExercise),
+        name: String(candidateExercise?.name ?? "").trim(),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(a.name ?? "").localeCompare(String(b.name ?? ""));
+    });
+
+  const top = ranked[0];
+  if (!top || top.score < 0.8) {
+    return {
+      valid: false,
+      fromExerciseId,
+      toExerciseId: null,
+      error: `Which exact exercise should replace "${fromExerciseName}" in this workout?`,
+    };
+  }
+
+  return {
+    valid: true,
+    fromExerciseId,
+    toExerciseId: top.exerciseId,
+    error: null,
+  };
+}
+
+function inferFallbackEditOpsFromUserMessage({
+  userMessage,
+  chatHistory,
+  currentDraft,
+  exerciseCandidates,
+  exerciseCatalogById,
+}) {
   const text = String(userMessage ?? "").trim();
   if (!text) {
     return { attempted: false, ops: [], error: null, reason: "NONE" };
+  }
+
+  const removeAndReplaceMatch = text.match(SIMPLE_REMOVE_AND_REPLACE_REGEX);
+  if (removeAndReplaceMatch) {
+    const fromExerciseName = normalizeExerciseEditQuery(removeAndReplaceMatch[1]);
+    if (!fromExerciseName || !isSimpleExerciseEditQuery(fromExerciseName)) {
+      return {
+        attempted: true,
+        ops: [],
+        error: "Which exact exercise should I replace in this workout?",
+        reason: "DETERMINISTIC_EDIT_FALLBACK_CLARIFY",
+      };
+    }
+    const resolvedReplacement = resolveImplicitSwapReplacement({
+      fromExerciseName,
+      currentDraft,
+      exerciseCandidates,
+      exerciseCatalogById,
+    });
+    if (!resolvedReplacement.valid) {
+      return {
+        attempted: true,
+        ops: [],
+        error: resolvedReplacement.error,
+        reason: "DETERMINISTIC_EDIT_FALLBACK_CLARIFY",
+      };
+    }
+    return {
+      attempted: true,
+      ops: [
+        {
+          op: "swap_exercise",
+          fromExerciseId: resolvedReplacement.fromExerciseId,
+          toExerciseId: resolvedReplacement.toExerciseId,
+        },
+      ],
+      error: null,
+      reason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+    };
   }
 
   const addMatch = text.match(SIMPLE_ADD_EDIT_REGEX);
@@ -2691,6 +2889,9 @@ export async function runCoachTurn({
         const inferredFallback = inferFallbackEditOpsFromUserMessage({
           userMessage,
           chatHistory,
+          currentDraft,
+          exerciseCandidates,
+          exerciseCatalogById,
         });
         if (inferredFallback.attempted) {
           fallbackAttempted = true;

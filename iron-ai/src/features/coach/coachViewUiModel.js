@@ -240,6 +240,8 @@ const TEMPLATE_INTENT_REGEX =
   /\b(make|create|save|turn)\b[\w\s]*\btemplate\b|\btemplate\b[\w\s]*\b(save|create|make)\b/i;
 const START_WORKOUT_INTENT_REGEX =
   /\b(start|begin|launch|run)\b[\w\s]*\b(workout|session)\b|\badd\b[\w\s]*\btoday\b/i;
+const EXPLICIT_NEW_WORKOUT_REQUEST_REGEX =
+  /\b(?:make|create|build)\b[\w\s]{0,30}\b(?:workout|routine|session|plan)\b|\b(?:new|another|different)\s+(?:workout|routine|session|plan)\b/i;
 const WORKOUT_ADJUST_INTENT_REGEX =
   /\b(make it|adjust|more|less|add|remove|replace|swap|change|include|exclude|without|shorter|longer|sets?|reps?|exercise(?:s)?|quads?|hamstrings?|glutes?|legs?|chest|back|shoulders?|triceps?|biceps?)\b/i;
 
@@ -263,6 +265,7 @@ export function shouldForceWorkoutResponseMode({ userMessage, hasVisibleWorkoutD
   const text = String(userMessage ?? "").trim();
   if (!text) return false;
   if (isTemplateIntentText(text) || isStartWorkoutIntentText(text)) return false;
+  if (EXPLICIT_NEW_WORKOUT_REQUEST_REGEX.test(text)) return false;
   return WORKOUT_ADJUST_INTENT_REGEX.test(text);
 }
 
