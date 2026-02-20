@@ -39,6 +39,35 @@ const PUSH_INTENT_TARGET_TOKENS = [
   "tricep",
   "triceps",
 ];
+const LEG_INTENT_TARGET_TOKENS = [
+  "leg",
+  "legs",
+  "quad",
+  "quads",
+  "hamstring",
+  "hamstrings",
+  "glute",
+  "glutes",
+  "calf",
+  "calves",
+  "adductor",
+  "abductor",
+];
+const LEG_GENERIC_BONUS_RULES = [
+  { pattern: /\bsquat\b/, score: 8 },
+  { pattern: /\blunge\b/, score: 7 },
+  { pattern: /\bleg\s+press\b/, score: 6 },
+  { pattern: /\bsplit\s+squat\b|\bbulgarian\b/, score: 6 },
+  { pattern: /\bdeadlift\b|\bromanian\b|\brdl\b/, score: 5 },
+  { pattern: /\bstep\s*up\b/, score: 5 },
+  { pattern: /\bhip\s+thrust\b|\bglute\s+bridge\b/, score: 5 },
+  { pattern: /\bleg\s+curl\b|\bleg\s+extension\b|\bcalf\s+raise\b/, score: 4 },
+];
+const LEG_GENERIC_PENALTY_RULES = [
+  { pattern: /\batlas\b|\bstone\b|\byoke\b|\bkeg\b|\bsandbag\b/, score: -10 },
+  { pattern: /\bbound\b|\bpogo\b|\bdrag\b/, score: -8 },
+  { pattern: /\bclean\b|\bsnatch\b|\bjerk\b|\bwindmill\b/, score: -3 },
+];
 const PUSH_REQUIRED_CATEGORIES = [
   {
     key: "chest_press",
@@ -151,7 +180,15 @@ function matchesPushCategory(searchSpaces, category) {
 function resolveWorkoutIntent(userMessage) {
   const text = String(userMessage ?? "");
   if (!WORKOUT_REQUEST_REGEX.test(text)) return null;
+  if (
+    /\bleg\b|\blegs\b|\bquad\b|\bquads\b|\bhamstring\b|\bhamstrings\b|\bglute\b|\bglutes\b|\bcalf\b|\bcalves\b/i.test(
+      text
+    )
+  ) {
+    return "legs";
+  }
   if (/\bpush\b/i.test(text)) return "push";
+  if (/\bpull\b/i.test(text)) return "pull";
   return null;
 }
 
@@ -233,6 +270,44 @@ function ensurePushCoverage(ranked, maxCandidates) {
   }
 
   return selected;
+}
+
+function scoreLegPriority(entry) {
+  const searchSpaces = entry?.searchSpaces;
+  const exercise = entry?.exercise;
+  if (!searchSpaces || !exercise) return Number.NEGATIVE_INFINITY;
+  let score = metadataFirstMatch(searchSpaces, LEG_INTENT_TARGET_TOKENS) ? 2 : 0;
+  const name = normalizeSearchText(exercise?.name ?? "");
+  LEG_GENERIC_BONUS_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  LEG_GENERIC_PENALTY_RULES.forEach((rule) => {
+    if (rule.pattern.test(name)) score += rule.score;
+  });
+  return score;
+}
+
+function rankLegCandidates(ranked, maxCandidates) {
+  const list = Array.isArray(ranked) ? ranked : [];
+  if (!list.length) return [];
+
+  const legOnly = list.filter((entry) =>
+    metadataFirstMatch(entry.searchSpaces, LEG_INTENT_TARGET_TOKENS)
+  );
+  const basePool = legOnly.length ? legOnly : list;
+
+  return [...basePool]
+    .map((entry, index) => ({
+      ...entry,
+      legPriority: scoreLegPriority(entry),
+      index,
+    }))
+    .sort((a, b) => {
+      if (b.legPriority !== a.legPriority) return b.legPriority - a.legPriority;
+      if (b.score !== a.score) return b.score - a.score;
+      return a.index - b.index;
+    })
+    .slice(0, maxCandidates);
 }
 
 function buildEquipmentPayload(availableEquipment) {
@@ -501,7 +576,9 @@ export async function getCoachExerciseCandidates({
   const ranked =
     workoutIntent === "push"
       ? ensurePushCoverage(rankedPool, safeMax)
-      : rankedPool.slice(0, safeMax);
+      : workoutIntent === "legs"
+        ? rankLegCandidates(rankedPool, safeMax)
+        : rankedPool.slice(0, safeMax);
 
   return ranked
     .map(({ exercise }) => ({

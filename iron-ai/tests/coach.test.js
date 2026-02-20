@@ -279,6 +279,160 @@ describe.sequential("coach platform", () => {
     expect(candidateNames.some((name) => /single leg push-off/i.test(name))).toBe(false);
   });
 
+  it("prioritizes common leg workout candidates over oddball alphabetical leg entries", async () => {
+    await db.table("exercises").clear();
+    const now = Date.now();
+    await db.table("exercises").bulkAdd([
+      {
+        name: "Alternate Leg Diagonal Bound",
+        slug: "alternate-leg-diagonal-bound-test",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["quads"],
+        secondaryMuscles: ["glutes"],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "alternate-leg-diagonal-bound-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Atlas Stones",
+        slug: "atlas-stones-test",
+        default_sets: 3,
+        default_reps: 6,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["hamstrings"],
+        secondaryMuscles: ["glutes"],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "atlas-stones-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Backward Drag",
+        slug: "backward-drag-test",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["quads"],
+        secondaryMuscles: [],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "backward-drag-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Barbell Squat",
+        slug: "barbell-squat-test",
+        default_sets: 3,
+        default_reps: 8,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["quads"],
+        secondaryMuscles: ["glutes", "hamstrings"],
+        equipment: ["barbell"],
+        requiredEquipmentIds: ["barbell"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "barbell-squat-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Walking Lunge",
+        slug: "walking-lunge-test",
+        default_sets: 3,
+        default_reps: 10,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["quads", "glutes"],
+        secondaryMuscles: ["hamstrings"],
+        equipment: ["bodyweight"],
+        requiredEquipmentIds: ["bodyweight"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "walking-lunge-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Romanian Deadlift",
+        slug: "romanian-deadlift-test",
+        default_sets: 3,
+        default_reps: 8,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: ["rdl"],
+        primaryMuscles: ["hamstrings", "glutes"],
+        secondaryMuscles: ["lower back"],
+        equipment: ["barbell"],
+        requiredEquipmentIds: ["barbell"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "romanian-deadlift-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        name: "Leg Press",
+        slug: "leg-press-test",
+        default_sets: 3,
+        default_reps: 12,
+        muscle_group: "legs",
+        is_custom: false,
+        status: "extended",
+        aliases: [],
+        primaryMuscles: ["quads"],
+        secondaryMuscles: ["glutes"],
+        equipment: ["leg_press_machine"],
+        requiredEquipmentIds: ["leg_press_machine"],
+        optionalEquipmentIds: [],
+        source: "test",
+        stableId: "leg-press-test",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+
+    const candidates = await getCoachExerciseCandidates({
+      userMessage: "make a legs workout",
+      maxCandidates: 5,
+    });
+    const candidateNames = candidates.map((entry) => String(entry?.name ?? ""));
+
+    expect(candidateNames[0]).toBe("Barbell Squat");
+    expect(candidateNames.slice(0, 3)).toEqual(
+      expect.arrayContaining(["Walking Lunge", "Leg Press"])
+    );
+    expect(candidateNames.slice(0, 3)).not.toEqual(
+      expect.arrayContaining(["Alternate Leg Diagonal Bound", "Atlas Stones"])
+    );
+  });
+
   it("normalizes gym names for matching", () => {
     expect(normalizeGymName("Condo")).toBe(normalizeGymName(" condo  "));
   });

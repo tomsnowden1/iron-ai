@@ -129,6 +129,31 @@ describe("coach orchestrator", () => {
     expect(candidateMessage?.content).toContain('"exerciseId":1');
   });
 
+  it("adds explicit goal-policy instructions when memory goals are present", () => {
+    const messages = buildSystemMessages({
+      contextSnapshot: null,
+      memorySummary: {
+        goals: [
+          { type: "primary", value: "progressive overload", notes: "" },
+          { type: "secondary", value: "fat loss", notes: "cutting phase" },
+        ],
+        preferences: {},
+      },
+      requestContext: BASE_REQUEST_CONTEXT,
+      contextState: {
+        contextEnabled: true,
+        selectedGym: { id: 1, name: "Condo" },
+        equipmentSummary: "dumbbell",
+      },
+      exerciseCandidates: [{ exerciseId: 1, name: "Goblet Squat" }],
+    });
+    const goalPolicyMessage = messages.find((entry) =>
+      String(entry?.content ?? "").startsWith("Goal policy:")
+    );
+    expect(goalPolicyMessage?.content).toContain("progressive overload");
+    expect(goalPolicyMessage?.content).toContain("fat loss");
+  });
+
   it("skips workout repair pass and uses deterministic fallback when workout output is invalid", async () => {
     mocks.streamChatCompletion.mockResolvedValue({
       content: `\`\`\`json
@@ -781,6 +806,121 @@ describe("coach orchestrator", () => {
       applied: true,
       applyReason: "APPLIED",
     });
+  });
+
+  it("applies deterministic swap for remove-and-add-something-else phrasing", async () => {
+    mocks.getCoachExerciseCandidates.mockResolvedValue([
+      { exerciseId: 201, name: "Bench Dips", primaryMuscles: ["triceps"] },
+      { exerciseId: 202, name: "Barbell Shoulder Press", primaryMuscles: ["shoulders"] },
+      { exerciseId: 204, name: "Triceps Pushdown", primaryMuscles: ["triceps"] },
+      { exerciseId: 205, name: "Atlas Stones", primaryMuscles: ["full body"] },
+    ]);
+    mocks.getAllExercises.mockResolvedValue([
+      {
+        id: 201,
+        name: "Bench Dips",
+        primaryMuscles: ["triceps"],
+        muscle_group: "triceps",
+        category: "strength",
+        pattern: "compound",
+        default_sets: 3,
+        default_reps: 10,
+      },
+      {
+        id: 202,
+        name: "Barbell Shoulder Press",
+        primaryMuscles: ["shoulders"],
+        muscle_group: "shoulders",
+        category: "strength",
+        pattern: "compound",
+        default_sets: 3,
+        default_reps: 8,
+      },
+      {
+        id: 204,
+        name: "Triceps Pushdown",
+        primaryMuscles: ["triceps"],
+        muscle_group: "triceps",
+        category: "strength",
+        pattern: "isolation",
+        default_sets: 3,
+        default_reps: 12,
+      },
+      {
+        id: 205,
+        name: "Atlas Stones",
+        primaryMuscles: ["full body"],
+        muscle_group: "full body",
+        category: "strongman",
+        pattern: "compound",
+        default_sets: 3,
+        default_reps: 6,
+      },
+    ]);
+    mocks.streamChatCompletion.mockResolvedValue({
+      content: "Updated your workout.",
+      toolCalls: [],
+    });
+
+    const currentDraft = {
+      kind: "create_workout",
+      confidence: 0.9,
+      risk: "low",
+      title: "Push Workout",
+      summary: "Current draft",
+      payload: {
+        name: "Push Workout",
+        exercises: [
+          {
+            exerciseId: 201,
+            name: "Bench Dips",
+            sets: [{ reps: 10 }, { reps: 10 }, { reps: 10 }],
+          },
+          {
+            exerciseId: 202,
+            name: "Barbell Shoulder Press",
+            sets: [{ reps: 8 }, { reps: 8 }, { reps: 8 }],
+          },
+        ],
+      },
+    };
+
+    const result = await runCoachTurn({
+      apiKey: "test-key",
+      chatHistory: [],
+      userMessage: "take out the dips and add something else",
+      responseMode: "workout",
+      draftEditConfig: {
+        currentDraft,
+      },
+      contextConfig: {
+        enabled: true,
+        scopes: { spaces: true },
+        activeGymId: 1,
+        contextState: {
+          contextEnabled: true,
+          selectedGym: { id: 1, name: "Condo" },
+          equipmentSummary: "cable,barbell",
+        },
+      },
+      memoryEnabled: false,
+      memorySummary: null,
+    });
+
+    const updatedExercises = result.actionDraft?.payload?.exercises ?? [];
+    expect(updatedExercises).toHaveLength(2);
+    expect(updatedExercises[0]?.exerciseId).toBe(204);
+    expect(updatedExercises[0]?.sets).toEqual(currentDraft.payload.exercises[0].sets);
+    expect(updatedExercises[1]).toEqual(currentDraft.payload.exercises[1]);
+    expect(result.debug?.stamp).toMatchObject({
+      requestType: "edit",
+      fallbackUsed: true,
+      fallbackReason: "DETERMINISTIC_EDIT_FALLBACK_OPS",
+      fallbackOpsCount: 1,
+      applied: true,
+      applyReason: "APPLIED",
+    });
+    expect(result.debug?.editResolution?.status).toBe("applied");
   });
 
   it("asks for clarification and keeps the draft unchanged for ambiguous take-out names", async () => {
